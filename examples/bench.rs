@@ -3,7 +3,7 @@
 //
 // Benchmark: CPU naive matmul vs Vulkan compute shader matmul.
 
-use candle_vulkan::VulkanDevice;
+use candle_vulkan::GpuDevice;
 use rand::Rng;
 use std::time::Instant;
 
@@ -21,7 +21,7 @@ fn cpu_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
     out
 }
 
-fn bench_size(dev: &VulkanDevice, size: usize) {
+fn bench_size(dev: &GpuDevice, size: usize) {
     let m = size;
     let n = size;
     let k = size;
@@ -82,7 +82,7 @@ fn main() {
     println!("candle-vulkan benchmark");
     println!("=======================\n");
 
-    let dev = VulkanDevice::new().expect("no Vulkan GPU available");
+    let dev = GpuDevice::gpu().expect("no GPU available");
     println!(
         "device: {} ({})\n",
         dev.adapter_name, dev.backend

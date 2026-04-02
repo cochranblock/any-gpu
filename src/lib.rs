@@ -6,4 +6,4 @@
 mod device;
 mod ops;
 
-pub use device::{GpuBuffer, VulkanDevice};
+pub use device::{GpuBuffer, GpuDevice};

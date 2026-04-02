@@ -1,7 +1,7 @@
 // Unlicense — cochranblock.org
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 
-use crate::device::{GpuBuffer, VulkanDevice};
+use crate::device::{GpuBuffer, GpuDevice};
 use anyhow::{ensure, Result};
 
 // --- WGSL Shaders (embedded) ---
@@ -62,7 +62,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-impl VulkanDevice {
+impl GpuDevice {
     /// Element-wise add: out[i] = a[i] + b[i]
     pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> Result<GpuBuffer> {
         ensure!(a.len == b.len, "add: buffer length mismatch ({} vs {})", a.len, b.len);
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_add() {
-        let dev = VulkanDevice::new().expect("need a Vulkan GPU");
+        let dev = GpuDevice::gpu().expect("need a GPU");
         let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);
         let b = dev.upload(&[10.0, 20.0, 30.0, 40.0]);
         let c = dev.add(&a, &b).unwrap();
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_mul() {
-        let dev = VulkanDevice::new().expect("need a Vulkan GPU");
+        let dev = GpuDevice::gpu().expect("need a GPU");
         let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);
         let b = dev.upload(&[10.0, 20.0, 30.0, 40.0]);
         let c = dev.mul(&a, &b).unwrap();
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_matmul_2x2() {
-        let dev = VulkanDevice::new().expect("need a Vulkan GPU");
+        let dev = GpuDevice::gpu().expect("need a GPU");
         // [1 2] x [5 6] = [19 22]
         // [3 4]   [7 8]   [43 50]
         let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);

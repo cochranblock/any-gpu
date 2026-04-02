@@ -4,8 +4,9 @@
 use anyhow::{Context, Result};
 use wgpu::util::DeviceExt;
 
-/// GPU device handle. Holds wgpu device + queue for compute dispatch.
-pub struct VulkanDevice {
+/// GPU device handle. wgpu picks the right backend — Vulkan, Metal, DX12.
+/// One codepath, every vendor.
+pub struct GpuDevice {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub adapter_name: String,
@@ -19,15 +20,14 @@ pub struct GpuBuffer {
     pub len: usize,
 }
 
-impl VulkanDevice {
-    /// Discover the best Vulkan-capable GPU and initialize it.
-    /// Prefers discrete GPUs over integrated.
-    pub fn new() -> Result<Self> {
+impl GpuDevice {
+    /// Discover the best GPU and initialize it. wgpu auto-selects the backend:
+    /// Vulkan on Linux (AMD/NVIDIA/Intel), Metal on macOS, DX12 on Windows.
+    pub fn gpu() -> Result<Self> {
         pollster::block_on(Self::init_async())
     }
 
     async fn init_async() -> Result<Self> {
-        // Prefer Vulkan, fall back to any available backend (Metal on macOS, DX12 on Windows)
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -35,7 +35,7 @@ impl VulkanDevice {
 
         let adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all());
         if adapters.is_empty() {
-            anyhow::bail!("no Vulkan-capable GPU found");
+            anyhow::bail!("no GPU found");
         }
 
         // Print discovered GPUs
