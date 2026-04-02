@@ -1,0 +1,28 @@
+# Unlicense — cochranblock.org
+# Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+
+[package]
+name = "candle-vulkan"
+version = "0.1.0"
+edition = "2024"
+description = "Vulkan compute backend for candle tensor ops via wgpu. GPU-agnostic ML training — AMD, NVIDIA, Intel. No CUDA lock-in."
+license = "Unlicense"
+repository = "https://github.com/cochranblock/candle-vulkan"
+keywords = ["vulkan", "wgpu", "candle", "amd", "gpu-compute"]
+categories = ["science", "graphics"]
+
+[dependencies]
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+anyhow = "1"
+pollster = "0.4"
+
+[dev-dependencies]
+rand = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
