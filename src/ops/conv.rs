@@ -17,22 +17,63 @@ struct MatmulDims {
     _pad: u32,
 }
 
+// Tiled matmul: 16x16 tiles in workgroup shared memory.
+// Each tile of A and B is loaded from global memory once per tile iteration,
+// not once per output element. Reduces global memory reads by ~16x.
 const SHADER_MATMUL: &str = "
+const TILE: u32 = 16u;
 struct Dims { m: u32, n: u32, k: u32, _pad: u32, }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
+
+var<workgroup> tile_a: array<f32, 256>;  // TILE * TILE
+var<workgroup> tile_b: array<f32, 256>;
+
 @compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
     let row = gid.x;
     let col = gid.y;
-    if row >= dims.m || col >= dims.n { return; }
+    let lr = lid.x;
+    let lc = lid.y;
+
     var sum: f32 = 0.0;
-    for (var i: u32 = 0u; i < dims.k; i = i + 1u) {
-        sum = sum + a[row * dims.k + i] * b[i * dims.n + col];
+    let num_tiles = (dims.k + TILE - 1u) / TILE;
+
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        // Load tile of A: row from global row, col from tile offset
+        let a_col = t * TILE + lc;
+        if row < dims.m && a_col < dims.k {
+            tile_a[lr * TILE + lc] = a[row * dims.k + a_col];
+        } else {
+            tile_a[lr * TILE + lc] = 0.0;
+        }
+
+        // Load tile of B: row from tile offset, col from global col
+        let b_row = t * TILE + lr;
+        if b_row < dims.k && col < dims.n {
+            tile_b[lr * TILE + lc] = b[b_row * dims.n + col];
+        } else {
+            tile_b[lr * TILE + lc] = 0.0;
+        }
+
+        workgroupBarrier();
+
+        // Accumulate dot product from shared memory
+        for (var i: u32 = 0u; i < TILE; i++) {
+            sum += tile_a[lr * TILE + i] * tile_b[i * TILE + lc];
+        }
+
+        workgroupBarrier();
     }
-    out[row * dims.n + col] = sum;
+
+    if row < dims.m && col < dims.n {
+        out[row * dims.n + col] = sum;
+    }
 }
 ";
 
@@ -48,25 +89,61 @@ struct BatchMatmulDims {
 }
 
 const SHADER_BATCH_MATMUL: &str = "
+const TILE: u32 = 16u;
 struct Dims { batch: u32, m: u32, n: u32, k: u32, }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
+
+var<workgroup> tile_a: array<f32, 256>;
+var<workgroup> tile_b: array<f32, 256>;
+
 @compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
     let row = gid.x;
     let col = gid.y;
     let bat = gid.z;
-    if row >= dims.m || col >= dims.n || bat >= dims.batch { return; }
+    if bat >= dims.batch { return; }
+    let lr = lid.x;
+    let lc = lid.y;
     let a_off = bat * dims.m * dims.k;
     let b_off = bat * dims.k * dims.n;
     let o_off = bat * dims.m * dims.n;
+
     var sum: f32 = 0.0;
-    for (var i: u32 = 0u; i < dims.k; i = i + 1u) {
-        sum = sum + a[a_off + row * dims.k + i] * b[b_off + i * dims.n + col];
+    let num_tiles = (dims.k + TILE - 1u) / TILE;
+
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let a_col = t * TILE + lc;
+        if row < dims.m && a_col < dims.k {
+            tile_a[lr * TILE + lc] = a[a_off + row * dims.k + a_col];
+        } else {
+            tile_a[lr * TILE + lc] = 0.0;
+        }
+
+        let b_row = t * TILE + lr;
+        if b_row < dims.k && col < dims.n {
+            tile_b[lr * TILE + lc] = b[b_off + b_row * dims.n + col];
+        } else {
+            tile_b[lr * TILE + lc] = 0.0;
+        }
+
+        workgroupBarrier();
+
+        for (var i: u32 = 0u; i < TILE; i++) {
+            sum += tile_a[lr * TILE + i] * tile_b[i * TILE + lc];
+        }
+
+        workgroupBarrier();
     }
-    out[o_off + row * dims.n + col] = sum;
+
+    if row < dims.m && col < dims.n {
+        out[o_off + row * dims.n + col] = sum;
+    }
 }
 ";
 
