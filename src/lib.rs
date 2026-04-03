@@ -1,5 +1,5 @@
-//! any-gpu — Bare metal tensor engine. Any GPU, zero vendor lock-in.
-//! AMD, NVIDIA, Intel, Apple. wgpu under the hood.
+//! any-gpu — Tensor engine for every GPU. AMD, NVIDIA, Intel, Apple.
+//! One codebase, zero vendor lock-in. wgpu under the hood.
 // Unlicense — cochranblock.org
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 
