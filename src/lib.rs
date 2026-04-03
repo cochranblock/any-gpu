@@ -8,6 +8,7 @@ mod ops;
 mod tensor;
 pub mod autograd;
 pub mod nanosign;
+pub mod optim;
 
 pub use device::{GpuBuffer, GpuDevice};
 pub use tensor::Tensor;
