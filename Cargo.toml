@@ -19,6 +19,12 @@ pollster = "0.4"
 
 [dev-dependencies]
 rand = "0.8"
+candle-core = { version = "0.10", optional = true }
+
+[features]
+default = []
+cuda = ["candle-core/cuda"]
+metal = ["candle-core/metal"]
 
 [workspace]
 
