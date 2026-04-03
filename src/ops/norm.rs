@@ -261,4 +261,20 @@ mod tests {
         ).unwrap()).unwrap();
         assert_approx(&result, &[0.0; 8], 1e-3);
     }
+
+    #[test]
+    fn test_group_norm_channels_not_divisible() {
+        let data = vec![1.0; 5]; // 5 channels, groups=2 -> not divisible
+        let gamma = vec![1.0; 5];
+        let beta = vec![0.0; 5];
+        assert!(dev().group_norm(&dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta), 1, 5, 1, 2, 1e-5).is_err());
+    }
+
+    #[test]
+    fn test_group_norm_input_size_mismatch() {
+        let data = vec![1.0; 10]; // 10 elements but batch*channels*spatial = 1*4*4 = 16
+        let gamma = vec![1.0; 4];
+        let beta = vec![0.0; 4];
+        assert!(dev().group_norm(&dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta), 1, 4, 4, 2, 1e-5).is_err());
+    }
 }

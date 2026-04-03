@@ -302,10 +302,37 @@ mod tests {
 
     #[test]
     fn test_mse_loss_known_value() {
-        // pred=[0,0,0], target=[1,2,3] -> MSE = (1+4+9)/3 = 14/3 ≈ 4.6667
         let pred = dev().upload(&[0.0, 0.0, 0.0]);
         let target = dev().upload(&[1.0, 2.0, 3.0]);
         let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
         assert_approx(&result, &[14.0 / 3.0], 1e-5);
+    }
+
+    #[test]
+    fn test_softmax_size_mismatch() {
+        let input = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
+        assert!(dev().softmax(&input, 2, 3).is_err()); // expects 6
+    }
+
+    #[test]
+    fn test_mse_loss_length_mismatch() {
+        let pred = dev().upload(&[1.0, 2.0]);
+        let target = dev().upload(&[1.0, 2.0, 3.0]);
+        assert!(dev().mse_loss(&pred, &target).is_err());
+    }
+
+    #[test]
+    fn test_mse_loss_single_element() {
+        let result = dev().read(&dev().mse_loss(&dev().upload(&[5.0]), &dev().upload(&[3.0])).unwrap()).unwrap();
+        assert_approx(&result, &[4.0], 1e-5); // (5-3)^2 / 1 = 4
+    }
+
+    #[test]
+    fn test_mse_loss_negative_values() {
+        let pred = dev().upload(&[-1.0, -2.0]);
+        let target = dev().upload(&[1.0, 2.0]);
+        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
+        // ((-1-1)^2 + (-2-2)^2) / 2 = (4 + 16) / 2 = 10
+        assert_approx(&result, &[10.0], 1e-5);
     }
 }

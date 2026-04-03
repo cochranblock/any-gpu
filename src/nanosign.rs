@@ -200,4 +200,54 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn test_sign_bytes_deterministic() {
+        let data = b"same data twice";
+        let s1 = sign_bytes(data);
+        let s2 = sign_bytes(data);
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_verify_exactly_36_bytes() {
+        // 36 bytes that happen to start with NSIG but aren't a valid signature
+        let mut data = vec![0u8; 36];
+        data[0..4].copy_from_slice(b"NSIG");
+        // The "hash" is 32 zero bytes, which won't match blake3::hash(b"")
+        match verify_bytes(&data) {
+            NanoSignResult::Failed { .. } => {} // correct: magic present, hash wrong
+            NanoSignResult::Verified(_) => panic!("should not verify with wrong hash"),
+            NanoSignResult::Unsigned => panic!("should detect NSIG magic"),
+        }
+    }
+
+    #[test]
+    fn test_strip_bytes_no_false_positive() {
+        // Data that contains "NSIG" but not at the right position
+        let mut data = vec![0u8; 100];
+        data[10..14].copy_from_slice(b"NSIG"); // NSIG in the middle, not at -36
+        let stripped = strip_bytes(&data);
+        assert_eq!(stripped.len(), 100); // should not strip
+    }
+
+    #[test]
+    fn test_sign_and_strip_roundtrip() {
+        let payload = b"round trip test data";
+        let signed = sign_bytes(payload);
+        let stripped = strip_bytes(&signed);
+        assert_eq!(stripped, payload);
+    }
+
+    #[test]
+    fn test_load_verified_unsigned_warning() {
+        // Unsigned file should load successfully (with warning to stderr)
+        let dir = std::env::temp_dir().join("nanosign_test_unsigned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("unsigned.bin");
+        std::fs::write(&path, b"no signature").unwrap();
+        let data = load_verified(&path).unwrap();
+        assert_eq!(data, b"no signature");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

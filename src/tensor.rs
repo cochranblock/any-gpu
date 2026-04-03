@@ -165,4 +165,73 @@ mod tests {
         assert_eq!(t.shape(), &[1]);
         assert_eq!(t.to_vec(dev()).unwrap(), vec![42.0]);
     }
+
+    #[test]
+    fn test_tensor_from_buf() {
+        let buf = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let t = Tensor::from_buf(buf, &[2, 3]).unwrap();
+        assert_eq!(t.shape(), &[2, 3]);
+        assert_eq!(t.numel(), 6);
+        assert_eq!(t.to_vec(dev()).unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_tensor_from_buf_mismatch() {
+        let buf = dev().upload(&[1.0; 10]);
+        assert!(Tensor::from_buf(buf, &[3, 4]).is_err());
+    }
+
+    #[test]
+    fn test_tensor_buffer_access() {
+        let t = Tensor::new(dev(), &[7.0, 8.0], &[2]).unwrap();
+        let buf = t.buffer();
+        assert_eq!(buf.len, 2);
+        assert_eq!(dev().read(buf).unwrap(), vec![7.0, 8.0]);
+    }
+
+    #[test]
+    fn test_tensor_dim_all() {
+        let t = Tensor::new(dev(), &[0.0; 120], &[2, 3, 4, 5]).unwrap();
+        assert_eq!(t.dim(0), 2);
+        assert_eq!(t.dim(1), 3);
+        assert_eq!(t.dim(2), 4);
+        assert_eq!(t.dim(3), 5);
+    }
+
+    #[test]
+    fn test_tensor_6d_max() {
+        let t = Tensor::new(dev(), &[0.0; 1], &[1, 1, 1, 1, 1, 1]).unwrap();
+        assert_eq!(t.ndim(), 6);
+        assert_eq!(t.shape(), &[1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_tensor_7d_exceeds_max() {
+        assert!(Tensor::new(dev(), &[0.0; 1], &[1, 1, 1, 1, 1, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn test_tensor_reshape_flatten_unflatten() {
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let t = Tensor::new(dev(), &data, &[2, 3, 4]).unwrap();
+        let flat = t.reshape(&[24]).unwrap();
+        assert_eq!(flat.shape(), &[24]);
+        let back = flat.reshape(&[2, 3, 4]).unwrap();
+        assert_eq!(back.shape(), &[2, 3, 4]);
+        assert_eq!(back.to_vec(dev()).unwrap(), data);
+    }
+
+    #[test]
+    fn test_tensor_reshape_7d_exceeds() {
+        let t = Tensor::new(dev(), &[0.0; 1], &[1]).unwrap();
+        assert!(t.reshape(&[1, 1, 1, 1, 1, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn test_tensor_zeros_odd_dim() {
+        let t = Tensor::zeros(dev(), &[7, 13]).unwrap();
+        assert_eq!(t.numel(), 91);
+        let data = t.to_vec(dev()).unwrap();
+        assert!(data.iter().all(|&v| v == 0.0));
+    }
 }

@@ -209,4 +209,54 @@ mod tests {
         // With zero grad, only weight decay: param *= (1 - lr * wd) = 10 * (1 - 0.001) = 9.99
         assert_approx(&result, &[9.99], 1e-3);
     }
+
+    #[test]
+    fn test_adamw_params_grads_length_mismatch() {
+        let mut p1 = dev().upload(&[1.0]);
+        let mut p2 = dev().upload(&[2.0]);
+        let g1 = dev().upload(&[0.1]);
+        let mut opt = AdamW::new(0.01);
+        // 2 params, 1 grad -> error
+        assert!(opt.step(dev(), &mut [p1, p2], &[g1]).is_err());
+    }
+
+    #[test]
+    fn test_adamw_param_grad_size_mismatch() {
+        let mut param = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
+        let grad = dev().upload(&[0.1, 0.2]); // 2 elements
+        let mut opt = AdamW::new(0.01);
+        assert!(opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).is_err());
+    }
+
+    #[test]
+    fn test_adamw_negative_gradient() {
+        let mut param = dev().upload(&[5.0]);
+        let grad = dev().upload(&[-1.0]); // negative grad -> param increases
+        let mut opt = AdamW::new(0.01);
+        opt.weight_decay = 0.0;
+        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
+        let result = dev().read(&param).unwrap();
+        assert!(result[0] > 5.0, "negative grad should increase param, got {}", result[0]);
+    }
+
+    #[test]
+    fn test_adamw_lr_zero() {
+        let mut param = dev().upload(&[10.0]);
+        let grad = dev().upload(&[100.0]);
+        let mut opt = AdamW::new(0.0); // lr=0
+        opt.weight_decay = 0.0;
+        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
+        let result = dev().read(&param).unwrap();
+        assert_approx(&result, &[10.0], 1e-5); // no update
+    }
+
+    #[test]
+    fn test_adamw_defaults() {
+        let opt = AdamW::new(0.001);
+        assert_eq!(opt.lr, 0.001);
+        assert_eq!(opt.beta1, 0.9);
+        assert_eq!(opt.beta2, 0.999);
+        assert_eq!(opt.eps, 1e-8);
+        assert_eq!(opt.weight_decay, 0.01);
+    }
 }

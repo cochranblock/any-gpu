@@ -148,3 +148,68 @@ impl GpuDevice {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+
+    #[test]
+    fn test_gpu_init() {
+        let d = dev();
+        assert!(!d.adapter_name.is_empty(), "adapter_name should be populated");
+        assert!(!d.backend.is_empty(), "backend should be populated");
+    }
+
+    #[test]
+    fn test_upload_read_roundtrip() {
+        let data = vec![1.0f32, 2.5, -3.7, 0.0, f32::MIN_POSITIVE, 999.999];
+        let buf = dev().upload(&data);
+        assert_eq!(buf.len, data.len());
+        let result = dev().read(&buf).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_upload_odd_length() {
+        // 13 elements — not aligned to any power of 2
+        let data: Vec<f32> = (0..13).map(|i| i as f32 * 0.1).collect();
+        let buf = dev().upload(&data);
+        assert_eq!(buf.len, 13);
+        let result = dev().read(&buf).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_upload_single_element() {
+        let buf = dev().upload(&[42.0]);
+        assert_eq!(dev().read(&buf).unwrap(), vec![42.0]);
+    }
+
+    #[test]
+    fn test_alloc_size() {
+        let buf = dev().alloc(100);
+        assert_eq!(buf.len, 100);
+        assert_eq!(buf.size, 400); // 100 * 4 bytes
+    }
+
+    #[test]
+    fn test_alloc_buffers_independent() {
+        // Two allocations should not share data
+        let a = dev().upload(&[1.0, 2.0, 3.0]);
+        let b = dev().upload(&[10.0, 20.0, 30.0]);
+        assert_eq!(dev().read(&a).unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(dev().read(&b).unwrap(), vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn test_read_preserves_precision() {
+        let data: Vec<f32> = (0..100).map(|i| (i as f32) * 0.001 + 0.0001).collect();
+        let buf = dev().upload(&data);
+        let result = dev().read(&buf).unwrap();
+        for (i, (g, e)) in result.iter().zip(data.iter()).enumerate() {
+            assert!((g - e).abs() < 1e-7, "index {i}: got {g}, expected {e}");
+        }
+    }
+}
