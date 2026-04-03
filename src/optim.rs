@@ -108,20 +108,9 @@ impl AdamW {
                 beta2_t,
             };
 
-            // AdamW needs read_write on param, m, v. Use raw dispatch.
+            // AdamW needs read_write on param, m, v. Use raw dispatch with cached pipeline.
             let params_buf = dev.upload_uniform(&p);
-            let shader = dev.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("adamw"),
-                source: wgpu::ShaderSource::Wgsl(SHADER_ADAMW.into()),
-            });
-            let pipeline = dev.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("adamw"),
-                layout: None,
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let pipeline = dev.pipeline(SHADER_ADAMW, Some("adamw"));
             let bind_group = dev.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),
