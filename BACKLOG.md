@@ -11,7 +11,7 @@
 | ~~4~~ | ~~[feature]~~ | ~~Backward shaders~~ — shipped relu_backward, sigmoid_backward, swish_backward, tanh_backward (4 new WGSL kernels). Remaining: softmax, group_norm, conv2d. | partial |
 | 5 | [feature] | Backward for conv2d/conv_transpose2d — weight gradient conv, input gradient via transpose conv | Autograd tape (#3) |
 | ~~6~~ | ~~[feature]~~ | ~~AdamW optimizer~~ — shipped. Single WGSL shader, bias correction, weight decay. In-place param update. 3 tests. | done |
-| 7 | [feature] | Training loop: forward + backward + optimizer step as a single function call | AdamW (#6) |
+| ~~7~~ | ~~[feature]~~ | ~~Training loop~~ — shipped. train_step() = forward + backward + optimizer. Linear regression test trains y=2x+1 from scratch. | done |
 | 8 | [feature] | Pipeline caching — cache compiled shader pipelines per (shader_src, bind_group_layout) to eliminate per-dispatch compilation | — |
 | 9 | [build] | Stratagems CLI with clap: `any-gpu train <stratagem>`, `any-gpu bench`, `any-gpu info` | Training loop (#7) |
 | 10 | [feature] | Starter nanobyte: ~1M param diffusion model for 32x32 pixel art, trained on bt's 5700 XT | Training loop (#7), pixel-forge sprite data |
