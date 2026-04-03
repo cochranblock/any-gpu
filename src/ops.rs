@@ -188,36 +188,37 @@ impl GpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+
+    // Single shared device — RADV/RDNA1 segfaults on concurrent adapter requests.
+    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
 
     #[test]
     fn test_add() {
-        let dev = GpuDevice::gpu().expect("need a GPU");
-        let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev.upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = dev.add(&a, &b).unwrap();
-        let result = dev.read(&c).unwrap();
+        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = DEV.upload(&[10.0, 20.0, 30.0, 40.0]);
+        let c = DEV.add(&a, &b).unwrap();
+        let result = DEV.read(&c).unwrap();
         assert_eq!(result, vec![11.0, 22.0, 33.0, 44.0]);
     }
 
     #[test]
     fn test_mul() {
-        let dev = GpuDevice::gpu().expect("need a GPU");
-        let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev.upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = dev.mul(&a, &b).unwrap();
-        let result = dev.read(&c).unwrap();
+        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = DEV.upload(&[10.0, 20.0, 30.0, 40.0]);
+        let c = DEV.mul(&a, &b).unwrap();
+        let result = DEV.read(&c).unwrap();
         assert_eq!(result, vec![10.0, 40.0, 90.0, 160.0]);
     }
 
     #[test]
     fn test_matmul_2x2() {
-        let dev = GpuDevice::gpu().expect("need a GPU");
         // [1 2] x [5 6] = [19 22]
         // [3 4]   [7 8]   [43 50]
-        let a = dev.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev.upload(&[5.0, 6.0, 7.0, 8.0]);
-        let c = dev.matmul(&a, &b, 2, 2, 2).unwrap();
-        let result = dev.read(&c).unwrap();
+        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = DEV.upload(&[5.0, 6.0, 7.0, 8.0]);
+        let c = DEV.matmul(&a, &b, 2, 2, 2).unwrap();
+        let result = DEV.read(&c).unwrap();
         assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
     }
 }
