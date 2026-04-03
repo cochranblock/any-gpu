@@ -1,8 +1,20 @@
 # any-gpu
 
-Bare metal tensor engine. Runs on any GPU — AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in.
+Tensor engine that runs on every GPU. AMD, NVIDIA, Intel, Apple. One codebase, one shader language, zero vendor lock-in.
 
-wgpu under the hood. Vulkan on Linux, Metal on macOS, DX12 on Windows. You write WGSL compute shaders once, they run everywhere.
+wgpu picks the backend — Vulkan on Linux, Metal on macOS, DX12 on Windows. You write WGSL compute shaders once. They run everywhere.
+
+## Why this exists
+
+CUDA only runs on NVIDIA. Metal only runs on Apple. If you have an AMD RX 5700 XT or an Intel Arc, your options for GPU-accelerated ML in Rust are: nothing. any-gpu fills that gap.
+
+If you have an NVIDIA GPU and want peak performance, use CUDA. If you're on macOS and want peak performance, use Metal Performance Shaders. They're faster — we measured it, the numbers are below, and we're not hiding them.
+
+Use any-gpu when:
+- Your GPU is AMD or Intel (where CUDA can't run)
+- You need one binary that works on every machine
+- You refuse to vendor-lock your compute pipeline
+- You're building for a heterogeneous fleet (NVIDIA in the cloud, AMD on workstations, Apple on laptops)
 
 ## Current state (Sprint 1)
 
@@ -11,8 +23,6 @@ Three tensor ops as WGSL compute shaders:
 - **matmul** — naive matrix multiply (16x16 workgroups)
 - **add** — element-wise addition
 - **mul** — element-wise multiplication
-
-Device discovery picks the best GPU automatically. Upload f32 data, dispatch compute, read results back.
 
 ```rust
 use any_gpu::GpuDevice;
@@ -34,27 +44,27 @@ All results from `cargo test --release` on 2026-04-02.
 | GPU | Vendor | VRAM | Driver | OS | Tests | Matmul 512x512 (ms) |
 |-----|--------|------|--------|----|-------|----------------------|
 | AMD Radeon RX 5700 XT | AMD (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 3/3 pass | 5.67 |
-| NVIDIA GeForce RTX 3070 Laptop | NVIDIA | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 3.15 |
-| NVIDIA GeForce RTX 3050 Ti Laptop | NVIDIA | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 4.92 |
-| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 3/3 pass | 4.91 |
+| NVIDIA GeForce RTX 3070 Laptop | NVIDIA | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 3.03 |
+| NVIDIA GeForce RTX 3050 Ti Laptop | NVIDIA | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 5.61 |
+| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 3/3 pass | 3.36 |
 
 ### Known issues
 
-- **AMD RADV/RDNA1**: concurrent `wgpu::Instance` creation segfaults. Fixed by sharing a single `GpuDevice` via `LazyLock` (e124fbb). Individual ops work fine.
-- **Intel Iris Xe on gd**: wgpu selects NVIDIA 3050 Ti (Vulkan) over Intel iGPU. Intel backend untested in isolation.
+- **AMD RADV/RDNA1**: concurrent `wgpu::Instance` creation segfaults. Fixed by sharing a single `GpuDevice` via `LazyLock`. Individual ops work fine.
+- **Intel Iris Xe**: untested in isolation (wgpu prefers discrete NVIDIA when both are present).
 
 ## Benchmarks
 
-Matmul performance across all tested GPUs. Single run, includes pipeline creation overhead on first call. GPU numbers are compute-only (data already on device).
+Matmul performance across all tested GPUs. GPU numbers are compute-only (data already on device).
 
-### 512x512 matmul — the money shot
+### 512x512 matmul
 
 | GPU | CPU (ms) | GPU compute (ms) | GPU GFLOPS | Speedup |
 |-----|----------|-------------------|------------|---------|
 | AMD RX 5700 XT (Vulkan) | 180.74 | 5.67 | 47.35 | **31.9x** |
-| NVIDIA RTX 3070 Laptop (Vulkan) | 103.97 | 3.15 | 85.12 | **33.0x** |
-| NVIDIA RTX 3050 Ti Laptop (Vulkan) | 106.81 | 4.92 | 54.58 | **21.7x** |
-| Apple M4 (Metal) | 87.61 | 4.91 | 54.71 | **17.9x** |
+| NVIDIA RTX 3070 Laptop (Vulkan) | 103.97 | 3.03 | 88.59 | **34.3x** |
+| NVIDIA RTX 3050 Ti Laptop (Vulkan) | 97.28 | 5.61 | 47.81 | **17.3x** |
+| Apple M4 (Metal via wgpu) | 87.32 | 3.36 | 79.88 | **26.0x** |
 
 ### Full matrix — all sizes, all GPUs
 
@@ -72,100 +82,118 @@ Matmul performance across all tested GPUs. Single run, includes pipeline creatio
 
 | Size | CPU (ms) | GPU total (ms) | GPU compute (ms) | CPU GFLOPS | GPU GFLOPS | Speedup |
 |------|----------|-----------------|-------------------|------------|------------|---------|
-| 64x64 | 0.15 | 29.25 | 1.99 | 3.45 | 0.26 | 0.1x |
-| 128x128 | 1.14 | 1.59 | 1.48 | 3.67 | 2.83 | 0.8x |
-| 256x256 | 8.84 | 1.97 | 1.74 | 3.80 | 19.27 | 5.1x |
-| 512x512 | 103.97 | 4.49 | 3.15 | 2.58 | 85.12 | 33.0x |
-| 1024x1024 | 2133.27 | 19.59 | 14.52 | 1.01 | 147.95 | **147.0x** |
+| 64x64 | 0.15 | 22.98 | 2.01 | 3.55 | 0.26 | 0.1x |
+| 128x128 | 1.16 | 1.70 | 1.57 | 3.61 | 2.68 | 0.7x |
+| 256x256 | 8.80 | 1.61 | 1.72 | 3.81 | 19.52 | 5.1x |
+| 512x512 | 107.35 | 4.47 | 3.03 | 2.50 | 88.59 | 35.4x |
+| 1024x1024 | 2142.91 | 19.69 | 14.25 | 1.00 | 150.71 | **150.4x** |
 
 #### NVIDIA GeForce RTX 3050 Ti Laptop (Vulkan)
 
 | Size | CPU (ms) | GPU total (ms) | GPU compute (ms) | CPU GFLOPS | GPU GFLOPS | Speedup |
 |------|----------|-----------------|-------------------|------------|------------|---------|
-| 64x64 | 0.14 | 29.70 | 1.76 | 3.64 | 0.30 | 0.1x |
-| 128x128 | 1.07 | 1.50 | 1.40 | 3.92 | 2.99 | 0.8x |
-| 256x256 | 8.32 | 9.77 | 1.82 | 4.03 | 18.43 | 4.6x |
-| 512x512 | 106.81 | 5.53 | 4.92 | 2.51 | 54.58 | 21.7x |
-| 1024x1024 | 2076.37 | 33.61 | 32.79 | 1.03 | 65.50 | **63.3x** |
+| 64x64 | 0.16 | 23.21 | 1.87 | 3.28 | 0.28 | 0.1x |
+| 128x128 | 1.05 | 1.35 | 1.50 | 3.98 | 2.79 | 0.7x |
+| 256x256 | 8.28 | 1.34 | 1.37 | 4.05 | 24.53 | 6.1x |
+| 512x512 | 97.28 | 5.92 | 5.61 | 2.76 | 47.81 | 17.3x |
+| 1024x1024 | 2071.17 | 32.67 | 34.20 | 1.04 | 62.79 | **60.6x** |
 
-#### Apple M4 (Metal)
+#### Apple M4 (Metal via wgpu)
 
 | Size | CPU (ms) | GPU total (ms) | GPU compute (ms) | CPU GFLOPS | GPU GFLOPS | Speedup |
 |------|----------|-----------------|-------------------|------------|------------|---------|
-| 64x64 | 0.11 | 4.11 | 2.23 | 4.76 | 0.23 | 0.0x |
-| 128x128 | 2.28 | 2.16 | 2.00 | 1.84 | 2.10 | 1.1x |
-| 256x256 | 19.92 | 2.12 | 1.85 | 1.68 | 18.14 | 10.8x |
-| 512x512 | 87.61 | 5.43 | 4.91 | 3.06 | 54.71 | 17.9x |
-| 1024x1024 | 769.38 | 24.37 | 15.88 | 2.79 | 135.22 | **48.4x** |
+| 64x64 | 0.11 | 4.53 | 2.02 | 4.62 | 0.26 | 0.1x |
+| 128x128 | 1.97 | 2.04 | 2.12 | 2.13 | 1.98 | 0.9x |
+| 256x256 | 17.35 | 2.18 | 1.95 | 1.93 | 17.20 | 8.9x |
+| 512x512 | 87.32 | 3.79 | 3.36 | 3.07 | 79.88 | 26.0x |
+| 1024x1024 | 773.88 | 23.01 | 17.55 | 2.77 | 122.37 | **44.1x** |
 
-### any-gpu vs candle — CUDA and Metal comparison
+### Honest comparison: any-gpu vs CUDA and Metal
 
-Same hardware, same matmul sizes, head to head. candle (v0.10.2) uses cuBLAS on CUDA and Metal Performance Shaders on macOS. any-gpu uses a naive WGSL compute shader via wgpu. This is an unfair fight by design — it shows exactly how much performance is left on the table before tiling.
+We benchmarked candle (v0.10.2) with cuBLAS on CUDA and Metal Performance Shaders on the same hardware. CUDA and MPS are faster. Here are the numbers.
 
 #### NVIDIA RTX 3070 Laptop — Vulkan vs CUDA
 
-| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | Ratio | CUDA wins by |
-|------|---------------------|-------------------|-------|--------------|
-| 128x128 | 1.57 | 0.07 | 22.4x | cuBLAS dominates small sizes |
-| 256x256 | 1.72 | 0.20 | 8.6x | |
-| 512x512 | 3.03 | 0.75 | 4.0x | Gap narrows at scale |
-| 1024x1024 | 14.25 | 2.80 | 5.1x | |
+| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | CUDA faster by |
+|------|---------------------|-------------------|----------------|
+| 128x128 | 1.57 | 0.07 | 22x |
+| 256x256 | 1.72 | 0.20 | 9x |
+| 512x512 | 3.03 | 0.75 | 4x |
+| 1024x1024 | 14.25 | 2.80 | 5x |
 
 #### NVIDIA RTX 3050 Ti Laptop — Vulkan vs CUDA
 
-| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | Ratio | CUDA wins by |
-|------|---------------------|-------------------|-------|--------------|
-| 128x128 | 1.50 | 0.03 | 50.0x | cuBLAS startup cost amortized |
-| 256x256 | 1.37 | 0.07 | 19.6x | |
-| 512x512 | 5.61 | 0.33 | 17.0x | |
-| 1024x1024 | 34.20 | 1.43 | 23.9x | |
+| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | CUDA faster by |
+|------|---------------------|-------------------|----------------|
+| 128x128 | 1.50 | 0.03 | 50x |
+| 256x256 | 1.37 | 0.07 | 20x |
+| 512x512 | 5.61 | 0.33 | 17x |
+| 1024x1024 | 34.20 | 1.43 | 24x |
 
-#### Apple M4 — any-gpu Metal (wgpu) vs candle Metal (MPS)
+#### Apple M4 — wgpu Metal vs candle MPS
 
-| Size | any-gpu Metal (ms) | candle Metal (ms) | Ratio | MPS wins by |
-|------|---------------------|-------------------|-------|-------------|
-| 128x128 | 2.12 | 0.36 | 5.9x | |
-| 256x256 | 1.95 | 0.31 | 6.3x | |
-| 512x512 | 3.36 | 0.47 | 7.1x | |
-| 1024x1024 | 17.55 | 1.94 | 9.0x | |
+| Size | any-gpu Metal (ms) | candle MPS (ms) | MPS faster by |
+|------|---------------------|-----------------|---------------|
+| 128x128 | 2.12 | 0.36 | 6x |
+| 256x256 | 1.95 | 0.31 | 6x |
+| 512x512 | 3.36 | 0.47 | 7x |
+| 1024x1024 | 17.55 | 1.94 | 9x |
 
-#### What this means
+#### What to make of this
 
-**CUDA wins everywhere, by a lot.** cuBLAS and MPS use tiled matmul with shared memory, register blocking, and vendor-tuned kernels. any-gpu uses a naive triple-loop WGSL shader with zero tiling.
+CUDA and MPS are faster because cuBLAS and Metal Performance Shaders use tiled matmul with shared memory, register blocking, and vendor-tuned kernels. any-gpu uses a naive triple-loop WGSL shader.
 
-The gap is smallest on the RTX 3070 at 512x512 (4x) and largest on the 3050 Ti at small sizes (50x). This is expected — cuBLAS amortizes kernel launch cost better and its tiled kernels are tuned per-architecture.
+**That's not the point.** The point is:
 
-**But that's the point.** any-gpu runs the same shader on AMD, NVIDIA, Intel, and Apple with zero vendor code. candle needs separate CUDA kernels, Metal shaders, and CPU fallbacks. The any-gpu path from here:
+- The AMD RX 5700 XT has zero CUDA support and zero MPS support. any-gpu is the only option that gives it GPU compute for ML in Rust.
+- Intel Arc and Iris Xe — same story.
+- One `cargo build` produces a binary that runs on all four GPUs above. No feature flags, no conditional compilation, no vendor SDKs.
 
-1. **Tiled matmul** with workgroup shared memory — expected 5-10x improvement
+The performance gap closes with better shaders, not more backends:
+
+1. **Tiled matmul** with workgroup shared memory — expected 5-10x gain
 2. **Subgroup operations** for warp-level reduction
-3. **Pipeline caching** to eliminate per-dispatch compilation
+3. **Pipeline caching** to eliminate per-dispatch compilation cost
 
-At 4x behind CUDA on RTX 3070 with a naive shader, tiling alone should close most of the gap. The 3050 Ti numbers suggest dispatch overhead is also significant — pipeline caching will help there.
+The RTX 3070 is 4x behind CUDA at 512x512. Tiling alone should close most of that. The goal isn't to beat cuBLAS — it's to be fast enough that vendor lock-in isn't worth it.
 
 ### Notes
 
-- CPU is single-threaded naive matmul (triple nested loop). Not BLAS. The point is to show GPU dispatch overhead vs compute wins.
+- CPU is single-threaded naive matmul (triple nested loop). Not BLAS.
 - "GPU total" includes upload + compute + readback. "GPU compute" is dispatch + readback with data already resident.
-- First GPU call in each process pays pipeline compilation cost (~1-30ms depending on driver).
-- Naive WGSL shader, no tiling, no shared memory. Real performance will be 5-10x better with tiled matmul.
-- RTX 3070 hits 148 GFLOPS at 1024x1024 — that's ~1.5% of its theoretical peak (20 TFLOPS). Tiling will close this gap.
-- candle CUDA numbers use cuBLAS (averaged over 20-100 iterations with 3 warmup runs). any-gpu numbers are single-run compute-only.
-- Max numerical error across all GPUs: 0.000021 (f32 accumulation, expected).
+- First GPU call pays pipeline compilation cost (~1-30ms depending on driver).
+- candle CUDA numbers use cuBLAS (averaged over 20-100 iterations with warmup). any-gpu numbers are single-run.
+- Max numerical error across all GPUs: 0.000023 (f32 accumulation, expected).
 
-## What this will become
+## Roadmap
 
-A full tensor framework for ML training. The roadmap:
+### Sprint 2: Tiled matmul + Tensor type
 
-- **Tensor type** with shape tracking and autograd
+- **Tiled matmul** with workgroup shared memory — the single biggest perf win, expected 5-10x
+- **Tensor type** with shape tracking, strides, and views
 - **Full op set** — sub, div, exp, log, sqrt, relu, sigmoid, tanh, softmax, conv2d, transpose, reduce_sum/mean, layer_norm, batch_norm, embedding, cross_entropy, mse
+
+### Sprint 3: Autograd + Training
+
 - **Autograd** — reverse-mode autodiff, backward pass, gradient accumulation
 - **Optimizer** — SGD, Adam
-- **Layer types** — Linear, Conv2d, LayerNorm, BatchNorm
 - **Training loop** as a function call, not a framework
-- **Tiled matmul** with shared memory for real performance
 
-Target: replace CUDA dependency entirely. Train models on any GPU from any vendor.
+### Vision: The Rosetta Stone that learns your hardware
+
+any-gpu is a Rosetta Stone for bare metal GPU compute. One API, every vendor. But the real innovation is a self-optimizing routing layer:
+
+1. **Auto-benchmark on first run.** any-gpu discovers every GPU on the system and runs microbenchmarks per op type (matmul, conv2d, add, etc.) at various sizes. Not synthetic — real shader dispatch, real memory transfer, real numbers.
+
+2. **Bake a subatomic routing model.** The benchmark results get compressed into a nanobyte memory map — a tiny `.weights` file that captures the exact performance profile of YOUR specific hardware. Same architecture as kova's pyramid models. any-gpu dogfoods the subatomic model concept.
+
+3. **Route ops by measured performance.** When you run a tensor op, the routing model picks the fastest GPU for that specific op at that specific size. Not by vendor name or spec sheet — by what was actually measured. A 512x512 matmul might go to the discrete GPU while a 64x64 add stays on the integrated one because transfer overhead kills the speedup.
+
+4. **Hot-swap on hardware changes.** New GPU installed, driver updated, new node joins the fleet — any-gpu detects the change, re-benchmarks, retrains the routing model, and patches the memory map. Like a firmware update. No manual tuning.
+
+5. **Multi-GPU dispatch.** On machines with multiple GPUs (integrated + discrete, or multi-card), the routing model splits work across devices. The 5700 XT handles the bulk matmul while the iGPU handles the small elementwise ops in parallel.
+
+The routing model is the moat. Every other GPU framework hardcodes vendor assumptions. any-gpu measures reality.
 
 ## Build
 

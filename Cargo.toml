@@ -5,7 +5,7 @@
 name = "any-gpu"
 version = "0.1.0"
 edition = "2024"
-description = "Bare metal tensor engine. Runs on any GPU — AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in. wgpu under the hood."
+description = "Tensor engine for every GPU. AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in. wgpu under the hood."
 license = "Unlicense"
 repository = "https://github.com/cochranblock/any-gpu"
 keywords = ["gpu", "wgpu", "tensor", "ml", "compute"]
@@ -28,6 +28,11 @@ rand = "0.8"
 default = []
 cuda = ["candle-core/cuda"]
 metal = ["candle-core/metal"]
+candle-bench = ["candle-core"]
+
+[[example]]
+name = "candle_bench"
+required-features = ["candle-core"]
 
 [workspace]
 
