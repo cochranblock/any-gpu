@@ -5,5 +5,6 @@
 
 mod device;
 mod ops;
+pub mod nanosign;
 
 pub use device::{GpuBuffer, GpuDevice};
