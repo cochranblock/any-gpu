@@ -16,13 +16,21 @@ Use any-gpu when:
 - You refuse to vendor-lock your compute pipeline
 - You're building for a heterogeneous fleet (NVIDIA in the cloud, AMD on workstations, Apple on laptops)
 
-## Current state (Sprint 1)
+## Current state
 
-Three tensor ops as WGSL compute shaders:
+19 GPU ops as WGSL compute shaders. 54 tests, all cross-validated against CPU reference implementations. Verified on 4 GPUs across 3 nodes.
 
-- **matmul** — naive matrix multiply (16x16 workgroups)
-- **add** — element-wise addition
-- **mul** — element-wise multiplication
+| Category | Ops |
+|----------|-----|
+| Elementwise | add, sub, mul, scale, relu, sigmoid, swish/silu, tanh |
+| Convolution | conv2d, conv_transpose2d, batch_matmul, matmul |
+| Normalization | group_norm (two-pass) |
+| Tensor manipulation | concat, transpose |
+| Attention | softmax (two-pass), scaled_dot_product_attention |
+| Spatial | upsample_nearest2d |
+| Loss | mse_loss |
+
+All shaders use uniform params (no `arrayLength()` — crashes RADV). All ops handle >65535 workgroups via 2D dispatch.
 
 ```rust
 use any_gpu::GpuDevice;
@@ -197,35 +205,13 @@ Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gp
 
 ## Architecture
 
-Two layers. The tensor API is the product. The GPU backend is plumbing.
+Currently: `GpuDevice` struct wraps wgpu directly. Public methods for each op (matmul, conv2d, relu, etc.). Upload data, dispatch WGSL compute shaders, read results back. No abstraction layers.
 
-**Layer 1: Tensor API** — backend-agnostic transforms. `Tensor::matmul`, `Tensor::conv2d`, `Tensor::relu`. User code never touches GPU backends. Write once, runs anywhere.
+Planned (not yet shipped):
 
-**Layer 2: Backend router** — a `match` statement, not a framework. Compile-time feature flags pick the backend: `features = ["metal"]` on Mac, `features = ["cuda"]` on NVIDIA, Vulkan is the default/universal fallback. The router adds <100ns overhead vs calling the backend directly. Every abstraction pays rent or gets evicted.
+**Layer 1: Tensor API** — backend-agnostic `Tensor` type with shape tracking. `Tensor::matmul`, `Tensor::conv2d`, `Tensor::relu`. User code never touches GPU backends.
 
-```rust
-let device = Device::auto();        // picks fastest available backend
-let t = Tensor::new(data, &device); // user never knows if it's CUDA, Metal, or Vulkan
-let out = t.conv2d(&weight, stride, padding)?;
-```
-
-Vulkan is the Rosetta Stone — it makes AMD and Intel GPUs possible. CUDA is faster on NVIDIA. Metal is faster on Apple. The router picks the winner. The user gets the fastest path without caring which one.
-
-## Ops (Sprint 2 — shipped)
-
-54 tests, all passing on AMD RX 5700 XT (Vulkan) and Apple M4 (Metal). Every op cross-validated against a CPU reference.
-
-| Category | Ops |
-|----------|-----|
-| Elementwise | add, sub, mul, scale, relu, sigmoid, swish/silu, tanh |
-| Convolution | conv2d, conv_transpose2d, batch_matmul, matmul |
-| Normalization | group_norm (two-pass) |
-| Tensor manipulation | concat, transpose |
-| Attention | softmax (two-pass), scaled_dot_product_attention |
-| Spatial | upsample_nearest2d |
-| Loss | mse_loss |
-
-All shaders use uniform params (no `arrayLength()` — crashes RADV). All ops handle >65535 workgroups via 2D dispatch.
+**Layer 2: Backend router** — compile-time feature flags pick the fastest backend per platform. `features = ["metal"]` on Mac, `features = ["cuda"]` on NVIDIA, Vulkan as universal fallback. One `match` statement, not a framework.
 
 ## Roadmap
 
