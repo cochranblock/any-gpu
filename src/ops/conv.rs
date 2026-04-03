@@ -301,6 +301,116 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// --- Conv2d gradient shaders ---
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Conv2dGradParams {
+    batch: u32,
+    in_c: u32,
+    out_c: u32,
+    in_h: u32,
+    in_w: u32,
+    out_h: u32,
+    out_w: u32,
+    kh: u32,
+    kw: u32,
+    stride_h: u32,
+    stride_w: u32,
+    pad_h: u32,
+    pad_w: u32,
+    dilation_h: u32,
+    dilation_w: u32,
+    groups: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Conv2dGradBiasParams {
+    batch: u32,
+    out_c: u32,
+    out_h: u32,
+    out_w: u32,
+}
+
+// grad_weight[oc, ic_local, kh, kw] = sum_{n,oh,ow} grad_out[n,oc,oh,ow] * input[n, g*group_in+ic_local, oh*sh+kh*dh-ph, ow*sw+kw*dw-pw]
+const SHADER_CONV2D_GRAD_WEIGHT: &str = "
+struct P {
+    batch: u32, in_c: u32, out_c: u32, in_h: u32,
+    in_w: u32, out_h: u32, out_w: u32, kh: u32,
+    kw: u32, stride_h: u32, stride_w: u32, pad_h: u32,
+    pad_w: u32, dilation_h: u32, dilation_w: u32, groups: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(3) var<storage, read_write> grad_w: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let group_in = p.in_c / p.groups;
+    let group_out = p.out_c / p.groups;
+    let total = p.out_c * group_in * p.kh * p.kw;
+    if idx >= total { return; }
+
+    let kw_i = idx % p.kw;
+    let kh_i = (idx / p.kw) % p.kh;
+    let ic = (idx / (p.kw * p.kh)) % group_in;
+    let oc = idx / (p.kw * p.kh * group_in);
+
+    let g = oc / group_out;
+
+    var sum: f32 = 0.0;
+    for (var n: u32 = 0u; n < p.batch; n++) {
+        for (var oh: u32 = 0u; oh < p.out_h; oh++) {
+            for (var ow: u32 = 0u; ow < p.out_w; ow++) {
+                let ih = oh * p.stride_h + kh_i * p.dilation_h;
+                let iw = ow * p.stride_w + kw_i * p.dilation_w;
+                if ih >= p.pad_h && iw >= p.pad_w {
+                    let ih2 = ih - p.pad_h;
+                    let iw2 = iw - p.pad_w;
+                    if ih2 < p.in_h && iw2 < p.in_w {
+                        let in_idx = n * (p.in_c * p.in_h * p.in_w)
+                                   + (g * group_in + ic) * (p.in_h * p.in_w)
+                                   + ih2 * p.in_w + iw2;
+                        let go_idx = n * (p.out_c * p.out_h * p.out_w)
+                                   + oc * (p.out_h * p.out_w)
+                                   + oh * p.out_w + ow;
+                        sum += grad_out[go_idx] * input[in_idx];
+                    }
+                }
+            }
+        }
+    }
+    grad_w[idx] = sum;
+}
+";
+
+// grad_bias[oc] = sum_{n,oh,ow} grad_out[n,oc,oh,ow]
+const SHADER_CONV2D_GRAD_BIAS: &str = "
+struct P { batch: u32, out_c: u32, out_h: u32, out_w: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read_write> grad_bias: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let oc = gid.x + gid.y * 65535u * 256u;
+    if oc >= p.out_c { return; }
+    var sum: f32 = 0.0;
+    for (var n: u32 = 0u; n < p.batch; n++) {
+        for (var oh: u32 = 0u; oh < p.out_h; oh++) {
+            for (var ow: u32 = 0u; ow < p.out_w; ow++) {
+                let idx = n * (p.out_c * p.out_h * p.out_w)
+                        + oc * (p.out_h * p.out_w)
+                        + oh * p.out_w + ow;
+                sum += grad_out[idx];
+            }
+        }
+    }
+    grad_bias[oc] = sum;
+}
+";
+
 impl GpuDevice {
     /// Matrix multiply: A(m,k) x B(k,n) = C(m,n). Row-major layout.
     pub fn matmul(&self, a: &GpuBuffer, b: &GpuBuffer, m: u32, n: u32, k: u32) -> Result<GpuBuffer> {
@@ -413,6 +523,42 @@ impl GpuDevice {
             SHADER_CONV_TRANSPOSE2D, Some("conv_transpose2d"),
             &params, &[input, weight, bias_buf], &out,
             super::dispatch_1d(total),
+        );
+        Ok(out)
+    }
+    pub(crate) fn conv2d_grad_weight(
+        &self, input: &GpuBuffer, grad_out: &GpuBuffer,
+        batch: u32, in_c: u32, in_h: u32, in_w: u32,
+        out_c: u32, out_h: u32, out_w: u32, kh: u32, kw: u32,
+        stride_h: u32, stride_w: u32, pad_h: u32, pad_w: u32,
+        dil_h: u32, dil_w: u32, groups: u32,
+    ) -> Result<GpuBuffer> {
+        let group_in = in_c / groups;
+        let total = out_c * group_in * kh * kw;
+        let out = self.alloc(total as usize);
+        let params = Conv2dGradParams {
+            batch, in_c, out_c, in_h, in_w, out_h, out_w,
+            kh, kw, stride_h, stride_w, pad_h, pad_w,
+            dilation_h: dil_h, dilation_w: dil_w, groups,
+        };
+        self.dispatch_shader(
+            SHADER_CONV2D_GRAD_WEIGHT, Some("conv2d_grad_weight"),
+            &params, &[input, grad_out], &out,
+            super::dispatch_1d(total),
+        );
+        Ok(out)
+    }
+
+    pub(crate) fn conv2d_grad_bias(
+        &self, grad_out: &GpuBuffer,
+        batch: u32, out_c: u32, out_h: u32, out_w: u32,
+    ) -> Result<GpuBuffer> {
+        let out = self.alloc(out_c as usize);
+        let params = Conv2dGradBiasParams { batch, out_c, out_h, out_w };
+        self.dispatch_shader(
+            SHADER_CONV2D_GRAD_BIAS, Some("conv2d_grad_bias"),
+            &params, &[grad_out], &out,
+            super::dispatch_1d(out_c),
         );
         Ok(out)
     }
@@ -648,12 +794,130 @@ mod tests {
 
     #[test]
     fn test_conv_transpose2d_3x3_kernel() {
-        // 1x1x1x1 input (single pixel), 1x1x3x3 all-ones kernel, stride=1 -> 3x3 output all same value
         let input = dev().upload(&[5.0]);
         let weight = dev().upload(&[1.0; 9]);
         let result = dev().read(&dev().conv_transpose2d(&input, &weight, None,
             1, 1, 1, 1, 1, 3, 3, (1,1), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
         assert_eq!(result.len(), 9);
         assert_approx(&result, &[5.0; 9], 1e-5);
+    }
+
+    // --- Error path tests ---
+
+    #[test]
+    fn test_matmul_a_size_mismatch() {
+        let a = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
+        let b = dev().upload(&[1.0, 2.0, 3.0, 4.0]); // 4 elements
+        assert!(dev().matmul(&a, &b, 2, 2, 2).is_err()); // expects a=4 elements
+    }
+
+    #[test]
+    fn test_matmul_b_size_mismatch() {
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[1.0, 2.0, 3.0]); // expects 4
+        assert!(dev().matmul(&a, &b, 2, 2, 2).is_err());
+    }
+
+    #[test]
+    fn test_conv2d_input_size_mismatch() {
+        let input = dev().upload(&[1.0; 10]); // wrong size for 1x1x4x4=16
+        let weight = dev().upload(&[1.0; 9]);
+        assert!(dev().conv2d(&input, &weight, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    }
+
+    #[test]
+    fn test_conv2d_weight_size_mismatch() {
+        let input = dev().upload(&[1.0; 16]);
+        let weight = dev().upload(&[1.0; 5]); // wrong size for 1*1*3*3=9
+        assert!(dev().conv2d(&input, &weight, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    }
+
+    #[test]
+    fn test_conv2d_bias_size_mismatch() {
+        let input = dev().upload(&[1.0; 16]);
+        let weight = dev().upload(&[1.0; 9]);
+        let bias = dev().upload(&[1.0, 2.0]); // expects 1 (out_c=1)
+        assert!(dev().conv2d(&input, &weight, Some(&bias), 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    }
+
+    // --- CPU cross-validation for batch_matmul ---
+
+    #[test]
+    fn test_batch_matmul_vs_cpu() {
+        let batch = 3; let m = 4; let n = 3; let k = 5;
+        let a: Vec<f32> = (0..batch*m*k).map(|i| (i as f32) * 0.01 - 0.3).collect();
+        let b: Vec<f32> = (0..batch*k*n).map(|i| (i as f32) * 0.02 - 0.1).collect();
+        let mut expected = vec![0.0f32; batch * m * n];
+        for bat in 0..batch {
+            for row in 0..m {
+                for col in 0..n {
+                    let mut sum = 0.0;
+                    for i in 0..k {
+                        sum += a[bat*m*k + row*k + i] * b[bat*k*n + i*n + col];
+                    }
+                    expected[bat*m*n + row*n + col] = sum;
+                }
+            }
+        }
+        let result = dev().read(&dev().batch_matmul(
+            &dev().upload(&a), &dev().upload(&b), batch as u32, m as u32, n as u32, k as u32
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    // --- Conv2d grad weight numeric check ---
+
+    #[test]
+    fn test_conv2d_grad_weight_vs_numeric() {
+        // 1x1x4x4 input, 1x1x2x2 kernel, stride 1, pad 0
+        // out_h = out_w = 3
+        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let weight_data = vec![0.5f32, -0.5, 0.3, -0.3];
+        let eps = 1e-3f32;
+
+        // Compute analytical grad_weight
+        let input_buf = dev().upload(&input_data);
+        let weight_buf = dev().upload(&weight_data);
+        let out = dev().conv2d(&input_buf, &weight_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap();
+        // Use grad_out = all ones to make it a simple sum
+        let grad_out_data = vec![1.0f32; 9]; // 1x1x3x3
+        let grad_out_buf = dev().upload(&grad_out_data);
+        let gw = dev().conv2d_grad_weight(&input_buf, &grad_out_buf, 1, 1, 4, 4, 1, 3, 3, 2, 2, 1, 1, 0, 0, 1, 1, 1).unwrap();
+        let gw_data = dev().read(&gw).unwrap();
+
+        // Numeric gradient check
+        for i in 0..4 {
+            let mut wp = weight_data.clone();
+            let mut wm = weight_data.clone();
+            wp[i] += eps;
+            wm[i] -= eps;
+            let wp_buf = dev().upload(&wp);
+            let wm_buf = dev().upload(&wm);
+            let outp = dev().read(&dev().conv2d(&input_buf, &wp_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+            let outm = dev().read(&dev().conv2d(&input_buf, &wm_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+            // loss = sum(out) => numeric grad = (sum(outp)-sum(outm)) / (2*eps)
+            let numeric: f32 = (outp.iter().sum::<f32>() - outm.iter().sum::<f32>()) / (2.0 * eps);
+            assert!((gw_data[i] - numeric).abs() < 1e-2,
+                "grad_w[{i}]: analytical={}, numeric={}", gw_data[i], numeric);
+        }
+        let _ = out;
+    }
+
+    #[test]
+    fn test_conv2d_grad_bias_basic() {
+        // grad_out = [[1,2],[3,4]], batch=1, out_c=1, out_h=2, out_w=2
+        // grad_bias[0] should = 1+2+3+4 = 10
+        let grad_out_data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let grad_out_buf = dev().upload(&grad_out_data);
+        let gb = dev().conv2d_grad_bias(&grad_out_buf, 1, 1, 2, 2).unwrap();
+        let gb_data = dev().read(&gb).unwrap();
+        assert_approx(&gb_data, &[10.0], 1e-5);
+
+        // 2 output channels, batch=1, out_h=2, out_w=2
+        // grad_out[0] = [1,2,3,4], grad_out[1] = [5,6,7,8]
+        let grad_out2 = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let gb2 = dev().conv2d_grad_bias(&dev().upload(&grad_out2), 1, 2, 2, 2).unwrap();
+        let gb2_data = dev().read(&gb2).unwrap();
+        assert_approx(&gb2_data, &[10.0, 26.0], 1e-5);
     }
 }

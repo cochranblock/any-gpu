@@ -9,7 +9,7 @@
 | ~~2~~ | ~~[feature]~~ | ~~Tensor type~~ — shipped. 6-dim inline shape, reshape (zero-copy), zeros, from_buf. 8 tests. Autograd fields (requires_grad, grad_fn) deferred to Sprint 4. | done |
 | ~~3~~ | ~~[feature]~~ | ~~Autograd tape~~ — shipped. Flat tape, enum Op, reverse walk. backward() for add/sub/mul/scale/relu/sigmoid/swish/tanh/matmul/mse_loss. 5 tests. | done |
 | ~~4~~ | ~~[feature]~~ | ~~Backward shaders~~ — shipped relu_backward, sigmoid_backward, swish_backward, tanh_backward (4 new WGSL kernels). Remaining: softmax, group_norm, conv2d. | partial |
-| 5 | [feature] | Backward for conv2d/conv_transpose2d — weight gradient conv, input gradient via transpose conv | Autograd tape (#3) |
+| ~~5~~ | ~~[feature]~~ | ~~Backward for conv2d/conv_transpose2d~~ — shipped. grad_input via conv_transpose2d (no new shader), grad_weight via new WGSL kernel, grad_bias via reduction. Tested with numeric gradient checks. | done |
 | ~~6~~ | ~~[feature]~~ | ~~AdamW optimizer~~ — shipped. Single WGSL shader, bias correction, weight decay. In-place param update. 3 tests. | done |
 | ~~7~~ | ~~[feature]~~ | ~~Training loop~~ — shipped. train_step() = forward + backward + optimizer. Linear regression test trains y=2x+1 from scratch. | done |
 | 8 | [feature] | Pipeline caching — cache compiled shader pipelines per (shader_src, bind_group_layout) to eliminate per-dispatch compilation | — |

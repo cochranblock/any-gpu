@@ -362,4 +362,97 @@ mod tests {
         let result = dev().read(&dev().scale(&dev().upload(&[1.0, -2.0, 3.0]), -2.0).unwrap()).unwrap();
         assert_eq!(result, vec![-2.0, 4.0, -6.0]);
     }
+
+    // --- Error path tests ---
+
+    #[test]
+    fn test_add_length_mismatch() {
+        let a = dev().upload(&[1.0, 2.0]);
+        let b = dev().upload(&[1.0, 2.0, 3.0]);
+        assert!(dev().add(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_sub_length_mismatch() {
+        let a = dev().upload(&[1.0]);
+        let b = dev().upload(&[1.0, 2.0]);
+        assert!(dev().sub(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_mul_length_mismatch() {
+        let a = dev().upload(&[1.0, 2.0, 3.0]);
+        let b = dev().upload(&[1.0]);
+        assert!(dev().mul(&a, &b).is_err());
+    }
+
+    // --- CPU cross-validation for add/sub/mul ---
+
+    #[test]
+    fn test_add_vs_cpu() {
+        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3 - 15.0).collect();
+        let b: Vec<f32> = (0..100).map(|i| (i as f32) * -0.2 + 10.0).collect();
+        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+        let result = dev().read(&dev().add(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-5);
+    }
+
+    #[test]
+    fn test_sub_vs_cpu() {
+        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.7).collect();
+        let b: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3).collect();
+        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
+        let result = dev().read(&dev().sub(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-5);
+    }
+
+    #[test]
+    fn test_mul_vs_cpu() {
+        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.1 - 5.0).collect();
+        let b: Vec<f32> = (0..100).map(|i| (i as f32) * 0.05 + 0.5).collect();
+        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x * y).collect();
+        let result = dev().read(&dev().mul(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
+    }
+
+    // --- Backward shader direct tests ---
+
+    #[test]
+    fn test_relu_backward_vs_cpu() {
+        let grad = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let input = dev().upload(&[-1.0, 0.5, 0.0, -0.1, 2.0]);
+        let result = dev().read(&dev().relu_backward(&grad, &input).unwrap()).unwrap();
+        // relu_backward: grad * (input > 0)
+        assert_approx(&result, &[0.0, 2.0, 0.0, 0.0, 5.0], 1e-5);
+    }
+
+    #[test]
+    fn test_sigmoid_backward_vs_cpu() {
+        let sig_out = vec![0.5, 0.7311, 0.2689]; // sigmoid outputs
+        let grad = vec![1.0, 1.0, 1.0];
+        let expected: Vec<f32> = sig_out.iter().zip(&grad).map(|(s, g)| g * s * (1.0 - s)).collect();
+        let result = dev().read(&dev().sigmoid_backward(&dev().upload(&grad), &dev().upload(&sig_out)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_swish_backward_vs_cpu() {
+        let input = vec![0.0, 1.0, -1.0, 2.0];
+        let grad = vec![1.0, 1.0, 1.0, 1.0];
+        let expected: Vec<f32> = input.iter().map(|&x| {
+            let s = 1.0f32 / (1.0f32 + (-(x as f32)).exp());
+            s + x * s * (1.0 - s)
+        }).collect();
+        let result = dev().read(&dev().swish_backward(&dev().upload(&grad), &dev().upload(&input)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_tanh_backward_vs_cpu() {
+        let tanh_out = vec![0.0, 0.7616, -0.7616, 0.9951]; // tanh outputs
+        let grad = vec![1.0, 1.0, 1.0, 1.0];
+        let expected: Vec<f32> = tanh_out.iter().map(|&t| 1.0 - t * t).collect();
+        let result = dev().read(&dev().tanh_backward(&dev().upload(&grad), &dev().upload(&tanh_out)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
 }

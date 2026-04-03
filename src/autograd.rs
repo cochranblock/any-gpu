@@ -26,6 +26,18 @@ pub enum Op {
     Tanh { a: TensorId },
     Matmul { a: TensorId, b: TensorId, m: u32, n: u32, k: u32 },
     MseLoss { pred: TensorId, target: TensorId },
+    Conv2d {
+        input: TensorId,
+        weight: TensorId,
+        bias: Option<TensorId>,
+        batch: u32, in_c: u32, in_h: u32, in_w: u32,
+        out_c: u32, out_h: u32, out_w: u32,
+        kh: u32, kw: u32,
+        stride_h: u32, stride_w: u32,
+        pad_h: u32, pad_w: u32,
+        dil_h: u32, dil_w: u32,
+        groups: u32,
+    },
 }
 
 /// Tape entry: one recorded operation.
@@ -139,6 +151,35 @@ impl<'d> Tape<'d> {
         Ok(self.push_result(out, Op::MseLoss { pred, target }))
     }
 
+    pub fn conv2d(
+        &mut self,
+        input: TensorId,
+        weight: TensorId,
+        bias: Option<TensorId>,
+        batch: u32, in_c: u32, in_h: u32, in_w: u32,
+        out_c: u32, kh: u32, kw: u32,
+        stride: (u32, u32), padding: (u32, u32),
+        dilation: (u32, u32), groups: u32,
+    ) -> Result<TensorId> {
+        let out_h = (in_h + 2 * padding.0 - dilation.0 * (kh - 1) - 1) / stride.0 + 1;
+        let out_w = (in_w + 2 * padding.1 - dilation.1 * (kw - 1) - 1) / stride.1 + 1;
+        let out = self.dev.conv2d(
+            self.buf(input), self.buf(weight),
+            bias.map(|id| &self.bufs[id.0 as usize]).as_deref(),
+            batch, in_c, in_h, in_w, out_c, kh, kw, stride, padding, dilation, groups,
+        )?;
+        Ok(self.push_result(out, Op::Conv2d {
+            input, weight, bias,
+            batch, in_c, in_h, in_w,
+            out_c, out_h, out_w,
+            kh, kw,
+            stride_h: stride.0, stride_w: stride.1,
+            pad_h: padding.0, pad_w: padding.1,
+            dil_h: dilation.0, dil_w: dilation.1,
+            groups,
+        }))
+    }
+
     // --- Backward ---
 
     /// Accumulate gradient into a tensor's grad buffer.
@@ -249,6 +290,42 @@ impl<'d> Tape<'d> {
                     let diff = self.dev.sub(&self.bufs[pred.0 as usize], &self.bufs[target.0 as usize])?;
                     let ga = self.dev.scale(&diff, 2.0 / n)?;
                     self.accum_grad(pred, ga)?;
+                }
+
+                Op::Conv2d { input, weight, bias, batch, in_c, in_h, in_w, out_c, out_h, out_w, kh, kw, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups } => {
+                    // grad_input via conv_transpose2d
+                    let ga = self.dev.conv_transpose2d(
+                        grad_out,
+                        &self.bufs[weight.0 as usize],
+                        None,
+                        batch, out_c, out_h, out_w,
+                        in_c, kh, kw,
+                        (stride_h, stride_w),
+                        (pad_h, pad_w),
+                        (0, 0),
+                        (dil_h, dil_w),
+                        groups,
+                    )?;
+                    // grad_weight
+                    let gw = self.dev.conv2d_grad_weight(
+                        &self.bufs[input.0 as usize],
+                        grad_out,
+                        batch, in_c, in_h, in_w,
+                        out_c, out_h, out_w, kh, kw,
+                        stride_h, stride_w, pad_h, pad_w,
+                        dil_h, dil_w, groups,
+                    )?;
+                    // grad_bias
+                    let gb = if bias.is_some() {
+                        Some(self.dev.conv2d_grad_bias(grad_out, batch, out_c, out_h, out_w)?)
+                    } else {
+                        None
+                    };
+                    self.accum_grad(input, ga)?;
+                    self.accum_grad(weight, gw)?;
+                    if let (Some(bias_id), Some(gb_buf)) = (bias, gb) {
+                        self.accum_grad(bias_id, gb_buf)?;
+                    }
                 }
             }
         }
@@ -362,13 +439,228 @@ mod tests {
     fn test_backward_scale() {
         let mut tape = Tape::new(dev());
         let a = tape.leaf(&[1.0, 2.0, 3.0]);
-        let b = tape.scale(a, 3.0).unwrap(); // [3, 6, 9]
+        let b = tape.scale(a, 3.0).unwrap();
+        let target = tape.leaf(&[0.0, 0.0, 0.0]);
+        let loss = tape.mse_loss(b, target).unwrap();
+        tape.backward(loss).unwrap();
+        let ga = tape.read_grad(a).unwrap().unwrap();
+        assert_approx(&ga, &[6.0, 12.0, 18.0], 1e-3);
+    }
+
+    #[test]
+    fn test_backward_sub() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[5.0, 10.0]);
+        let b = tape.leaf(&[1.0, 2.0]);
+        let c = tape.sub(a, b).unwrap(); // [4, 8]
+        let target = tape.leaf(&[0.0, 0.0]);
+        let loss = tape.mse_loss(c, target).unwrap();
+        tape.backward(loss).unwrap();
+        // d(MSE)/d(c) = 2*[4,8]/2 = [4, 8]
+        // grad_a = [4, 8] * 1 = [4, 8], grad_b = [4, 8] * (-1) = [-4, -8]
+        let ga = tape.read_grad(a).unwrap().unwrap();
+        let gb = tape.read_grad(b).unwrap().unwrap();
+        assert_approx(&ga, &[4.0, 8.0], 1e-3);
+        assert_approx(&gb, &[-4.0, -8.0], 1e-3);
+    }
+
+    #[test]
+    fn test_backward_sigmoid() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[0.0, 1.0, -1.0]);
+        let b = tape.sigmoid(a).unwrap();
         let target = tape.leaf(&[0.0, 0.0, 0.0]);
         let loss = tape.mse_loss(b, target).unwrap();
         tape.backward(loss).unwrap();
 
-        // grad_a = d(MSE)/d(b) * d(b)/d(a) = 2*[3,6,9]/3 * 3 = 2*[3,6,9] = [6, 12, 18]
+        // sig(0)=0.5, sig(1)=0.7311, sig(-1)=0.2689
+        // d(MSE)/d(b) = 2*[0.5, 0.7311, 0.2689]/3
+        // d(sig)/d(a) = sig*(1-sig) = [0.25, 0.1966, 0.1966]
+        // grad_a = d(MSE)/d(b) * d(sig)/d(a)
+        let s = [0.5f32, 0.7311, 0.2689];
+        let expected: Vec<f32> = (0..3).map(|i| 2.0 * s[i] / 3.0 * s[i] * (1.0 - s[i])).collect();
         let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &[6.0, 12.0, 18.0], 1e-3);
+        assert_approx(&ga, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_backward_tanh() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[0.0, 1.0, -1.0]);
+        let b = tape.tanh_act(a).unwrap();
+        let target = tape.leaf(&[0.0, 0.0, 0.0]);
+        let loss = tape.mse_loss(b, target).unwrap();
+        tape.backward(loss).unwrap();
+
+        // tanh(0)=0, tanh(1)=0.7616, tanh(-1)=-0.7616
+        // d(MSE)/d(b) = 2*[0, 0.7616, -0.7616]/3
+        // d(tanh)/d(a) = 1-tanh^2 = [1, 0.4200, 0.4200]
+        let t = [0.0f32, 0.7616, -0.7616];
+        let expected: Vec<f32> = (0..3).map(|i| 2.0 * t[i] / 3.0 * (1.0 - t[i] * t[i])).collect();
+        let ga = tape.read_grad(a).unwrap().unwrap();
+        assert_approx(&ga, &expected, 1e-2);
+    }
+
+    #[test]
+    fn test_backward_swish() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[0.0, 1.0, -1.0]);
+        let b = tape.swish(a).unwrap();
+        let target = tape.leaf(&[0.0, 0.0, 0.0]);
+        let loss = tape.mse_loss(b, target).unwrap();
+        tape.backward(loss).unwrap();
+
+        // swish(x) = x*sig(x), d(swish)/d(x) = sig(x) + x*sig(x)*(1-sig(x))
+        let x = [0.0f32, 1.0, -1.0];
+        let sw: Vec<f32> = x.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        let expected: Vec<f32> = (0..3).map(|i| {
+            let s = 1.0 / (1.0 + (-x[i]).exp());
+            let d_swish = s + x[i] * s * (1.0 - s);
+            2.0 * sw[i] / 3.0 * d_swish
+        }).collect();
+        let ga = tape.read_grad(a).unwrap().unwrap();
+        assert_approx(&ga, &expected, 1e-2);
+    }
+
+    #[test]
+    fn test_read_grad_before_backward() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[1.0, 2.0]);
+        assert!(tape.read_grad(a).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_backward_non_scalar_loss() {
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[1.0, 2.0]);
+        // Try backward on a non-scalar — should error
+        assert!(tape.backward(a).is_err());
+    }
+
+    #[test]
+    fn test_backward_diamond_graph() {
+        // a -> b = a*2, a -> c = a*3, d = b+c, loss = mse(d, target)
+        // Tests gradient accumulation: a receives grad from both b and c paths
+        let mut tape = Tape::new(dev());
+        let a = tape.leaf(&[1.0]); // scalar
+        let b = tape.scale(a, 2.0).unwrap(); // 2
+        let c = tape.scale(a, 3.0).unwrap(); // 3
+        let d = tape.add(b, c).unwrap(); // 5
+        let target = tape.leaf(&[0.0]);
+        let loss = tape.mse_loss(d, target).unwrap();
+        tape.backward(loss).unwrap();
+
+        // d=5, MSE=25, d(MSE)/d(d)=10
+        // grad_b = 10, grad_c = 10
+        // grad_a from b path: 10*2 = 20
+        // grad_a from c path: 10*3 = 30
+        // total grad_a = 50
+        let ga = tape.read_grad(a).unwrap().unwrap();
+        assert_approx(&ga, &[50.0], 1e-3);
+    }
+
+    #[test]
+    fn test_tape_leaf_data_roundtrip() {
+        let mut tape = Tape::new(dev());
+        let data = vec![1.5, -2.7, 0.0, 99.9];
+        let a = tape.leaf(&data);
+        assert_eq!(tape.read(a).unwrap(), data);
+    }
+
+    #[test]
+    fn test_tape_conv2d_forward() {
+        // 1x1x3x3 input, 1x1x1x1 weight=1, bias=0 -> output == input
+        let mut tape = Tape::new(dev());
+        let input_data: Vec<f32> = (1..=9).map(|x| x as f32).collect();
+        let inp = tape.leaf(&input_data);
+        let w = tape.leaf(&[1.0f32]);
+        let b = tape.leaf(&[0.0f32]);
+        let out = tape.conv2d(inp, w, Some(b), 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let result = tape.read(out).unwrap();
+        assert_approx(&result, &input_data, 1e-5);
+    }
+
+    #[test]
+    fn test_tape_conv2d_backward_weight_grad() {
+        let eps = 1e-3f32;
+        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let weight_data = vec![0.5f32];
+
+        let run = |w_val: f32| -> f32 {
+            let mut tape = Tape::new(dev());
+            let inp = tape.leaf(&input_data);
+            let w = tape.leaf(&[w_val]);
+            let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let target = tape.leaf(&vec![0.0f32; 9]);
+            let loss = tape.mse_loss(out, target).unwrap();
+            tape.read(loss).unwrap()[0]
+        };
+
+        let mut tape = Tape::new(dev());
+        let inp = tape.leaf(&input_data);
+        let w = tape.leaf(&weight_data);
+        let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let target = tape.leaf(&vec![0.0f32; 9]);
+        let loss = tape.mse_loss(out, target).unwrap();
+        tape.backward(loss).unwrap();
+        let gw = tape.read_grad(w).unwrap().unwrap();
+
+        let numeric = (run(weight_data[0] + eps) - run(weight_data[0] - eps)) / (2.0 * eps);
+        assert!((gw[0] - numeric).abs() < 1e-2,
+            "weight grad: analytical={}, numeric={}", gw[0], numeric);
+    }
+
+    #[test]
+    fn test_tape_conv2d_backward_input_grad() {
+        let eps = 1e-3f32;
+        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let weight_data = vec![0.5f32];
+
+        let run = |x_val: f32, idx: usize| -> f32 {
+            let mut inp_data = input_data.clone();
+            inp_data[idx] = x_val;
+            let mut tape = Tape::new(dev());
+            let inp = tape.leaf(&inp_data);
+            let w = tape.leaf(&weight_data);
+            let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let target = tape.leaf(&vec![0.0f32; 9]);
+            let loss = tape.mse_loss(out, target).unwrap();
+            tape.read(loss).unwrap()[0]
+        };
+
+        let mut tape = Tape::new(dev());
+        let inp = tape.leaf(&input_data);
+        let w = tape.leaf(&weight_data);
+        let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let target = tape.leaf(&vec![0.0f32; 9]);
+        let loss = tape.mse_loss(out, target).unwrap();
+        tape.backward(loss).unwrap();
+        let gi = tape.read_grad(inp).unwrap().unwrap();
+
+        for i in 0..9 {
+            let numeric = (run(input_data[i] + eps, i) - run(input_data[i] - eps, i)) / (2.0 * eps);
+            assert!((gi[i] - numeric).abs() < 1e-2,
+                "input grad[{i}]: analytical={}, numeric={}", gi[i], numeric);
+        }
+    }
+
+    #[test]
+    fn test_tape_conv2d_backward_bias_grad() {
+        // 1x1x2x2 input, 1x1x1x1 kernel, with bias
+        // out is 2x2, grad_bias = sum of grad_out over spatial
+        let mut tape = Tape::new(dev());
+        let inp = tape.leaf(&[1.0f32, 2.0, 3.0, 4.0]);
+        let w = tape.leaf(&[1.0f32]);
+        let b = tape.leaf(&[0.0f32]);
+        let out = tape.conv2d(inp, w, Some(b), 1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let target = tape.leaf(&[0.0f32; 4]);
+        let loss = tape.mse_loss(out, target).unwrap();
+        tape.backward(loss).unwrap();
+
+        // output = input (1x1 kernel=1, bias=0), target=0
+        // MSE grad = 2*output/4 = output/2 = [0.5, 1.0, 1.5, 2.0]
+        // grad_bias = sum = 0.5 + 1.0 + 1.5 + 2.0 = 5.0
+        let gb = tape.read_grad(b).unwrap().unwrap();
+        assert_approx(&gb, &[5.0], 1e-3);
     }
 }
