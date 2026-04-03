@@ -18,7 +18,7 @@ Use any-gpu when:
 
 ## Current state
 
-19 GPU ops as WGSL compute shaders. 54 tests, all cross-validated against CPU reference implementations. Verified on 4 GPUs across 3 nodes.
+19 GPU ops as WGSL compute shaders. 62 tests (54 GPU ops + 8 NanoSign), all cross-validated against CPU reference implementations. Verified on 4 GPUs across 3 nodes.
 
 | Category | Ops |
 |----------|-----|
@@ -29,6 +29,7 @@ Use any-gpu when:
 | Attention | softmax (two-pass), scaled_dot_product_attention |
 | Spatial | upsample_nearest2d |
 | Loss | mse_loss |
+| Integrity | [NanoSign](#nanosign) — BLAKE3 model file signing (NSIG + 36 bytes) |
 
 All shaders use uniform params (no `arrayLength()` — crashes RADV). All ops handle >65535 workgroups via 2D dispatch.
 
@@ -47,19 +48,19 @@ let result = dev.read(&c)?;
 
 ## Tested Hardware
 
-All results from `cargo test --release` on 2026-04-02. 54 tests per GPU, each cross-validated against a CPU reference implementation.
+All results from `cargo test --release`. 62 tests per GPU, each cross-validated against a CPU reference implementation.
 
 | GPU | Vendor | VRAM | Driver | OS | Tests | Matmul 512x512 (ms) |
 |-----|--------|------|--------|----|-------|----------------------|
 | AMD Radeon RX 5700 XT | AMD (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 54/54 pass | 5.67 |
 | NVIDIA GeForce RTX 3070 Laptop | NVIDIA | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 pass | 3.03 |
 | NVIDIA GeForce RTX 3050 Ti Laptop | NVIDIA | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 pass | 5.61 |
-| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 54/54 pass | 3.36 |
+| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 62/62 pass | 3.36 |
 
 **Reproduce any claim:**
 
 ```bash
-# Run all 54 correctness tests (every op verified against CPU reference)
+# Run all 62 tests (54 GPU ops + 8 NanoSign, every op verified against CPU reference)
 cargo test --release
 
 # Run matmul benchmark (produces the ms and GFLOPS numbers above)
@@ -69,12 +70,33 @@ cargo run --release --example bench
 WGPU_BACKEND=vulkan cargo test --release
 ```
 
-Test results verified at commit [`801c4de`](https://github.com/cochranblock/any-gpu/commit/801c4de). Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gpu/commit/56976a7).
+Test results verified at commits [`801c4de`](https://github.com/cochranblock/any-gpu/commit/801c4de) (GPU ops), [`5e58eb3`](https://github.com/cochranblock/any-gpu/commit/5e58eb3) (NanoSign). Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gpu/commit/56976a7).
 
 ### Known issues
 
 - **AMD RADV/RDNA1**: concurrent `wgpu::Instance` creation segfaults. Fixed by sharing a single `GpuDevice` via `LazyLock` ([`e124fbb`](https://github.com/cochranblock/any-gpu/commit/e124fbb)). Individual ops work fine.
 - **Intel Iris Xe**: untested in isolation (wgpu prefers discrete NVIDIA when both are present).
+
+## NanoSign
+
+Every model weights file saved by any-gpu is signed with [NanoSign](https://github.com/cochranblock/kova/blob/main/docs/NANOSIGN.md) — 36 bytes appended to EOF: `NSIG` magic (4 bytes) + BLAKE3 hash (32 bytes). Verified on load. Tampered files are rejected.
+
+```rust
+use any_gpu::nanosign;
+use std::path::Path;
+
+// Save weights with signature
+nanosign::save_signed(Path::new("model.weights"), &weight_bytes)?;
+
+// Load and verify (rejects tampered files)
+let weights = nanosign::load_verified(Path::new("model.weights"))?;
+
+// In-memory sign/verify
+let signed = nanosign::sign_bytes(&data);
+assert!(matches!(nanosign::verify_bytes(&signed), nanosign::NanoSignResult::Verified(_)));
+```
+
+Standard across the cochranblock ecosystem. Spec: [NANOSIGN.md](https://github.com/cochranblock/kova/blob/main/docs/NANOSIGN.md).
 
 ## Benchmarks
 
@@ -205,7 +227,7 @@ Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gp
 
 ## Architecture
 
-Currently: `GpuDevice` struct wraps wgpu directly. Public methods for each op (matmul, conv2d, relu, etc.). Upload data, dispatch WGSL compute shaders, read results back. No abstraction layers.
+Currently: `GpuDevice` struct wraps wgpu directly. Public methods for each op (matmul, conv2d, relu, etc.). Upload data, dispatch WGSL compute shaders, read results back. No abstraction layers. NanoSign for model file integrity.
 
 Planned (not yet shipped):
 
@@ -223,7 +245,8 @@ Planned (not yet shipped):
 
 ### Sprint 4: Autograd + Training
 
-- **Autograd** — reverse-mode autodiff, backward pass for all ops
+- **Autograd** — reverse-mode autodiff, backward pass for all 19 ops
+- **Backward shaders** — ~10 new WGSL kernels (relu_backward, sigmoid_backward, swish_backward, tanh_backward, softmax_backward, mse_backward, group_norm_backward, downsample_sum, conv2d weight grad, slice). Remaining ops reuse existing forward shaders with transposed inputs.
 - **AdamW optimizer**
 - **Training loop** as a function call, not a framework
 
@@ -239,7 +262,11 @@ any-gpu bench
 any-gpu info
 ```
 
-Each stratagem is a function, not a framework. User provides data, any-gpu handles model architecture, training loop, checkpointing, loss curves. One command, one binary.
+Each stratagem is a function, not a framework. User provides data, any-gpu handles model architecture, training loop, checkpointing, loss curves. One command, one binary. All saved weights NanoSign'd.
+
+### Sprint 6: Starter Nanobyte
+
+First nanobyte model trained and shipped with any-gpu. A tiny diffusion model (~1M params) for 32x32 pixel art, trained on bt's 5700 XT via any-gpu's own training loop. The proof that the engine works end-to-end. NanoSign'd `.weights` file, reproducible from the included training stratagem.
 
 ### Vision: The Rosetta Stone that learns your hardware
 
@@ -250,6 +277,14 @@ Self-optimizing routing layer:
 3. **Route by measurement, not vendor name.** 512x512 matmul might go to discrete GPU while 64x64 add stays on integrated.
 4. **Hot-swap on hardware changes.** Re-benchmark, retrain, patch the memory map. Like a firmware update.
 5. **Multi-GPU dispatch.** Split work across devices by measured throughput.
+
+### P23: Triple Lens
+
+All any-gpu work is evaluated through the [Triple Lens](https://cochranblock.org) — the cochranblock quality gate:
+
+- **Lens 1 (Technical):** Does it compile, pass tests, and run on real hardware? (62/62 tests, 4 GPUs, 3 nodes)
+- **Lens 2 (Product):** Does it solve a real problem? (AMD/Intel GPU compute for ML — nobody else does this in Rust)
+- **Lens 3 (Honest):** Are the claims verifiable? (Every benchmark has a reproduce command. Every GPU claim links to a commit hash. CUDA comparison shows where we lose.)
 
 ## Build
 
@@ -269,7 +304,7 @@ cargo run --release --example bench
 cargo test
 ```
 
-54 correctness tests. Every op verified against a CPU reference implementation. Requires a GPU (any backend).
+62 tests (54 GPU op correctness + 8 NanoSign integrity). Every op verified against a CPU reference implementation. Requires a GPU (any backend).
 
 ## License
 

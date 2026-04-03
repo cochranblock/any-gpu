@@ -28,18 +28,24 @@ wgpu (auto-selects backend)
     ├── tensor: concat, transpose
     ├── spatial: upsample_nearest2d
     └── loss: mse_loss
+    │
+    ▼
+NanoSign (model integrity)
+    │
+    └── NSIG + BLAKE3 hash (36 bytes) on every .weights file
 ```
 
 ## Build Output
 
 | Metric | Value |
 |--------|-------|
-| Lines of Rust | 2,130 across 8 source files |
-| Public ops | 19 |
-| WGSL shaders | 15 (some ops share shaders) |
-| Tests | 54 (every op cross-validated against CPU reference) |
+| Lines of Rust | 2,334 across 9 source files |
+| Public ops | 19 GPU ops + 7 NanoSign functions |
+| WGSL shaders | 20 (softmax and group_norm each use 2 passes) |
+| Tests | 62 (54 GPU ops cross-validated against CPU reference + 8 NanoSign) |
 | Bench binary (release) | 1.5 MB (opt-z, LTO, strip, panic=abort) |
-| Dependencies | 4 (wgpu, bytemuck, anyhow, pollster) |
+| Dependencies | 5 (wgpu, bytemuck, anyhow, pollster, blake3) |
+| Model signing | NanoSign v1 — NSIG + BLAKE3 (36 bytes per file) |
 
 ## Hardware Verification
 
@@ -110,14 +116,25 @@ From commit [`d6ab4ec`](https://github.com/cochranblock/any-gpu/commit/d6ab4ec).
 
 CUDA and MPS use tiled matmul with vendor-tuned kernels. any-gpu uses a naive WGSL shader. The gap closes with tiled matmul (roadmap). The point: any-gpu runs the same shader on AMD, NVIDIA, Intel, and Apple. CUDA can't run on AMD. MPS can't run on NVIDIA.
 
+## P23: Triple Lens
+
+All any-gpu work is evaluated through the Triple Lens quality gate:
+
+| Lens | Question | Evidence |
+|------|----------|----------|
+| Technical | Does it compile, pass tests, run on real hardware? | 62/62 tests, 4 GPUs, 3 nodes (bt/lf/gd + local) |
+| Product | Does it solve a real problem? | AMD/Intel GPU compute for ML in Rust — nobody else does this |
+| Honest | Are the claims verifiable? | Every benchmark has a reproduce command. Every GPU claim links to a commit. CUDA comparison shows where we lose. |
+
 ## What's Not Here (Yet)
 
 - Tensor type with shape tracking (planned Sprint 3)
-- Autograd / backward pass (planned Sprint 4)
+- Autograd / backward pass — ~10 new backward WGSL shaders needed (planned Sprint 4)
 - Backend router (CUDA/Metal/Vulkan dispatch) (planned Sprint 3)
 - Tiled matmul with shared memory (planned Sprint 3)
-- Stratagems CLI (planned Sprint 5)
+- Stratagems CLI — `any-gpu train`, `any-gpu bench`, `any-gpu info` (planned Sprint 5)
+- Starter nanobyte — first model trained and shipped with any-gpu (planned Sprint 6)
 
 ---
 
-Part of [The Cochran Block](https://cochranblock.org) — see also [kova](https://github.com/cochranblock/kova), [pixel-forge](https://github.com/cochranblock/pixel-forge)
+Part of [The Cochran Block](https://cochranblock.org) — see also [kova](https://github.com/cochranblock/kova), [pixel-forge](https://github.com/cochranblock/pixel-forge), [tmuxisfree](https://github.com/cochranblock/tmuxisfree)

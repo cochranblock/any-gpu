@@ -18,6 +18,12 @@ Each entry follows this format:
 
 ## Entries
 
+### 2026-04-03 — NanoSign Integration + Full Doc Update
+
+**What:** Added NanoSign module — BLAKE3 model file signing (NSIG + 36 bytes appended to EOF). Every model weights file saved by any-gpu is signed on write, verified on load. Tampered files rejected. 8 tests: sign/verify roundtrip, tamper detection, unsigned detection, strip, empty payload, file I/O roundtrip. Updated all docs: README (62 tests, NanoSign section, P23 Triple Lens, autograd roadmap with backward shader inventory, starter nanobyte sprint, accurate test counts), TIMELINE, PROOF_OF_ARTIFACTS.
+**Commits:** [`5e58eb3`](https://github.com/cochranblock/any-gpu/commit/5e58eb3) (NanoSign), current commit (docs update)
+**AI Role:** AI implemented NanoSign module from kova's NANOSIGN.md spec. Human directed integration (sign on save, verify on load) and the doc update scope.
+
 ### 2026-04-02 — CPU-Validated Test Suite
 
 **What:** Replaced 27 smoke tests with 54 correctness tests. Every op cross-validated against a CPU reference implementation. Added edge cases: odd sizes (13 elements, misaligned to workgroup 256), 1x1 tensors, zero/negative inputs, non-square matmul (17x13x11), 5x5 kernels, multi-channel batch=2 conv2d, constant-input group_norm, softmax numerical stability with large values, transpose roundtrip identity.
