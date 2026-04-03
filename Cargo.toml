@@ -17,9 +17,12 @@ bytemuck = { version = "1", features = ["derive"] }
 anyhow = "1"
 pollster = "0.4"
 
+[dependencies.candle-core]
+version = "0.10"
+optional = true
+
 [dev-dependencies]
 rand = "0.8"
-candle-core = { version = "0.10", optional = true }
 
 [features]
 default = []
