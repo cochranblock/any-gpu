@@ -1,5 +1,5 @@
-//! candle-vulkan — Vulkan compute backend for candle tensor ops via wgpu.
-//! GPU-agnostic ML training. AMD, NVIDIA, Intel. No CUDA lock-in.
+//! any-gpu — Bare metal tensor engine. Any GPU, zero vendor lock-in.
+//! AMD, NVIDIA, Intel, Apple. wgpu under the hood.
 // Unlicense — cochranblock.org
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 

@@ -33,21 +33,8 @@ impl GpuDevice {
             ..Default::default()
         });
 
-        let adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all());
-        if adapters.is_empty() {
-            anyhow::bail!("no GPU found");
-        }
-
-        // Print discovered GPUs
-        for (i, adapter) in adapters.iter().enumerate() {
-            let info = adapter.get_info();
-            eprintln!(
-                "  [{}] {} ({:?}, {:?})",
-                i, info.name, info.device_type, info.backend
-            );
-        }
-
-        // Prefer discrete GPU, fall back to whatever is available
+        // Skip enumerate_adapters — can crash on Linux when probing GL/other backends.
+        // Just request the best adapter directly.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -55,18 +42,23 @@ impl GpuDevice {
                 force_fallback_adapter: false,
             })
             .await
-            .context("failed to find a suitable GPU adapter")?;
+            .context("no GPU found")?;
 
         let info = adapter.get_info();
-        eprintln!("  selected: {} ({:?})", info.name, info.device_type);
+        eprintln!("  any-gpu: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
 
+        // Use the adapter's actual limits — not Limits::default() which can
+        // request capabilities the driver doesn't support (SIGSEGV on RADV/RDNA1).
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("candle-vulkan"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            }, None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("any-gpu"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
             .await
             .context("failed to create GPU device")?;
 
@@ -116,7 +108,7 @@ impl GpuDevice {
     /// Read GPU buffer back to CPU as f32 vec.
     pub fn read(&self, buf: &GpuBuffer) -> Result<Vec<f32>> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
+            label: None,
             size: buf.size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,

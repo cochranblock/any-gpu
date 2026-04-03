@@ -2,13 +2,13 @@
 # Contributors: GotEmCoach, KOVA, Claude Opus 4.6
 
 [package]
-name = "candle-vulkan"
+name = "any-gpu"
 version = "0.1.0"
 edition = "2024"
-description = "Vulkan compute backend for candle tensor ops via wgpu. GPU-agnostic ML training — AMD, NVIDIA, Intel. No CUDA lock-in."
+description = "Bare metal tensor engine. Runs on any GPU — AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in. wgpu under the hood."
 license = "Unlicense"
-repository = "https://github.com/cochranblock/candle-vulkan"
-keywords = ["vulkan", "wgpu", "candle", "amd", "gpu-compute"]
+repository = "https://github.com/cochranblock/any-gpu"
+keywords = ["gpu", "wgpu", "tensor", "ml", "compute"]
 categories = ["science", "graphics"]
 
 [dependencies]
