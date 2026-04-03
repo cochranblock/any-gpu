@@ -122,6 +122,68 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// --- Backward shaders ---
+
+const SHADER_RELU_BACKWARD: &str = "
+struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read> input: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    if idx >= params.n { return; }
+    out[idx] = select(0.0, grad_out[idx], input[idx] > 0.0);
+}
+";
+
+const SHADER_SIGMOID_BACKWARD: &str = "
+struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read> sig_out: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    if idx >= params.n { return; }
+    let s = sig_out[idx];
+    out[idx] = grad_out[idx] * s * (1.0 - s);
+}
+";
+
+const SHADER_SWISH_BACKWARD: &str = "
+struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read> input: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    if idx >= params.n { return; }
+    let x = input[idx];
+    let s = 1.0 / (1.0 + exp(-x));
+    out[idx] = grad_out[idx] * (s + x * s * (1.0 - s));
+}
+";
+
+const SHADER_TANH_BACKWARD: &str = "
+struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read> tanh_out: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    if idx >= params.n { return; }
+    let t = tanh_out[idx];
+    out[idx] = grad_out[idx] * (1.0 - t * t);
+}
+";
+
 impl GpuDevice {
     pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> Result<GpuBuffer> {
         ensure!(a.len == b.len, "add: length mismatch ({} vs {})", a.len, b.len);
@@ -159,6 +221,32 @@ impl GpuDevice {
         let params = ScaleParams { n: a.len as u32, scale: s, _pad: [0; 2] };
         self.dispatch_shader(SHADER_SCALE, None, &params, &[a], &out, super::dispatch_1d(a.len as u32));
         Ok(out)
+    }
+
+    // --- Backward shaders for autograd ---
+
+    /// ReLU backward: grad_a = grad_out * (input > 0)
+    pub fn relu_backward(&self, grad_out: &GpuBuffer, input: &GpuBuffer) -> Result<GpuBuffer> {
+        ensure!(grad_out.len == input.len);
+        self.binary_op(SHADER_RELU_BACKWARD, grad_out, input)
+    }
+
+    /// Sigmoid backward: grad_a = grad_out * output * (1 - output)
+    pub fn sigmoid_backward(&self, grad_out: &GpuBuffer, output: &GpuBuffer) -> Result<GpuBuffer> {
+        ensure!(grad_out.len == output.len);
+        self.binary_op(SHADER_SIGMOID_BACKWARD, grad_out, output)
+    }
+
+    /// Swish backward: grad_a = grad_out * (sig(x) + x * sig(x) * (1 - sig(x)))
+    pub fn swish_backward(&self, grad_out: &GpuBuffer, input: &GpuBuffer) -> Result<GpuBuffer> {
+        ensure!(grad_out.len == input.len);
+        self.binary_op(SHADER_SWISH_BACKWARD, grad_out, input)
+    }
+
+    /// Tanh backward: grad_a = grad_out * (1 - output^2)
+    pub fn tanh_backward(&self, grad_out: &GpuBuffer, output: &GpuBuffer) -> Result<GpuBuffer> {
+        ensure!(grad_out.len == output.len);
+        self.binary_op(SHADER_TANH_BACKWARD, grad_out, output)
     }
 }
 

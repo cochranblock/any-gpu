@@ -6,6 +6,7 @@
 mod device;
 mod ops;
 mod tensor;
+pub mod autograd;
 pub mod nanosign;
 
 pub use device::{GpuBuffer, GpuDevice};

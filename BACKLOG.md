@@ -7,8 +7,8 @@
 |---|-----|------|------------|
 | ~~1~~ | ~~[feature]~~ | ~~Tiled matmul~~ — shipped [`0ca243d`](https://github.com/cochranblock/any-gpu/commit/0ca243d). 1.7x gain at 1024x1024 (117 GFLOPS). Further gains need register blocking + 32x32 tiles. | done |
 | ~~2~~ | ~~[feature]~~ | ~~Tensor type~~ — shipped. 6-dim inline shape, reshape (zero-copy), zeros, from_buf. 8 tests. Autograd fields (requires_grad, grad_fn) deferred to Sprint 4. | done |
-| 3 | [feature] | Autograd tape: record forward ops, reverse-mode backward pass | Tensor type (#2) |
-| 4 | [feature] | Backward shaders: relu, sigmoid, swish, tanh, softmax, mse, group_norm (~10 new WGSL kernels) | Autograd tape (#3) |
+| ~~3~~ | ~~[feature]~~ | ~~Autograd tape~~ — shipped. Flat tape, enum Op, reverse walk. backward() for add/sub/mul/scale/relu/sigmoid/swish/tanh/matmul/mse_loss. 5 tests. | done |
+| ~~4~~ | ~~[feature]~~ | ~~Backward shaders~~ — shipped relu_backward, sigmoid_backward, swish_backward, tanh_backward (4 new WGSL kernels). Remaining: softmax, group_norm, conv2d. | partial |
 | 5 | [feature] | Backward for conv2d/conv_transpose2d — weight gradient conv, input gradient via transpose conv | Autograd tape (#3) |
 | 6 | [feature] | AdamW optimizer — operates on grad buffers, weight update shader | Backward shaders (#4) |
 | 7 | [feature] | Training loop: forward + backward + optimizer step as a single function call | AdamW (#6) |
