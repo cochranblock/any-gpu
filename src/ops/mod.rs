@@ -185,6 +185,10 @@ impl GpuDevice {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_DEV: std::sync::LazyLock<crate::GpuDevice> =
+    std::sync::LazyLock::new(|| crate::GpuDevice::gpu().expect("need a GPU"));
+
+#[cfg(test)]
 pub(crate) fn assert_approx(got: &[f32], want: &[f32], tol: f32) {
     assert_eq!(got.len(), want.len(), "length mismatch: got {} want {}", got.len(), want.len());
     for (i, (g, w)) in got.iter().zip(want).enumerate() {

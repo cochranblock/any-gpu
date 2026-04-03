@@ -129,16 +129,14 @@ impl GpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
-
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_concat_flat() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0]);
-        let b = DEV.upload(&[4.0, 5.0, 6.0]);
+        let a = dev().upload(&[1.0, 2.0, 3.0]);
+        let b = dev().upload(&[4.0, 5.0, 6.0]);
         // outer=1, a_inner=3, b_inner=3 -> simple append
-        let result = DEV.read(&DEV.concat(&a, &b, 1, 3, 3).unwrap()).unwrap();
+        let result = dev().read(&dev().concat(&a, &b, 1, 3, 3).unwrap()).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
@@ -146,19 +144,19 @@ mod tests {
     fn test_concat_channel_axis() {
         // Two 1x2x2 tensors (NCHW: N=1, C=1, H=2, W=2), concat along C
         // a: [[1,2],[3,4]], b: [[5,6],[7,8]]
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = DEV.upload(&[5.0, 6.0, 7.0, 8.0]);
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
         // outer=N=1, a_inner=C_a*H*W=4, b_inner=4
-        let result = DEV.read(&DEV.concat(&a, &b, 1, 4, 4).unwrap()).unwrap();
+        let result = dev().read(&dev().concat(&a, &b, 1, 4, 4).unwrap()).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     }
 
     #[test]
     fn test_transpose_2d() {
         // 2x3 matrix -> 3x2
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         // outer=1, d0=2, d1=3, inner=1
-        let result = DEV.read(&DEV.transpose(&a, 1, 2, 3, 1).unwrap()).unwrap();
+        let result = dev().read(&dev().transpose(&a, 1, 2, 3, 1).unwrap()).unwrap();
         // Transposed: [[1,4],[2,5],[3,6]]
         assert_eq!(result, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
@@ -166,11 +164,11 @@ mod tests {
     #[test]
     fn test_transpose_batched() {
         // batch=2, 2x3 matrices -> batch=2, 3x2 matrices
-        let a = DEV.upload(&[
+        let a = dev().upload(&[
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 0
             7.0, 8.0, 9.0, 10.0, 11.0, 12.0, // batch 1
         ]);
-        let result = DEV.read(&DEV.transpose(&a, 2, 2, 3, 1).unwrap()).unwrap();
+        let result = dev().read(&dev().transpose(&a, 2, 2, 3, 1).unwrap()).unwrap();
         assert_eq!(result, vec![
             1.0, 4.0, 2.0, 5.0, 3.0, 6.0,
             7.0, 10.0, 8.0, 11.0, 9.0, 12.0,

@@ -345,23 +345,22 @@ impl GpuDevice {
 mod tests {
     use super::*;
     use crate::ops::assert_approx;
-    use std::sync::LazyLock;
 
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_batch_matmul() {
         // batch=2, each 2x2 matmul
-        let a = DEV.upload(&[
+        let a = dev().upload(&[
             1.0, 2.0, 3.0, 4.0, // batch 0
             5.0, 6.0, 7.0, 8.0, // batch 1
         ]);
-        let b = DEV.upload(&[
+        let b = dev().upload(&[
             1.0, 0.0, 0.0, 1.0, // identity batch 0
             2.0, 0.0, 0.0, 2.0, // 2x identity batch 1
         ]);
-        let c = DEV.batch_matmul(&a, &b, 2, 2, 2, 2).unwrap();
-        let result = DEV.read(&c).unwrap();
+        let c = dev().batch_matmul(&a, &b, 2, 2, 2, 2).unwrap();
+        let result = dev().read(&c).unwrap();
         assert_eq!(result, vec![
             1.0, 2.0, 3.0, 4.0,   // A * I = A
             10.0, 12.0, 14.0, 16.0, // A * 2I = 2A
@@ -372,21 +371,21 @@ mod tests {
     fn test_conv2d_3x3_no_pad() {
         // 1 batch, 1 channel, 4x4 input, 1 output channel, 3x3 kernel
         // Vertical edge detector
-        let input = DEV.upload(&[
+        let input = dev().upload(&[
             1.0, 2.0, 3.0, 4.0,
             5.0, 6.0, 7.0, 8.0,
             9.0, 10.0, 11.0, 12.0,
             13.0, 14.0, 15.0, 16.0,
         ]);
-        let weight = DEV.upload(&[
+        let weight = dev().upload(&[
             1.0, 0.0, -1.0,
             1.0, 0.0, -1.0,
             1.0, 0.0, -1.0,
         ]);
-        let bias = DEV.upload(&[0.0]);
-        let out = DEV.conv2d(&input, &weight, Some(&bias),
+        let bias = dev().upload(&[0.0]);
+        let out = dev().conv2d(&input, &weight, Some(&bias),
             1, 1, 4, 4, 1, 3, 3, (1, 1), (0, 0), (1, 1), 1).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let result = dev().read(&out).unwrap();
         // Output is 2x2. Manual calculation:
         // (0,0): 1*1+2*0+3*(-1)+5*1+6*0+7*(-1)+9*1+10*0+11*(-1) = 1-3+5-7+9-11 = -6
         assert_eq!(result.len(), 4);
@@ -396,16 +395,16 @@ mod tests {
     #[test]
     fn test_conv2d_with_padding() {
         // 1x1x3x3 input, 1x1x3x3 kernel, padding=1 -> 3x3 output
-        let input = DEV.upload(&[
+        let input = dev().upload(&[
             1.0, 2.0, 3.0,
             4.0, 5.0, 6.0,
             7.0, 8.0, 9.0,
         ]);
         // All-ones kernel: sum of neighborhood
-        let weight = DEV.upload(&[1.0; 9]);
-        let out = DEV.conv2d(&input, &weight, None,
+        let weight = dev().upload(&[1.0; 9]);
+        let out = dev().conv2d(&input, &weight, None,
             1, 1, 3, 3, 1, 3, 3, (1, 1), (1, 1), (1, 1), 1).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_eq!(result.len(), 9);
         // Center pixel: sum of all 9 = 45
         assert_approx(&result[4..5], &[45.0], 1e-5);
@@ -414,16 +413,16 @@ mod tests {
     #[test]
     fn test_conv2d_stride2() {
         // 1x1x4x4 input, 1x1x1x1 kernel (identity), stride=2 -> 2x2 output
-        let input = DEV.upload(&[
+        let input = dev().upload(&[
             1.0, 2.0, 3.0, 4.0,
             5.0, 6.0, 7.0, 8.0,
             9.0, 10.0, 11.0, 12.0,
             13.0, 14.0, 15.0, 16.0,
         ]);
-        let weight = DEV.upload(&[1.0]); // 1x1 kernel
-        let out = DEV.conv2d(&input, &weight, None,
+        let weight = dev().upload(&[1.0]); // 1x1 kernel
+        let out = dev().conv2d(&input, &weight, None,
             1, 1, 4, 4, 1, 1, 1, (2, 2), (0, 0), (1, 1), 1).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_eq!(result, vec![1.0, 3.0, 9.0, 11.0]);
     }
 
@@ -431,11 +430,11 @@ mod tests {
     fn test_conv_transpose2d_basic() {
         // Transpose of a 1x1 conv with stride=2 is an upsampling
         // input: 1x1x2x2, weight: 1x1x1x1 (value 1.0), stride=2 -> output 1x1x3x3
-        let input = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let weight = DEV.upload(&[1.0]);
-        let out = DEV.conv_transpose2d(&input, &weight, None,
+        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let weight = dev().upload(&[1.0]);
+        let out = dev().conv_transpose2d(&input, &weight, None,
             1, 1, 2, 2, 1, 1, 1, (2, 2), (0, 0), (0, 0), (1, 1), 1).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let result = dev().read(&out).unwrap();
         // 3x3 output: values at stride positions, zeros elsewhere
         assert_eq!(result.len(), 9);
         assert_approx(&result, &[1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0], 1e-5);

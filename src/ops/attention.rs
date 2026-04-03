@@ -186,15 +186,14 @@ impl GpuDevice {
 mod tests {
     use super::*;
     use crate::ops::assert_approx;
-    use std::sync::LazyLock;
 
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_softmax() {
-        let input = DEV.upload(&[1.0, 2.0, 3.0]);
-        let out = DEV.softmax(&input, 1, 3).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[1.0, 2.0, 3.0]);
+        let out = dev().softmax(&input, 1, 3).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_approx(&result, &[0.0900, 0.2447, 0.6652], 1e-3);
         // Sum should be 1.0
         let sum: f32 = result.iter().sum();
@@ -203,9 +202,9 @@ mod tests {
 
     #[test]
     fn test_softmax_multirow() {
-        let input = DEV.upload(&[1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
-        let out = DEV.softmax(&input, 2, 3).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
+        let out = dev().softmax(&input, 2, 3).unwrap();
+        let result = dev().read(&out).unwrap();
         // Row 0: standard softmax
         assert_approx(&result[0..3], &[0.0900, 0.2447, 0.6652], 1e-3);
         // Row 1: uniform
@@ -216,12 +215,12 @@ mod tests {
     fn test_attention_identity() {
         // 1 head, seq=2, d_k=2. Q=K=V=identity-like.
         // With Q=K, scores should be high on diagonal -> attention ~ identity -> output ~ V
-        let qkv = DEV.upload(&[
+        let qkv = dev().upload(&[
             1.0, 0.0,
             0.0, 1.0,
         ]);
-        let out = DEV.scaled_dot_product_attention(&qkv, &qkv, &qkv, 1, 2, 2).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let out = dev().scaled_dot_product_attention(&qkv, &qkv, &qkv, 1, 2, 2).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_eq!(result.len(), 4);
         // With orthogonal Q=K, attention should heavily weight diagonal -> output close to V
         // score matrix after softmax: [[e^(1/sqrt2)/(e^(1/sqrt2)+e^0), ...], ...]
@@ -231,19 +230,19 @@ mod tests {
 
     #[test]
     fn test_mse_loss() {
-        let pred = DEV.upload(&[1.0, 2.0, 3.0]);
-        let target = DEV.upload(&[1.5, 2.5, 3.5]);
-        let loss = DEV.mse_loss(&pred, &target).unwrap();
-        let result = DEV.read(&loss).unwrap();
+        let pred = dev().upload(&[1.0, 2.0, 3.0]);
+        let target = dev().upload(&[1.5, 2.5, 3.5]);
+        let loss = dev().mse_loss(&pred, &target).unwrap();
+        let result = dev().read(&loss).unwrap();
         // MSE = ((0.5)^2 + (0.5)^2 + (0.5)^2) / 3 = 0.75/3 = 0.25
         assert_approx(&result, &[0.25], 1e-5);
     }
 
     #[test]
     fn test_mse_loss_zero() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0]);
-        let b = DEV.upload(&[1.0, 2.0, 3.0]);
-        let result = DEV.read(&DEV.mse_loss(&a, &b).unwrap()).unwrap();
+        let a = dev().upload(&[1.0, 2.0, 3.0]);
+        let b = dev().upload(&[1.0, 2.0, 3.0]);
+        let result = dev().read(&dev().mse_loss(&a, &b).unwrap()).unwrap();
         assert_approx(&result, &[0.0], 1e-6);
     }
 }

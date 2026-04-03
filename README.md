@@ -165,35 +165,75 @@ The RTX 3070 is 4x behind CUDA at 512x512. Tiling alone should close most of tha
 - candle CUDA numbers use cuBLAS (averaged over 20-100 iterations with warmup). any-gpu numbers are single-run.
 - Max numerical error across all GPUs: 0.000023 (f32 accumulation, expected).
 
+## Architecture
+
+Two layers. The tensor API is the product. The GPU backend is plumbing.
+
+**Layer 1: Tensor API** — backend-agnostic transforms. `Tensor::matmul`, `Tensor::conv2d`, `Tensor::relu`. User code never touches GPU backends. Write once, runs anywhere.
+
+**Layer 2: Backend router** — a `match` statement, not a framework. Compile-time feature flags pick the backend: `features = ["metal"]` on Mac, `features = ["cuda"]` on NVIDIA, Vulkan is the default/universal fallback. The router adds <100ns overhead vs calling the backend directly. Every abstraction pays rent or gets evicted.
+
+```rust
+let device = Device::auto();        // picks fastest available backend
+let t = Tensor::new(data, &device); // user never knows if it's CUDA, Metal, or Vulkan
+let out = t.conv2d(&weight, stride, padding)?;
+```
+
+Vulkan is the Rosetta Stone — it makes AMD and Intel GPUs possible. CUDA is faster on NVIDIA. Metal is faster on Apple. The router picks the winner. The user gets the fastest path without caring which one.
+
+## Ops (Sprint 2 — shipped)
+
+27 tests, all passing on AMD RX 5700 XT (Vulkan) and Apple M4 (Metal).
+
+| Category | Ops |
+|----------|-----|
+| Elementwise | add, sub, mul, scale, relu, sigmoid, swish/silu, tanh |
+| Convolution | conv2d, conv_transpose2d, batch_matmul, matmul |
+| Normalization | group_norm (two-pass) |
+| Tensor manipulation | concat, transpose |
+| Attention | softmax (two-pass), scaled_dot_product_attention |
+| Spatial | upsample_nearest2d |
+| Loss | mse_loss |
+
+All shaders use uniform params (no `arrayLength()` — crashes RADV). All ops handle >65535 workgroups via 2D dispatch.
+
 ## Roadmap
 
-### Sprint 2: Tiled matmul + Tensor type
+### Sprint 3: Tiled matmul + Tensor type
 
 - **Tiled matmul** with workgroup shared memory — the single biggest perf win, expected 5-10x
-- **Tensor type** with shape tracking, strides, and views
-- **Full op set** — sub, div, exp, log, sqrt, relu, sigmoid, tanh, softmax, conv2d, transpose, reduce_sum/mean, layer_norm, batch_norm, embedding, cross_entropy, mse
+- **Tensor type** with shape tracking, strides, and views — Copy struct, one pointer + size
+- **Pipeline caching** — eliminate per-dispatch shader compilation
 
-### Sprint 3: Autograd + Training
+### Sprint 4: Autograd + Training
 
-- **Autograd** — reverse-mode autodiff, backward pass, gradient accumulation
-- **Optimizer** — SGD, Adam
+- **Autograd** — reverse-mode autodiff, backward pass for all ops
+- **AdamW optimizer**
 - **Training loop** as a function call, not a framework
+
+### Sprint 5: Stratagems (training pipelines)
+
+Pre-built training pipelines. Like air strikes — call in what you need, it drops in ready to go.
+
+```
+any-gpu train mnist --epochs 10
+any-gpu train diffusion --data ./sprites --size 32
+any-gpu train classifier --data ./labeled/ --classes 10
+any-gpu bench
+any-gpu info
+```
+
+Each stratagem is a function, not a framework. User provides data, any-gpu handles model architecture, training loop, checkpointing, loss curves. One command, one binary.
 
 ### Vision: The Rosetta Stone that learns your hardware
 
-any-gpu is a Rosetta Stone for bare metal GPU compute. One API, every vendor. But the real innovation is a self-optimizing routing layer:
+Self-optimizing routing layer:
 
-1. **Auto-benchmark on first run.** any-gpu discovers every GPU on the system and runs microbenchmarks per op type (matmul, conv2d, add, etc.) at various sizes. Not synthetic — real shader dispatch, real memory transfer, real numbers.
-
-2. **Bake a subatomic routing model.** The benchmark results get compressed into a nanobyte memory map — a tiny `.weights` file that captures the exact performance profile of YOUR specific hardware. Same architecture as kova's pyramid models. any-gpu dogfoods the subatomic model concept.
-
-3. **Route ops by measured performance.** When you run a tensor op, the routing model picks the fastest GPU for that specific op at that specific size. Not by vendor name or spec sheet — by what was actually measured. A 512x512 matmul might go to the discrete GPU while a 64x64 add stays on the integrated one because transfer overhead kills the speedup.
-
-4. **Hot-swap on hardware changes.** New GPU installed, driver updated, new node joins the fleet — any-gpu detects the change, re-benchmarks, retrains the routing model, and patches the memory map. Like a firmware update. No manual tuning.
-
-5. **Multi-GPU dispatch.** On machines with multiple GPUs (integrated + discrete, or multi-card), the routing model splits work across devices. The 5700 XT handles the bulk matmul while the iGPU handles the small elementwise ops in parallel.
-
-The routing model is the moat. Every other GPU framework hardcodes vendor assumptions. any-gpu measures reality.
+1. **Auto-benchmark on first run.** Microbenchmarks per op type at various sizes. Real dispatch, real numbers.
+2. **Bake a subatomic routing model.** Nanobyte `.weights` file capturing your hardware's exact performance profile. Same architecture as kova's pyramid.
+3. **Route by measurement, not vendor name.** 512x512 matmul might go to discrete GPU while 64x64 add stays on integrated.
+4. **Hot-swap on hardware changes.** Re-benchmark, retrain, patch the memory map. Like a firmware update.
+5. **Multi-GPU dispatch.** Split work across devices by measured throughput.
 
 ## Build
 
@@ -213,7 +253,7 @@ cargo run --release --example bench
 cargo test
 ```
 
-Three tests: add, mul, matmul (2x2). Requires a GPU (any backend).
+27 tests across all op categories. Requires a GPU (any backend).
 
 ## License
 

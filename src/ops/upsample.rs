@@ -70,16 +70,14 @@ impl GpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
-
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_upsample_2x() {
         // 1x1x2x2 -> 1x1x4x4
-        let input = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let out = DEV.upsample_nearest2d(&input, 1, 1, 2, 2, 2, 2).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let out = dev().upsample_nearest2d(&input, 1, 1, 2, 2, 2, 2).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_eq!(result, vec![
             1.0, 1.0, 2.0, 2.0,
             1.0, 1.0, 2.0, 2.0,
@@ -91,9 +89,9 @@ mod tests {
     #[test]
     fn test_upsample_multichannel() {
         // 1x2x1x1 (2 channels, 1x1 spatial) -> 1x2x2x2
-        let input = DEV.upload(&[5.0, 10.0]);
-        let out = DEV.upsample_nearest2d(&input, 1, 2, 1, 1, 2, 2).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[5.0, 10.0]);
+        let out = dev().upsample_nearest2d(&input, 1, 2, 1, 1, 2, 2).unwrap();
+        let result = dev().read(&out).unwrap();
         assert_eq!(result, vec![5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0]);
     }
 }

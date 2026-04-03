@@ -166,78 +166,76 @@ impl GpuDevice {
 mod tests {
     use super::*;
     use crate::ops::assert_approx;
-    use std::sync::LazyLock;
-
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_add() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = DEV.upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = DEV.add(&a, &b).unwrap();
-        let result = DEV.read(&c).unwrap();
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
+        let c = dev().add(&a, &b).unwrap();
+        let result = dev().read(&c).unwrap();
         assert_eq!(result, vec![11.0, 22.0, 33.0, 44.0]);
     }
 
     #[test]
     fn test_sub() {
-        let a = DEV.upload(&[10.0, 20.0, 30.0]);
-        let b = DEV.upload(&[1.0, 2.0, 3.0]);
-        let result = DEV.read(&DEV.sub(&a, &b).unwrap()).unwrap();
+        let a = dev().upload(&[10.0, 20.0, 30.0]);
+        let b = dev().upload(&[1.0, 2.0, 3.0]);
+        let result = dev().read(&dev().sub(&a, &b).unwrap()).unwrap();
         assert_eq!(result, vec![9.0, 18.0, 27.0]);
     }
 
     #[test]
     fn test_mul() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = DEV.upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = DEV.mul(&a, &b).unwrap();
-        let result = DEV.read(&c).unwrap();
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
+        let c = dev().mul(&a, &b).unwrap();
+        let result = dev().read(&c).unwrap();
         assert_eq!(result, vec![10.0, 40.0, 90.0, 160.0]);
     }
 
     #[test]
     fn test_relu() {
-        let a = DEV.upload(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
-        let result = DEV.read(&DEV.relu(&a).unwrap()).unwrap();
+        let a = dev().upload(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
+        let result = dev().read(&dev().relu(&a).unwrap()).unwrap();
         assert_eq!(result, vec![0.0, 0.0, 0.0, 1.0, 2.0]);
     }
 
     #[test]
     fn test_sigmoid() {
-        let a = DEV.upload(&[0.0, 1.0, -1.0, 10.0, -10.0]);
-        let result = DEV.read(&DEV.sigmoid(&a).unwrap()).unwrap();
+        let a = dev().upload(&[0.0, 1.0, -1.0, 10.0, -10.0]);
+        let result = dev().read(&dev().sigmoid(&a).unwrap()).unwrap();
         assert_approx(&result, &[0.5, 0.7311, 0.2689, 0.99995, 0.00005], 1e-3);
     }
 
     #[test]
     fn test_swish() {
-        let a = DEV.upload(&[0.0, 1.0, -1.0, 2.0]);
-        let result = DEV.read(&DEV.swish(&a).unwrap()).unwrap();
+        let a = dev().upload(&[0.0, 1.0, -1.0, 2.0]);
+        let result = dev().read(&dev().swish(&a).unwrap()).unwrap();
         // swish(x) = x * sigmoid(x)
         assert_approx(&result, &[0.0, 0.7311, -0.2689, 1.7616], 1e-3);
     }
 
     #[test]
     fn test_tanh() {
-        let a = DEV.upload(&[0.0, 1.0, -1.0, 3.0]);
-        let result = DEV.read(&DEV.tanh_act(&a).unwrap()).unwrap();
+        let a = dev().upload(&[0.0, 1.0, -1.0, 3.0]);
+        let result = dev().read(&dev().tanh_act(&a).unwrap()).unwrap();
         assert_approx(&result, &[0.0, 0.7616, -0.7616, 0.9951], 1e-3);
     }
 
     #[test]
     fn test_scale() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let result = DEV.read(&DEV.scale(&a, 0.5).unwrap()).unwrap();
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let result = dev().read(&dev().scale(&a, 0.5).unwrap()).unwrap();
         assert_eq!(result, vec![0.5, 1.0, 1.5, 2.0]);
     }
 
     #[test]
     fn test_matmul_2x2() {
-        let a = DEV.upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = DEV.upload(&[5.0, 6.0, 7.0, 8.0]);
-        let c = DEV.matmul(&a, &b, 2, 2, 2).unwrap();
-        let result = DEV.read(&c).unwrap();
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
+        let c = dev().matmul(&a, &b, 2, 2, 2).unwrap();
+        let result = dev().read(&c).unwrap();
         assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
     }
 }

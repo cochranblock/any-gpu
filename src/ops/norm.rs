@@ -164,19 +164,17 @@ impl GpuDevice {
 mod tests {
     use super::*;
     use crate::ops::assert_approx;
-    use std::sync::LazyLock;
-
-    static DEV: LazyLock<GpuDevice> = LazyLock::new(|| GpuDevice::gpu().expect("need a GPU"));
+    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
     #[test]
     fn test_group_norm_basic() {
         // batch=1, channels=2, spatial=2, groups=2 (each channel is its own group)
         // Input: channel 0 = [1, 3], channel 1 = [2, 4]
-        let input = DEV.upload(&[1.0, 3.0, 2.0, 4.0]);
-        let gamma = DEV.upload(&[1.0, 1.0]);
-        let beta = DEV.upload(&[0.0, 0.0]);
-        let out = DEV.group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
+        let gamma = dev().upload(&[1.0, 1.0]);
+        let beta = dev().upload(&[0.0, 0.0]);
+        let out = dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
+        let result = dev().read(&out).unwrap();
         // Channel 0: mean=2, var=1 -> [-1, 1]
         // Channel 1: mean=3, var=1 -> [-1, 1]
         assert_approx(&result, &[-1.0, 1.0, -1.0, 1.0], 1e-3);
@@ -184,11 +182,11 @@ mod tests {
 
     #[test]
     fn test_group_norm_with_affine() {
-        let input = DEV.upload(&[1.0, 3.0, 2.0, 4.0]);
-        let gamma = DEV.upload(&[2.0, 0.5]);
-        let beta = DEV.upload(&[1.0, -1.0]);
-        let out = DEV.group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
-        let result = DEV.read(&out).unwrap();
+        let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
+        let gamma = dev().upload(&[2.0, 0.5]);
+        let beta = dev().upload(&[1.0, -1.0]);
+        let out = dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
+        let result = dev().read(&out).unwrap();
         // Ch0: norm=[-1,1] * 2 + 1 = [-1, 3]
         // Ch1: norm=[-1,1] * 0.5 + (-1) = [-1.5, -0.5]
         assert_approx(&result, &[-1.0, 3.0, -1.5, -0.5], 1e-3);
