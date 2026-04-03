@@ -348,95 +348,235 @@ mod tests {
 
     fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
+    // CPU reference matmul for cross-validation
+    fn cpu_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                let mut sum = 0.0;
+                for i in 0..k { sum += a[row * k + i] * b[i * n + col]; }
+                out[row * n + col] = sum;
+            }
+        }
+        out
+    }
+
+    // CPU reference conv2d for cross-validation
+    fn cpu_conv2d(
+        input: &[f32], weight: &[f32], bias: &[f32],
+        batch: usize, in_c: usize, in_h: usize, in_w: usize,
+        out_c: usize, kh: usize, kw: usize,
+        stride: (usize, usize), padding: (usize, usize), groups: usize,
+    ) -> Vec<f32> {
+        let out_h = (in_h + 2 * padding.0 - kh) / stride.0 + 1;
+        let out_w = (in_w + 2 * padding.1 - kw) / stride.1 + 1;
+        let group_in = in_c / groups;
+        let group_out = out_c / groups;
+        let mut out = vec![0.0f32; batch * out_c * out_h * out_w];
+        for n in 0..batch {
+            for oc in 0..out_c {
+                let g = oc / group_out;
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let mut sum = bias[oc];
+                        for ic in 0..group_in {
+                            for kr in 0..kh {
+                                for kc in 0..kw {
+                                    let ih = oh * stride.0 + kr;
+                                    let iw = ow * stride.1 + kc;
+                                    let ih = ih as isize - padding.0 as isize;
+                                    let iw = iw as isize - padding.1 as isize;
+                                    if ih >= 0 && ih < in_h as isize && iw >= 0 && iw < in_w as isize {
+                                        let in_idx = n * in_c * in_h * in_w
+                                            + (g * group_in + ic) * in_h * in_w
+                                            + ih as usize * in_w + iw as usize;
+                                        let w_idx = oc * group_in * kh * kw + ic * kh * kw + kr * kw + kc;
+                                        sum += input[in_idx] * weight[w_idx];
+                                    }
+                                }
+                            }
+                        }
+                        out[n * out_c * out_h * out_w + oc * out_h * out_w + oh * out_w + ow] = sum;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // --- Matmul tests ---
+
+    #[test]
+    fn test_matmul_2x2() {
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
+        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
+        let result = dev().read(&dev().matmul(&a, &b, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn test_matmul_nonsquare_vs_cpu() {
+        // 3x4 @ 4x2 = 3x2
+        let a: Vec<f32> = (1..=12).map(|x| x as f32).collect();
+        let b: Vec<f32> = (1..=8).map(|x| x as f32 * 0.1).collect();
+        let expected = cpu_matmul(&a, &b, 3, 2, 4);
+        let result = dev().read(&dev().matmul(&dev().upload(&a), &dev().upload(&b), 3, 2, 4).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
+    }
+
+    #[test]
+    fn test_matmul_1x1() {
+        let result = dev().read(&dev().matmul(&dev().upload(&[3.0]), &dev().upload(&[7.0]), 1, 1, 1).unwrap()).unwrap();
+        assert_eq!(result, vec![21.0]);
+    }
+
+    #[test]
+    fn test_matmul_17x13_vs_cpu() {
+        // Odd dims that don't align to 16x16 workgroup
+        let m = 17; let n = 13; let k = 11;
+        let a: Vec<f32> = (0..m*k).map(|i| (i as f32 * 0.01) - 0.5).collect();
+        let b: Vec<f32> = (0..k*n).map(|i| (i as f32 * 0.01) - 0.3).collect();
+        let expected = cpu_matmul(&a, &b, m, n, k);
+        let result = dev().read(&dev().matmul(
+            &dev().upload(&a), &dev().upload(&b), m as u32, n as u32, k as u32
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    // --- Batch matmul tests ---
+
     #[test]
     fn test_batch_matmul() {
-        // batch=2, each 2x2 matmul
-        let a = dev().upload(&[
-            1.0, 2.0, 3.0, 4.0, // batch 0
-            5.0, 6.0, 7.0, 8.0, // batch 1
-        ]);
-        let b = dev().upload(&[
-            1.0, 0.0, 0.0, 1.0, // identity batch 0
-            2.0, 0.0, 0.0, 2.0, // 2x identity batch 1
-        ]);
-        let c = dev().batch_matmul(&a, &b, 2, 2, 2, 2).unwrap();
-        let result = dev().read(&c).unwrap();
-        assert_eq!(result, vec![
-            1.0, 2.0, 3.0, 4.0,   // A * I = A
-            10.0, 12.0, 14.0, 16.0, // A * 2I = 2A
-        ]);
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let b = dev().upload(&[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0]);
+        let result = dev().read(&dev().batch_matmul(&a, &b, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0]);
     }
 
     #[test]
-    fn test_conv2d_3x3_no_pad() {
-        // 1 batch, 1 channel, 4x4 input, 1 output channel, 3x3 kernel
-        // Vertical edge detector
-        let input = dev().upload(&[
-            1.0, 2.0, 3.0, 4.0,
-            5.0, 6.0, 7.0, 8.0,
-            9.0, 10.0, 11.0, 12.0,
-            13.0, 14.0, 15.0, 16.0,
-        ]);
-        let weight = dev().upload(&[
-            1.0, 0.0, -1.0,
-            1.0, 0.0, -1.0,
-            1.0, 0.0, -1.0,
-        ]);
-        let bias = dev().upload(&[0.0]);
-        let out = dev().conv2d(&input, &weight, Some(&bias),
-            1, 1, 4, 4, 1, 3, 3, (1, 1), (0, 0), (1, 1), 1).unwrap();
-        let result = dev().read(&out).unwrap();
-        // Output is 2x2. Manual calculation:
-        // (0,0): 1*1+2*0+3*(-1)+5*1+6*0+7*(-1)+9*1+10*0+11*(-1) = 1-3+5-7+9-11 = -6
-        assert_eq!(result.len(), 4);
-        assert_approx(&result, &[-6.0, -6.0, -6.0, -6.0], 1e-5);
+    fn test_batch_matmul_nonsquare() {
+        // batch=1, 2x3 @ 3x1 = 2x1
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = dev().upload(&[1.0, 1.0, 1.0]);
+        let result = dev().read(&dev().batch_matmul(&a, &b, 1, 2, 1, 3).unwrap()).unwrap();
+        assert_eq!(result, vec![6.0, 15.0]);
+    }
+
+    // --- Conv2d tests ---
+
+    #[test]
+    fn test_conv2d_3x3_vs_cpu() {
+        // Verify GPU conv2d matches CPU reference
+        let input: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let weight = vec![1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0];
+        let bias = vec![0.0];
+        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), 1);
+        let result = dev().read(&dev().conv2d(
+            &dev().upload(&input), &dev().upload(&weight), Some(&dev().upload(&bias)),
+            1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-5);
     }
 
     #[test]
-    fn test_conv2d_with_padding() {
-        // 1x1x3x3 input, 1x1x3x3 kernel, padding=1 -> 3x3 output
-        let input = dev().upload(&[
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-        ]);
-        // All-ones kernel: sum of neighborhood
-        let weight = dev().upload(&[1.0; 9]);
-        let out = dev().conv2d(&input, &weight, None,
-            1, 1, 3, 3, 1, 3, 3, (1, 1), (1, 1), (1, 1), 1).unwrap();
-        let result = dev().read(&out).unwrap();
-        assert_eq!(result.len(), 9);
-        // Center pixel: sum of all 9 = 45
-        assert_approx(&result[4..5], &[45.0], 1e-5);
+    fn test_conv2d_1x1_kernel() {
+        // 1x1 conv = per-pixel channel mixing
+        // 2 in channels, 3 out channels, 2x2 spatial
+        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
+        // weight[out_c, in_c, 1, 1]: 3 output channels, 2 input channels
+        let weight = dev().upload(&[1.0, 0.5, 0.0, 1.0, -1.0, 2.0]);
+        let bias = dev().upload(&[0.0, 0.0, 0.0]);
+        let result = dev().read(&dev().conv2d(&input, &weight, Some(&bias),
+            1, 2, 2, 2, 3, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+        // out_c=0: 1.0*in0 + 0.5*in1
+        assert_approx(&result[0..4], &[6.0, 12.0, 18.0, 24.0], 1e-5);
+        // out_c=1: 0.0*in0 + 1.0*in1
+        assert_approx(&result[4..8], &[10.0, 20.0, 30.0, 40.0], 1e-5);
+    }
+
+    #[test]
+    fn test_conv2d_padding_vs_cpu() {
+        let input: Vec<f32> = (1..=9).map(|x| x as f32).collect();
+        let weight = vec![1.0; 9];
+        let bias = vec![0.0];
+        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), 1);
+        let result = dev().read(&dev().conv2d(
+            &dev().upload(&input), &dev().upload(&weight), None,
+            1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), (1,1), 1
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-5);
     }
 
     #[test]
     fn test_conv2d_stride2() {
-        // 1x1x4x4 input, 1x1x1x1 kernel (identity), stride=2 -> 2x2 output
-        let input = dev().upload(&[
-            1.0, 2.0, 3.0, 4.0,
-            5.0, 6.0, 7.0, 8.0,
-            9.0, 10.0, 11.0, 12.0,
-            13.0, 14.0, 15.0, 16.0,
-        ]);
-        let weight = dev().upload(&[1.0]); // 1x1 kernel
-        let out = dev().conv2d(&input, &weight, None,
-            1, 1, 4, 4, 1, 1, 1, (2, 2), (0, 0), (1, 1), 1).unwrap();
-        let result = dev().read(&out).unwrap();
+        let input: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let result = dev().read(&dev().conv2d(
+            &dev().upload(&input), &dev().upload(&[1.0]), None,
+            1, 1, 4, 4, 1, 1, 1, (2,2), (0,0), (1,1), 1
+        ).unwrap()).unwrap();
         assert_eq!(result, vec![1.0, 3.0, 9.0, 11.0]);
     }
 
     #[test]
-    fn test_conv_transpose2d_basic() {
-        // Transpose of a 1x1 conv with stride=2 is an upsampling
-        // input: 1x1x2x2, weight: 1x1x1x1 (value 1.0), stride=2 -> output 1x1x3x3
+    fn test_conv2d_5x5_kernel_vs_cpu() {
+        // 1x1x8x8 input, 1x1x5x5 kernel, padding=2 -> 8x8 output
+        let input: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
+        let weight: Vec<f32> = (0..25).map(|i| if i == 12 { 1.0 } else { 0.0 }).collect(); // center=1, rest=0 -> identity
+        let bias = vec![0.0];
+        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), 1);
+        let result = dev().read(&dev().conv2d(
+            &dev().upload(&input), &dev().upload(&weight), None,
+            1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), (1,1), 1
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
+    }
+
+    #[test]
+    fn test_conv2d_multichannel_vs_cpu() {
+        // batch=2, in_c=3, out_c=2, 4x4, 3x3 kernel, padding=1
+        let batch = 2; let in_c = 3; let out_c = 2; let h = 4; let w = 4;
+        let input: Vec<f32> = (0..batch*in_c*h*w).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let weight: Vec<f32> = (0..out_c*in_c*3*3).map(|i| (i as f32) * 0.02 - 0.3).collect();
+        let bias = vec![0.1, -0.2];
+        let expected = cpu_conv2d(&input, &weight, &bias, batch, in_c, h, w, out_c, 3, 3, (1,1), (1,1), 1);
+        let result = dev().read(&dev().conv2d(
+            &dev().upload(&input), &dev().upload(&weight), Some(&dev().upload(&bias)),
+            batch as u32, in_c as u32, h as u32, w as u32, out_c as u32, 3, 3, (1,1), (1,1), (1,1), 1
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_conv2d_with_bias() {
+        // Verify bias is added correctly
+        let input = dev().upload(&[0.0; 4]); // 1x1x2x2 zeros
+        let weight = dev().upload(&[0.0]); // 1x1x1x1 zero kernel
+        let bias = dev().upload(&[42.0]);
+        let result = dev().read(&dev().conv2d(&input, &weight, Some(&bias),
+            1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+        assert_eq!(result, vec![42.0, 42.0, 42.0, 42.0]);
+    }
+
+    // --- Transpose conv2d tests ---
+
+    #[test]
+    fn test_conv_transpose2d_stride2() {
         let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
         let weight = dev().upload(&[1.0]);
-        let out = dev().conv_transpose2d(&input, &weight, None,
-            1, 1, 2, 2, 1, 1, 1, (2, 2), (0, 0), (0, 0), (1, 1), 1).unwrap();
-        let result = dev().read(&out).unwrap();
-        // 3x3 output: values at stride positions, zeros elsewhere
+        let result = dev().read(&dev().conv_transpose2d(&input, &weight, None,
+            1, 1, 2, 2, 1, 1, 1, (2,2), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
         assert_eq!(result.len(), 9);
         assert_approx(&result, &[1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0], 1e-5);
+    }
+
+    #[test]
+    fn test_conv_transpose2d_3x3_kernel() {
+        // 1x1x1x1 input (single pixel), 1x1x3x3 all-ones kernel, stride=1 -> 3x3 output all same value
+        let input = dev().upload(&[5.0]);
+        let weight = dev().upload(&[1.0; 9]);
+        let result = dev().read(&dev().conv_transpose2d(&input, &weight, None,
+            1, 1, 1, 1, 1, 3, 3, (1,1), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
+        assert_eq!(result.len(), 9);
+        assert_approx(&result, &[5.0; 9], 1e-5);
     }
 }

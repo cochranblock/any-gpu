@@ -168,13 +168,32 @@ mod tests {
     use crate::ops::assert_approx;
     fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
+    // CPU references for cross-validation
+    fn cpu_sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+    fn cpu_swish(x: f32) -> f32 { x * cpu_sigmoid(x) }
+
     #[test]
     fn test_add() {
         let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
         let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = dev().add(&a, &b).unwrap();
-        let result = dev().read(&c).unwrap();
+        let result = dev().read(&dev().add(&a, &b).unwrap()).unwrap();
         assert_eq!(result, vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    #[test]
+    fn test_add_odd_size() {
+        // 13 elements — not aligned to workgroup size 256
+        let a_data: Vec<f32> = (0..13).map(|i| i as f32).collect();
+        let b_data: Vec<f32> = (0..13).map(|i| i as f32 * 10.0).collect();
+        let expected: Vec<f32> = a_data.iter().zip(&b_data).map(|(a, b)| a + b).collect();
+        let result = dev().read(&dev().add(&dev().upload(&a_data), &dev().upload(&b_data)).unwrap()).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_add_single_element() {
+        let result = dev().read(&dev().add(&dev().upload(&[42.0]), &dev().upload(&[-42.0])).unwrap()).unwrap();
+        assert_eq!(result, vec![0.0]);
     }
 
     #[test]
@@ -189,9 +208,16 @@ mod tests {
     fn test_mul() {
         let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
         let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
-        let c = dev().mul(&a, &b).unwrap();
-        let result = dev().read(&c).unwrap();
+        let result = dev().read(&dev().mul(&a, &b).unwrap()).unwrap();
         assert_eq!(result, vec![10.0, 40.0, 90.0, 160.0]);
+    }
+
+    #[test]
+    fn test_mul_zeros() {
+        let a = dev().upload(&[1.0, 2.0, 3.0]);
+        let b = dev().upload(&[0.0, 0.0, 0.0]);
+        let result = dev().read(&dev().mul(&a, &b).unwrap()).unwrap();
+        assert_eq!(result, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -202,40 +228,50 @@ mod tests {
     }
 
     #[test]
-    fn test_sigmoid() {
-        let a = dev().upload(&[0.0, 1.0, -1.0, 10.0, -10.0]);
-        let result = dev().read(&dev().sigmoid(&a).unwrap()).unwrap();
-        assert_approx(&result, &[0.5, 0.7311, 0.2689, 0.99995, 0.00005], 1e-3);
+    fn test_relu_all_negative() {
+        let result = dev().read(&dev().relu(&dev().upload(&[-100.0, -0.001, -1e-10])).unwrap()).unwrap();
+        assert_eq!(result, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_swish() {
-        let a = dev().upload(&[0.0, 1.0, -1.0, 2.0]);
-        let result = dev().read(&dev().swish(&a).unwrap()).unwrap();
-        // swish(x) = x * sigmoid(x)
-        assert_approx(&result, &[0.0, 0.7311, -0.2689, 1.7616], 1e-3);
+    fn test_sigmoid_vs_cpu() {
+        let data: Vec<f32> = vec![-50.0, -10.0, -1.0, 0.0, 1.0, 10.0, 50.0];
+        let expected: Vec<f32> = data.iter().map(|&x| cpu_sigmoid(x)).collect();
+        let result = dev().read(&dev().sigmoid(&dev().upload(&data)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
     }
 
     #[test]
-    fn test_tanh() {
-        let a = dev().upload(&[0.0, 1.0, -1.0, 3.0]);
-        let result = dev().read(&dev().tanh_act(&a).unwrap()).unwrap();
-        assert_approx(&result, &[0.0, 0.7616, -0.7616, 0.9951], 1e-3);
+    fn test_swish_vs_cpu() {
+        let data: Vec<f32> = vec![-5.0, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0];
+        let expected: Vec<f32> = data.iter().map(|&x| cpu_swish(x)).collect();
+        let result = dev().read(&dev().swish(&dev().upload(&data)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
+    }
+
+    #[test]
+    fn test_tanh_vs_cpu() {
+        let data: Vec<f32> = vec![-10.0, -1.0, 0.0, 1.0, 10.0];
+        let expected: Vec<f32> = data.iter().map(|&x| x.tanh()).collect();
+        let result = dev().read(&dev().tanh_act(&dev().upload(&data)).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
     }
 
     #[test]
     fn test_scale() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let result = dev().read(&dev().scale(&a, 0.5).unwrap()).unwrap();
+        let result = dev().read(&dev().scale(&dev().upload(&[1.0, 2.0, 3.0, 4.0]), 0.5).unwrap()).unwrap();
         assert_eq!(result, vec![0.5, 1.0, 1.5, 2.0]);
     }
 
     #[test]
-    fn test_matmul_2x2() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
-        let c = dev().matmul(&a, &b, 2, 2, 2).unwrap();
-        let result = dev().read(&c).unwrap();
-        assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
+    fn test_scale_zero() {
+        let result = dev().read(&dev().scale(&dev().upload(&[99.0, -99.0]), 0.0).unwrap()).unwrap();
+        assert_eq!(result, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_scale_negative() {
+        let result = dev().read(&dev().scale(&dev().upload(&[1.0, -2.0, 3.0]), -2.0).unwrap()).unwrap();
+        assert_eq!(result, vec![-2.0, 4.0, -6.0]);
     }
 }

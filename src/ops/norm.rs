@@ -166,18 +166,64 @@ mod tests {
     use crate::ops::assert_approx;
     fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
+    // CPU reference group_norm
+    fn cpu_group_norm(
+        input: &[f32], gamma: &[f32], beta: &[f32],
+        batch: usize, channels: usize, spatial: usize, groups: usize, eps: f32,
+    ) -> Vec<f32> {
+        let cpg = channels / groups;
+        let mut out = vec![0.0f32; input.len()];
+        for n in 0..batch {
+            for g in 0..groups {
+                let mut sum = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                let count = (cpg * spatial) as f32;
+                for c in 0..cpg {
+                    let ch = g * cpg + c;
+                    for s in 0..spatial {
+                        let v = input[n * channels * spatial + ch * spatial + s];
+                        sum += v;
+                        sum_sq += v * v;
+                    }
+                }
+                let mean = sum / count;
+                let var = sum_sq / count - mean * mean;
+                let inv_std = 1.0 / (var + eps).sqrt();
+                for c in 0..cpg {
+                    let ch = g * cpg + c;
+                    for s in 0..spatial {
+                        let idx = n * channels * spatial + ch * spatial + s;
+                        out[idx] = (input[idx] - mean) * inv_std * gamma[ch] + beta[ch];
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
-    fn test_group_norm_basic() {
-        // batch=1, channels=2, spatial=2, groups=2 (each channel is its own group)
-        // Input: channel 0 = [1, 3], channel 1 = [2, 4]
+    fn test_group_norm_per_channel() {
+        // groups=channels: each channel is its own group
         let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
         let gamma = dev().upload(&[1.0, 1.0]);
         let beta = dev().upload(&[0.0, 0.0]);
-        let out = dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
-        let result = dev().read(&out).unwrap();
-        // Channel 0: mean=2, var=1 -> [-1, 1]
-        // Channel 1: mean=3, var=1 -> [-1, 1]
+        let result = dev().read(&dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
         assert_approx(&result, &[-1.0, 1.0, -1.0, 1.0], 1e-3);
+    }
+
+    #[test]
+    fn test_group_norm_single_group() {
+        // groups=1: all channels normalized together
+        // 1 batch, 4 channels, 1 spatial -> normalize all 4 values as one group
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let gamma = vec![1.0; 4];
+        let beta = vec![0.0; 4];
+        let expected = cpu_group_norm(&data, &gamma, &beta, 1, 4, 1, 1, 1e-5);
+        let result = dev().read(&dev().group_norm(
+            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+            1, 4, 1, 1, 1e-5
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
     }
 
     #[test]
@@ -185,10 +231,34 @@ mod tests {
         let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
         let gamma = dev().upload(&[2.0, 0.5]);
         let beta = dev().upload(&[1.0, -1.0]);
-        let out = dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap();
-        let result = dev().read(&out).unwrap();
-        // Ch0: norm=[-1,1] * 2 + 1 = [-1, 3]
-        // Ch1: norm=[-1,1] * 0.5 + (-1) = [-1.5, -0.5]
+        let result = dev().read(&dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
         assert_approx(&result, &[-1.0, 3.0, -1.5, -0.5], 1e-3);
+    }
+
+    #[test]
+    fn test_group_norm_batched_vs_cpu() {
+        // batch=2, channels=4, spatial=3, groups=2
+        let data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 - 0.5).collect();
+        let gamma = vec![1.0, 2.0, 0.5, 1.5];
+        let beta = vec![0.0, 1.0, -1.0, 0.5];
+        let expected = cpu_group_norm(&data, &gamma, &beta, 2, 4, 3, 2, 1e-5);
+        let result = dev().read(&dev().group_norm(
+            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+            2, 4, 3, 2, 1e-5
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_group_norm_constant_input() {
+        // All same values -> normalized to 0 (var=0, eps prevents div by zero)
+        let data = vec![5.0; 8]; // 1 batch, 2 channels, 4 spatial, 2 groups
+        let gamma = vec![1.0, 1.0];
+        let beta = vec![0.0, 0.0];
+        let result = dev().read(&dev().group_norm(
+            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+            1, 2, 4, 2, 1e-5
+        ).unwrap()).unwrap();
+        assert_approx(&result, &[0.0; 8], 1e-3);
     }
 }

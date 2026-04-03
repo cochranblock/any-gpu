@@ -133,45 +133,76 @@ mod tests {
 
     #[test]
     fn test_concat_flat() {
-        let a = dev().upload(&[1.0, 2.0, 3.0]);
-        let b = dev().upload(&[4.0, 5.0, 6.0]);
-        // outer=1, a_inner=3, b_inner=3 -> simple append
-        let result = dev().read(&dev().concat(&a, &b, 1, 3, 3).unwrap()).unwrap();
+        let result = dev().read(&dev().concat(&dev().upload(&[1.0, 2.0, 3.0]), &dev().upload(&[4.0, 5.0, 6.0]), 1, 3, 3).unwrap()).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
-    fn test_concat_channel_axis() {
-        // Two 1x2x2 tensors (NCHW: N=1, C=1, H=2, W=2), concat along C
-        // a: [[1,2],[3,4]], b: [[5,6],[7,8]]
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
-        // outer=N=1, a_inner=C_a*H*W=4, b_inner=4
-        let result = dev().read(&dev().concat(&a, &b, 1, 4, 4).unwrap()).unwrap();
-        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    fn test_concat_asymmetric() {
+        // Different sized inner dims: a has 2 elements, b has 3 per outer block
+        let a = dev().upload(&[1.0, 2.0]);
+        let b = dev().upload(&[3.0, 4.0, 5.0]);
+        let result = dev().read(&dev().concat(&a, &b, 1, 2, 3).unwrap()).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_concat_batched_channel_axis() {
+        // batch=2, concat 1-channel and 2-channel tensors along C, spatial=2
+        // a: [batch=2, c=1, spatial=2] = [10, 20, 30, 40]
+        // b: [batch=2, c=2, spatial=2] = [1, 2, 3, 4, 5, 6, 7, 8]
+        let a = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
+        let b = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        // outer=batch=2, a_inner=1*2=2, b_inner=2*2=4
+        let result = dev().read(&dev().concat(&a, &b, 2, 2, 4).unwrap()).unwrap();
+        // batch 0: [10,20, 1,2,3,4], batch 1: [30,40, 5,6,7,8]
+        assert_eq!(result, vec![10.0, 20.0, 1.0, 2.0, 3.0, 4.0, 30.0, 40.0, 5.0, 6.0, 7.0, 8.0]);
     }
 
     #[test]
     fn test_transpose_2d() {
-        // 2x3 matrix -> 3x2
         let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        // outer=1, d0=2, d1=3, inner=1
         let result = dev().read(&dev().transpose(&a, 1, 2, 3, 1).unwrap()).unwrap();
-        // Transposed: [[1,4],[2,5],[3,6]]
         assert_eq!(result, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 
     #[test]
+    fn test_transpose_square() {
+        // 3x3 -> 3x3 transpose
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        let result = dev().read(&dev().transpose(&a, 1, 3, 3, 1).unwrap()).unwrap();
+        assert_eq!(result, vec![1.0, 4.0, 7.0, 2.0, 5.0, 8.0, 3.0, 6.0, 9.0]);
+    }
+
+    #[test]
     fn test_transpose_batched() {
-        // batch=2, 2x3 matrices -> batch=2, 3x2 matrices
         let a = dev().upload(&[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 0
-            7.0, 8.0, 9.0, 10.0, 11.0, 12.0, // batch 1
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ]);
         let result = dev().read(&dev().transpose(&a, 2, 2, 3, 1).unwrap()).unwrap();
         assert_eq!(result, vec![
             1.0, 4.0, 2.0, 5.0, 3.0, 6.0,
             7.0, 10.0, 8.0, 11.0, 9.0, 12.0,
         ]);
+    }
+
+    #[test]
+    fn test_transpose_1x_n() {
+        // 1xN transpose = Nx1 (column vector)
+        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let result = dev().read(&dev().transpose(&a, 1, 1, 5, 1).unwrap()).unwrap();
+        // 5x1 is same flat data (no-op for 1-row)
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_transpose_roundtrip() {
+        // Transpose twice = identity
+        let data: Vec<f32> = (0..20).map(|i| i as f32).collect(); // 4x5
+        let t1 = dev().transpose(&dev().upload(&data), 1, 4, 5, 1).unwrap();
+        let t2 = dev().transpose(&t1, 1, 5, 4, 1).unwrap();
+        let result = dev().read(&t2).unwrap();
+        assert_eq!(result, data);
     }
 }

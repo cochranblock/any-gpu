@@ -72,12 +72,27 @@ mod tests {
     use super::*;
     fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
+    // CPU reference upsample
+    fn cpu_upsample(input: &[f32], batch: usize, ch: usize, h: usize, w: usize, sh: usize, sw: usize) -> Vec<f32> {
+        let oh = h * sh; let ow = w * sw;
+        let mut out = vec![0.0f32; batch * ch * oh * ow];
+        for n in 0..batch {
+            for c in 0..ch {
+                for y in 0..oh {
+                    for x in 0..ow {
+                        let iy = y * h / oh; let ix = x * w / ow;
+                        out[n*ch*oh*ow + c*oh*ow + y*ow + x] = input[n*ch*h*w + c*h*w + iy*w + ix];
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_upsample_2x() {
-        // 1x1x2x2 -> 1x1x4x4
         let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let out = dev().upsample_nearest2d(&input, 1, 1, 2, 2, 2, 2).unwrap();
-        let result = dev().read(&out).unwrap();
+        let result = dev().read(&dev().upsample_nearest2d(&input, 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
         assert_eq!(result, vec![
             1.0, 1.0, 2.0, 2.0,
             1.0, 1.0, 2.0, 2.0,
@@ -87,11 +102,27 @@ mod tests {
     }
 
     #[test]
-    fn test_upsample_multichannel() {
-        // 1x2x1x1 (2 channels, 1x1 spatial) -> 1x2x2x2
-        let input = dev().upload(&[5.0, 10.0]);
-        let out = dev().upsample_nearest2d(&input, 1, 2, 1, 1, 2, 2).unwrap();
-        let result = dev().read(&out).unwrap();
-        assert_eq!(result, vec![5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0]);
+    fn test_upsample_3x_vs_cpu() {
+        // Non-power-of-2 scale
+        let data: Vec<f32> = (1..=6).map(|x| x as f32).collect(); // 1x1x2x3
+        let expected = cpu_upsample(&data, 1, 1, 2, 3, 3, 3);
+        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&data), 1, 1, 2, 3, 3, 3).unwrap()).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_upsample_batched_multichannel_vs_cpu() {
+        // batch=2, channels=3, 2x2 spatial, scale 2x
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let expected = cpu_upsample(&data, 2, 3, 2, 2, 2, 2);
+        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&data), 2, 3, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_upsample_1x1() {
+        // 1x1 spatial -> 3x3 spatial
+        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap()).unwrap();
+        assert_eq!(result, vec![7.0; 9]);
     }
 }

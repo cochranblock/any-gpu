@@ -189,60 +189,123 @@ mod tests {
 
     fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
 
+    // CPU reference softmax
+    fn cpu_softmax(input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; input.len()];
+        for r in 0..rows {
+            let row = &input[r * cols..(r + 1) * cols];
+            let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let sum: f32 = row.iter().map(|&x| (x - mx).exp()).sum();
+            for c in 0..cols {
+                out[r * cols + c] = (row[c] - mx).exp() / sum;
+            }
+        }
+        out
+    }
+
+    // CPU reference attention
+    fn cpu_attention(q: &[f32], k: &[f32], v: &[f32], seq: usize, dk: usize) -> Vec<f32> {
+        let scale = 1.0 / (dk as f32).sqrt();
+        // scores = Q @ K^T * scale: [seq, seq]
+        let mut scores = vec![0.0f32; seq * seq];
+        for i in 0..seq {
+            for j in 0..seq {
+                let mut s = 0.0;
+                for d in 0..dk { s += q[i * dk + d] * k[j * dk + d]; }
+                scores[i * seq + j] = s * scale;
+            }
+        }
+        let attn = cpu_softmax(&scores, seq, seq);
+        // out = attn @ V: [seq, dk]
+        let mut out = vec![0.0f32; seq * dk];
+        for i in 0..seq {
+            for d in 0..dk {
+                let mut s = 0.0;
+                for j in 0..seq { s += attn[i * seq + j] * v[j * dk + d]; }
+                out[i * dk + d] = s;
+            }
+        }
+        out
+    }
+
     #[test]
-    fn test_softmax() {
-        let input = dev().upload(&[1.0, 2.0, 3.0]);
-        let out = dev().softmax(&input, 1, 3).unwrap();
-        let result = dev().read(&out).unwrap();
-        assert_approx(&result, &[0.0900, 0.2447, 0.6652], 1e-3);
-        // Sum should be 1.0
+    fn test_softmax_vs_cpu() {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 5.0, 5.0, 5.0];
+        let expected = cpu_softmax(&data, 3, 3);
+        let result = dev().read(&dev().softmax(&dev().upload(&data), 3, 3).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
+        // Verify each row sums to 1.0
+        for r in 0..3 {
+            let sum: f32 = result[r*3..(r+1)*3].iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "row {r} sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn test_softmax_large_values() {
+        // Numerical stability: large values should not overflow
+        let data = vec![1000.0, 1001.0, 1002.0];
+        let expected = cpu_softmax(&data, 1, 3);
+        let result = dev().read(&dev().softmax(&dev().upload(&data), 1, 3).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-4);
         let sum: f32 = result.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-5, "softmax sum = {sum}");
+        assert!((sum - 1.0).abs() < 1e-4, "sum = {sum}");
     }
 
     #[test]
-    fn test_softmax_multirow() {
-        let input = dev().upload(&[1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
-        let out = dev().softmax(&input, 2, 3).unwrap();
-        let result = dev().read(&out).unwrap();
-        // Row 0: standard softmax
-        assert_approx(&result[0..3], &[0.0900, 0.2447, 0.6652], 1e-3);
-        // Row 1: uniform
-        assert_approx(&result[3..6], &[0.3333, 0.3333, 0.3333], 1e-3);
+    fn test_softmax_single_element() {
+        let result = dev().read(&dev().softmax(&dev().upload(&[42.0]), 1, 1).unwrap()).unwrap();
+        assert_approx(&result, &[1.0], 1e-5);
     }
 
     #[test]
-    fn test_attention_identity() {
-        // 1 head, seq=2, d_k=2. Q=K=V=identity-like.
-        // With Q=K, scores should be high on diagonal -> attention ~ identity -> output ~ V
-        let qkv = dev().upload(&[
-            1.0, 0.0,
-            0.0, 1.0,
-        ]);
-        let out = dev().scaled_dot_product_attention(&qkv, &qkv, &qkv, 1, 2, 2).unwrap();
-        let result = dev().read(&out).unwrap();
-        assert_eq!(result.len(), 4);
-        // With orthogonal Q=K, attention should heavily weight diagonal -> output close to V
-        // score matrix after softmax: [[e^(1/sqrt2)/(e^(1/sqrt2)+e^0), ...], ...]
-        // Just check output shape and reasonable values
-        assert!(result[0] > 0.5, "expected first elem > 0.5, got {}", result[0]);
+    fn test_attention_vs_cpu() {
+        // 1 head, seq=3, d_k=4 — fully verified against CPU reference
+        let q: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
+        let k: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let v: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
+        let expected = cpu_attention(&q, &k, &v, 3, 4);
+        let result = dev().read(&dev().scaled_dot_product_attention(
+            &dev().upload(&q), &dev().upload(&k), &dev().upload(&v), 1, 3, 4
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
+    }
+
+    #[test]
+    fn test_attention_uniform_qk() {
+        // When Q and K are identical uniform vectors, attention is uniform -> output = mean(V) per position
+        let q = vec![1.0, 1.0, 1.0, 1.0]; // seq=2, dk=2, both rows identical
+        let k = q.clone();
+        let v = vec![0.0, 10.0, 20.0, 30.0]; // seq=2, dk=2
+        let expected = cpu_attention(&q, &k, &v, 2, 2);
+        let result = dev().read(&dev().scaled_dot_product_attention(
+            &dev().upload(&q), &dev().upload(&k), &dev().upload(&v), 1, 2, 2
+        ).unwrap()).unwrap();
+        assert_approx(&result, &expected, 1e-3);
     }
 
     #[test]
     fn test_mse_loss() {
         let pred = dev().upload(&[1.0, 2.0, 3.0]);
         let target = dev().upload(&[1.5, 2.5, 3.5]);
-        let loss = dev().mse_loss(&pred, &target).unwrap();
-        let result = dev().read(&loss).unwrap();
-        // MSE = ((0.5)^2 + (0.5)^2 + (0.5)^2) / 3 = 0.75/3 = 0.25
+        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
+        // MSE = ((0.5)^2 * 3) / 3 = 0.25
         assert_approx(&result, &[0.25], 1e-5);
     }
 
     #[test]
     fn test_mse_loss_zero() {
         let a = dev().upload(&[1.0, 2.0, 3.0]);
-        let b = dev().upload(&[1.0, 2.0, 3.0]);
-        let result = dev().read(&dev().mse_loss(&a, &b).unwrap()).unwrap();
+        let result = dev().read(&dev().mse_loss(&a, &a).unwrap()).unwrap();
         assert_approx(&result, &[0.0], 1e-6);
+    }
+
+    #[test]
+    fn test_mse_loss_known_value() {
+        // pred=[0,0,0], target=[1,2,3] -> MSE = (1+4+9)/3 = 14/3 ≈ 4.6667
+        let pred = dev().upload(&[0.0, 0.0, 0.0]);
+        let target = dev().upload(&[1.0, 2.0, 3.0]);
+        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
+        assert_approx(&result, &[14.0 / 3.0], 1e-5);
     }
 }
