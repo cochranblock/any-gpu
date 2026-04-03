@@ -5,8 +5,8 @@
 
 | # | Tag | Item | Depends on |
 |---|-----|------|------------|
-| 1 | [feature] | Tiled matmul with workgroup shared memory — 5-10x perf gain, closes CUDA gap from 4x to <2x | — |
-| 2 | [feature] | Tensor type with shape, strides, requires_grad, grad_fn — needed before autograd | — |
+| ~~1~~ | ~~[feature]~~ | ~~Tiled matmul~~ — shipped [`0ca243d`](https://github.com/cochranblock/any-gpu/commit/0ca243d). 1.7x gain at 1024x1024 (117 GFLOPS). Further gains need register blocking + 32x32 tiles. | done |
+| ~~2~~ | ~~[feature]~~ | ~~Tensor type~~ — shipped. 6-dim inline shape, reshape (zero-copy), zeros, from_buf. 8 tests. Autograd fields (requires_grad, grad_fn) deferred to Sprint 4. | done |
 | 3 | [feature] | Autograd tape: record forward ops, reverse-mode backward pass | Tensor type (#2) |
 | 4 | [feature] | Backward shaders: relu, sigmoid, swish, tanh, softmax, mse, group_norm (~10 new WGSL kernels) | Autograd tape (#3) |
 | 5 | [feature] | Backward for conv2d/conv_transpose2d — weight gradient conv, input gradient via transpose conv | Autograd tape (#3) |

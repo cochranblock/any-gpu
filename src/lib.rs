@@ -5,6 +5,8 @@
 
 mod device;
 mod ops;
+mod tensor;
 pub mod nanosign;
 
 pub use device::{GpuBuffer, GpuDevice};
+pub use tensor::Tensor;
