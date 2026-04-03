@@ -257,4 +257,8 @@ cargo test
 
 ## License
 
-Unlicense. Public domain.
+[Unlicense](UNLICENSE) — [cochranblock.org](https://cochranblock.org)
+
+---
+
+Part of [The Cochran Block](https://cochranblock.org) — see also [kova](https://github.com/cochranblock/kova), [pixel-forge](https://github.com/cochranblock/pixel-forge), [tmuxisfree](https://github.com/cochranblock/tmuxisfree)
