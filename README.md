@@ -98,6 +98,51 @@ Matmul performance across all tested GPUs. Single run, includes pipeline creatio
 | 512x512 | 87.61 | 5.43 | 4.91 | 3.06 | 54.71 | 17.9x |
 | 1024x1024 | 769.38 | 24.37 | 15.88 | 2.79 | 135.22 | **48.4x** |
 
+### any-gpu vs candle — CUDA and Metal comparison
+
+Same hardware, same matmul sizes, head to head. candle (v0.10.2) uses cuBLAS on CUDA and Metal Performance Shaders on macOS. any-gpu uses a naive WGSL compute shader via wgpu. This is an unfair fight by design — it shows exactly how much performance is left on the table before tiling.
+
+#### NVIDIA RTX 3070 Laptop — Vulkan vs CUDA
+
+| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | Ratio | CUDA wins by |
+|------|---------------------|-------------------|-------|--------------|
+| 128x128 | 1.57 | 0.07 | 22.4x | cuBLAS dominates small sizes |
+| 256x256 | 1.72 | 0.20 | 8.6x | |
+| 512x512 | 3.03 | 0.75 | 4.0x | Gap narrows at scale |
+| 1024x1024 | 14.25 | 2.80 | 5.1x | |
+
+#### NVIDIA RTX 3050 Ti Laptop — Vulkan vs CUDA
+
+| Size | any-gpu Vulkan (ms) | candle CUDA (ms) | Ratio | CUDA wins by |
+|------|---------------------|-------------------|-------|--------------|
+| 128x128 | 1.50 | 0.03 | 50.0x | cuBLAS startup cost amortized |
+| 256x256 | 1.37 | 0.07 | 19.6x | |
+| 512x512 | 5.61 | 0.33 | 17.0x | |
+| 1024x1024 | 34.20 | 1.43 | 23.9x | |
+
+#### Apple M4 — any-gpu Metal (wgpu) vs candle Metal (MPS)
+
+| Size | any-gpu Metal (ms) | candle Metal (ms) | Ratio | MPS wins by |
+|------|---------------------|-------------------|-------|-------------|
+| 128x128 | 2.12 | 0.36 | 5.9x | |
+| 256x256 | 1.95 | 0.31 | 6.3x | |
+| 512x512 | 3.36 | 0.47 | 7.1x | |
+| 1024x1024 | 17.55 | 1.94 | 9.0x | |
+
+#### What this means
+
+**CUDA wins everywhere, by a lot.** cuBLAS and MPS use tiled matmul with shared memory, register blocking, and vendor-tuned kernels. any-gpu uses a naive triple-loop WGSL shader with zero tiling.
+
+The gap is smallest on the RTX 3070 at 512x512 (4x) and largest on the 3050 Ti at small sizes (50x). This is expected — cuBLAS amortizes kernel launch cost better and its tiled kernels are tuned per-architecture.
+
+**But that's the point.** any-gpu runs the same shader on AMD, NVIDIA, Intel, and Apple with zero vendor code. candle needs separate CUDA kernels, Metal shaders, and CPU fallbacks. The any-gpu path from here:
+
+1. **Tiled matmul** with workgroup shared memory — expected 5-10x improvement
+2. **Subgroup operations** for warp-level reduction
+3. **Pipeline caching** to eliminate per-dispatch compilation
+
+At 4x behind CUDA on RTX 3070 with a naive shader, tiling alone should close most of the gap. The 3050 Ti numbers suggest dispatch overhead is also significant — pipeline caching will help there.
+
 ### Notes
 
 - CPU is single-threaded naive matmul (triple nested loop). Not BLAS. The point is to show GPU dispatch overhead vs compute wins.
@@ -105,6 +150,7 @@ Matmul performance across all tested GPUs. Single run, includes pipeline creatio
 - First GPU call in each process pays pipeline compilation cost (~1-30ms depending on driver).
 - Naive WGSL shader, no tiling, no shared memory. Real performance will be 5-10x better with tiled matmul.
 - RTX 3070 hits 148 GFLOPS at 1024x1024 — that's ~1.5% of its theoretical peak (20 TFLOPS). Tiling will close this gap.
+- candle CUDA numbers use cuBLAS (averaged over 20-100 iterations with 3 warmup runs). any-gpu numbers are single-run compute-only.
 - Max numerical error across all GPUs: 0.000021 (f32 accumulation, expected).
 
 ## What this will become
