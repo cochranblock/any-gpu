@@ -39,18 +39,33 @@ let result = dev.read(&c)?;
 
 ## Tested Hardware
 
-All results from `cargo test --release` on 2026-04-02.
+All results from `cargo test --release` on 2026-04-02. 54 tests per GPU, each cross-validated against a CPU reference implementation.
 
 | GPU | Vendor | VRAM | Driver | OS | Tests | Matmul 512x512 (ms) |
 |-----|--------|------|--------|----|-------|----------------------|
-| AMD Radeon RX 5700 XT | AMD (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 3/3 pass | 5.67 |
-| NVIDIA GeForce RTX 3070 Laptop | NVIDIA | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 3.03 |
-| NVIDIA GeForce RTX 3050 Ti Laptop | NVIDIA | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 3/3 pass | 5.61 |
-| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 3/3 pass | 3.36 |
+| AMD Radeon RX 5700 XT | AMD (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 54/54 pass | 5.67 |
+| NVIDIA GeForce RTX 3070 Laptop | NVIDIA | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 pass | 3.03 |
+| NVIDIA GeForce RTX 3050 Ti Laptop | NVIDIA | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 pass | 5.61 |
+| Apple M4 | Apple (Metal) | Unified | macOS 25.3.0 | macOS Tahoe | 54/54 pass | 3.36 |
+
+**Reproduce any claim:**
+
+```bash
+# Run all 54 correctness tests (every op verified against CPU reference)
+cargo test --release
+
+# Run matmul benchmark (produces the ms and GFLOPS numbers above)
+cargo run --release --example bench
+
+# On AMD RADV, force Vulkan backend:
+WGPU_BACKEND=vulkan cargo test --release
+```
+
+Test results verified at commit [`801c4de`](https://github.com/cochranblock/any-gpu/commit/801c4de). Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gpu/commit/56976a7).
 
 ### Known issues
 
-- **AMD RADV/RDNA1**: concurrent `wgpu::Instance` creation segfaults. Fixed by sharing a single `GpuDevice` via `LazyLock`. Individual ops work fine.
+- **AMD RADV/RDNA1**: concurrent `wgpu::Instance` creation segfaults. Fixed by sharing a single `GpuDevice` via `LazyLock` ([`e124fbb`](https://github.com/cochranblock/any-gpu/commit/e124fbb)). Individual ops work fine.
 - **Intel Iris Xe**: untested in isolation (wgpu prefers discrete NVIDIA when both are present).
 
 ## Benchmarks
@@ -157,6 +172,21 @@ The performance gap closes with better shaders, not more backends:
 
 The RTX 3070 is 4x behind CUDA at 512x512. Tiling alone should close most of that. The goal isn't to beat cuBLAS — it's to be fast enough that vendor lock-in isn't worth it.
 
+### How these numbers were produced
+
+```bash
+# any-gpu benchmarks (all GPUs):
+cargo run --release --example bench
+
+# CUDA comparison (requires --features cuda and NVIDIA GPU):
+cargo run --release --example candle_bench --features cuda
+
+# Metal comparison (requires --features metal and macOS):
+cargo run --release --example candle_bench --features metal
+```
+
+Benchmark numbers from commit [`56976a7`](https://github.com/cochranblock/any-gpu/commit/56976a7). CUDA/Metal comparison from commit [`d6ab4ec`](https://github.com/cochranblock/any-gpu/commit/d6ab4ec).
+
 ### Notes
 
 - CPU is single-threaded naive matmul (triple nested loop). Not BLAS.
@@ -183,7 +213,7 @@ Vulkan is the Rosetta Stone — it makes AMD and Intel GPUs possible. CUDA is fa
 
 ## Ops (Sprint 2 — shipped)
 
-27 tests, all passing on AMD RX 5700 XT (Vulkan) and Apple M4 (Metal).
+54 tests, all passing on AMD RX 5700 XT (Vulkan) and Apple M4 (Metal). Every op cross-validated against a CPU reference.
 
 | Category | Ops |
 |----------|-----|
@@ -253,7 +283,7 @@ cargo run --release --example bench
 cargo test
 ```
 
-27 tests across all op categories. Requires a GPU (any backend).
+54 correctness tests. Every op verified against a CPU reference implementation. Requires a GPU (any backend).
 
 ## License
 
