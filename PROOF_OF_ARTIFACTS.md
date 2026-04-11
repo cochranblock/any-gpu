@@ -19,15 +19,26 @@ wgpu (auto-selects backend)
     └── DX12 (Windows)
     │
     ▼
-19 WGSL compute shaders
+27 WGSL compute shaders
     │
     ├── elementwise: add, sub, mul, scale, relu, sigmoid, swish, tanh
-    ├── conv: matmul, batch_matmul, conv2d, conv_transpose2d
+    ├── backward: relu_bw, sigmoid_bw, swish_bw, tanh_bw
+    ├── conv: tiled matmul (16x16 shared mem), batch_matmul, conv2d, conv_transpose2d
+    ├── conv grad: conv2d_grad_weight, conv2d_grad_bias
     ├── norm: group_norm (two-pass: stats → normalize)
     ├── attention: softmax (two-pass: max/sum → exp/div), sdpa
     ├── tensor: concat, transpose
     ├── spatial: upsample_nearest2d
-    └── loss: mse_loss
+    ├── loss: mse_loss
+    └── optim: adamw (in-place, momentum + velocity + weight decay)
+    │
+    ▼
+Autograd (reverse-mode autodiff)
+    │
+    ├── Flat tape with enum ops (no trait objects)
+    ├── 13 differentiable ops (add, sub, mul, scale, relu, sigmoid, swish, tanh, matmul, mse_loss, conv2d)
+    ├── Backward pass: topological sort, accumulate grads via GPU shaders
+    └── train_step(): forward + backward + AdamW in one call
     │
     ▼
 NanoSign (model integrity)
@@ -39,13 +50,16 @@ NanoSign (model integrity)
 
 | Metric | Value |
 |--------|-------|
-| Lines of Rust | 2,334 across 9 source files |
-| Public ops | 19 GPU ops + 7 NanoSign functions |
-| WGSL shaders | 20 (softmax and group_norm each use 2 passes) |
-| Tests | 62 (54 GPU ops cross-validated against CPU reference + 8 NanoSign) |
+| Lines of Rust | 4,393 across 13 source files (+601 in examples) |
+| Public ops | 19 GPU forward ops + 7 backward ops + 7 NanoSign functions |
+| Modules | device, ops (6 submodules), tensor, autograd, optim, train, nanosign |
+| WGSL shaders | 27 (20 forward + 4 activation backward + 2 conv2d grad + 1 adamw) |
+| Tests | 145 (54 GPU ops + 17 autograd + 11 device + 17 tensor + 13 nanosign + 8 optim + 1 train + 24 elementwise backward) |
 | Bench binary (release) | 1.5 MB (opt-z, LTO, strip, panic=abort) |
+| Train binary (release) | 1.5 MB |
 | Dependencies | 5 (wgpu, bytemuck, anyhow, pollster, blake3) |
 | Model signing | NanoSign v1 — NSIG + BLAKE3 (36 bytes per file) |
+| Pipeline caching | Compile once, reuse Arc\<ComputePipeline\> via source hash |
 
 ## Hardware Verification
 
@@ -122,18 +136,32 @@ All any-gpu work is evaluated through the Triple Lens quality gate:
 
 | Lens | Question | Evidence |
 |------|----------|----------|
-| Technical | Does it compile, pass tests, run on real hardware? | 62/62 tests, 4 GPUs, 3 nodes (bt/lf/gd + local) |
-| Product | Does it solve a real problem? | AMD/Intel GPU compute for ML in Rust — nobody else does this |
-| Honest | Are the claims verifiable? | Every benchmark has a reproduce command. Every GPU claim links to a commit. CUDA comparison shows where we lose. |
+| Technical | Does it compile, pass tests, run on real hardware? | 145/145 tests, 4 GPUs, 3 nodes (bt/lf/gd + local). Full autograd + training loop. |
+| Product | Does it solve a real problem? | AMD/Intel GPU compute for ML in Rust — nobody else does this. Now trains models, not just inference. |
+| Honest | Are the claims verifiable? | Every benchmark has a reproduce command. Every GPU claim links to a commit. CUDA comparison shows where we lose. Backward shaders have numeric gradient tests. |
+
+## Named Techniques
+
+| Technique | What | Where |
+|-----------|------|-------|
+| Flat Tape Autograd | Enum ops, no trait objects, reverse topo sort | `src/autograd.rs` |
+| Inline Shape | Max 6 dims on the stack, no heap for shape metadata | `src/tensor.rs` |
+| Tiled Matmul | 16x16 shared memory tiles, 256-thread workgroups | `src/ops/conv.rs` |
+| Pipeline Caching | Hash shader source → `Arc<ComputePipeline>`, compile once | `src/device.rs` |
+| Two-Pass Reduction | Softmax (max/sum → exp/div), GroupNorm (stats → normalize) | `src/ops/attention.rs`, `src/ops/norm.rs` |
+| NanoSign | NSIG + BLAKE3 (36 bytes) — sign on save, verify on load | `src/nanosign.rs` |
+| Single-Shader AdamW | Momentum, velocity, weight decay, bias correction in one dispatch | `src/optim.rs` |
+| Conv2d Backward | grad_weight shader + grad_bias reduction + grad_input via conv_transpose2d | `src/ops/conv.rs` |
 
 ## What's Not Here (Yet)
 
-- Tensor type with shape tracking (planned Sprint 3)
-- Autograd / backward pass — ~10 new backward WGSL shaders needed (planned Sprint 4)
-- Backend router (CUDA/Metal/Vulkan dispatch) (planned Sprint 3)
-- Tiled matmul with shared memory (planned Sprint 3)
-- Stratagems CLI — `any-gpu train`, `any-gpu bench`, `any-gpu info` (planned Sprint 5)
-- Starter nanobyte — first model trained and shipped with any-gpu (planned Sprint 6)
+- ~~Tensor type with shape tracking~~ — **shipped** (commit `dd55772`)
+- ~~Autograd / backward pass~~ — **shipped** (commit `5137d40`, 7 backward shaders)
+- ~~Tiled matmul with shared memory~~ — **shipped** (commit `0ca243d`)
+- Backend router (CUDA/Metal/Vulkan dispatch) (planned)
+- Stratagems CLI — `any-gpu train`, `any-gpu bench`, `any-gpu info` (planned)
+- Starter nanobyte — first model trained and shipped with any-gpu (planned)
+- Multi-node distributed training via C2 (planned)
 
 ---
 
