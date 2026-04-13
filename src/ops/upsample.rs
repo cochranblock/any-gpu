@@ -44,6 +44,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// Backward: each input pixel accumulates gradients from all output pixels that map to it.
+// Assumes integer scale factors (as used in the forward pass for exact 2x, 3x upsampling).
+const SHADER_UPSAMPLE_NEAREST_BACKWARD: &str = "
+struct P { batch: u32, channels: u32, in_h: u32, in_w: u32, out_h: u32, out_w: u32, scale_h: u32, scale_w: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read_write> grad_in: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.batch * p.channels * p.in_h * p.in_w;
+    if idx >= total { return; }
+
+    let iw = idx % p.in_w;
+    let ih = (idx / p.in_w) % p.in_h;
+    let c  = (idx / (p.in_w * p.in_h)) % p.channels;
+    let n  = idx / (p.in_w * p.in_h * p.channels);
+
+    // For integer scale factors, forward maps (ih, iw) -> scale_h*scale_w output pixels.
+    var sum: f32 = 0.0;
+    let base = n * (p.channels * p.out_h * p.out_w) + c * (p.out_h * p.out_w);
+    for (var dy: u32 = 0u; dy < p.scale_h; dy++) {
+        for (var dx: u32 = 0u; dx < p.scale_w; dx++) {
+            let oh = ih * p.scale_h + dy;
+            let ow = iw * p.scale_w + dx;
+            sum += grad_out[base + oh * p.out_w + ow];
+        }
+    }
+    grad_in[idx] = sum;
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct UpsampleBackwardParams {
+    batch: u32,
+    channels: u32,
+    in_h: u32,
+    in_w: u32,
+    out_h: u32,
+    out_w: u32,
+    scale_h: u32,
+    scale_w: u32,
+}
+
 impl GpuDevice {
     /// Nearest-neighbor 2D upsample. Input: [N,C,H,W], output: [N,C,H*scale_h,W*scale_w].
     pub fn upsample_nearest2d(
@@ -64,6 +109,30 @@ impl GpuDevice {
             super::dispatch_1d(total),
         );
         Ok(out)
+    }
+
+    /// Backward pass for nearest-neighbor upsample. Each input pixel accumulates
+    /// gradients from the scale_h*scale_w output block that mapped to it.
+    pub fn upsample_nearest2d_backward(
+        &self,
+        grad_out: &GpuBuffer,
+        batch: u32, channels: u32, in_h: u32, in_w: u32,
+        scale_h: u32, scale_w: u32,
+    ) -> Result<GpuBuffer> {
+        let out_h = in_h * scale_h;
+        let out_w = in_w * scale_w;
+        ensure!(grad_out.len == (batch * channels * out_h * out_w) as usize);
+        let total = batch * channels * in_h * in_w;
+        let grad_in = self.alloc(total as usize);
+        let params = UpsampleBackwardParams {
+            batch, channels, in_h, in_w, out_h, out_w, scale_h, scale_w,
+        };
+        self.dispatch_shader(
+            SHADER_UPSAMPLE_NEAREST_BACKWARD, Some("upsample_back"),
+            &params, &[grad_out], &grad_in,
+            super::dispatch_1d(total),
+        );
+        Ok(grad_in)
     }
 }
 

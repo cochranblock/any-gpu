@@ -38,6 +38,23 @@ pub enum Op {
         dil_h: u32, dil_w: u32,
         groups: u32,
     },
+    /// Concat a[outer, a_inner] and b[outer, b_inner] along trailing axis.
+    Concat { a: TensorId, b: TensorId, outer: u32, a_inner: u32, b_inner: u32 },
+    /// GroupNorm with learnable affine (gamma, beta).
+    GroupNorm {
+        input: TensorId, gamma: TensorId, beta: TensorId,
+        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
+    },
+    /// Nearest-neighbor 2D upsample.
+    UpsampleNearest2d {
+        input: TensorId,
+        batch: u32, channels: u32, in_h: u32, in_w: u32,
+        scale_h: u32, scale_w: u32,
+    },
+    /// Broadcast add: out[outer, inner] = a[outer, inner] + b[outer].
+    AddBroadcast { a: TensorId, b: TensorId, outer: u32, inner: u32 },
+    /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols] (Linear bias).
+    AddPerCol { a: TensorId, b: TensorId, rows: u32, cols: u32 },
 }
 
 /// Tape entry: one recorded operation.
@@ -180,6 +197,70 @@ impl<'d> Tape<'d> {
         }))
     }
 
+    /// Concat two tensors along trailing axis: a[outer, a_inner] + b[outer, b_inner]
+    /// -> out[outer, a_inner + b_inner].
+    pub fn concat(
+        &mut self,
+        a: TensorId, b: TensorId,
+        outer: u32, a_inner: u32, b_inner: u32,
+    ) -> Result<TensorId> {
+        let out = self.dev.concat(self.buf(a), self.buf(b), outer, a_inner, b_inner)?;
+        Ok(self.push_result(out, Op::Concat { a, b, outer, a_inner, b_inner }))
+    }
+
+    /// Group normalization with learnable affine. input shape [batch, channels, spatial].
+    pub fn group_norm(
+        &mut self,
+        input: TensorId, gamma: TensorId, beta: TensorId,
+        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
+    ) -> Result<TensorId> {
+        let out = self.dev.group_norm(
+            self.buf(input), self.buf(gamma), self.buf(beta),
+            batch, channels, spatial, groups, eps,
+        )?;
+        Ok(self.push_result(out, Op::GroupNorm {
+            input, gamma, beta, batch, channels, spatial, groups, eps,
+        }))
+    }
+
+    /// Nearest-neighbor 2D upsample. input: [batch, channels, in_h, in_w]
+    /// -> [batch, channels, in_h * scale_h, in_w * scale_w].
+    pub fn upsample_nearest2d(
+        &mut self,
+        input: TensorId,
+        batch: u32, channels: u32, in_h: u32, in_w: u32,
+        scale_h: u32, scale_w: u32,
+    ) -> Result<TensorId> {
+        let out = self.dev.upsample_nearest2d(
+            self.buf(input), batch, channels, in_h, in_w, scale_h, scale_w,
+        )?;
+        Ok(self.push_result(out, Op::UpsampleNearest2d {
+            input, batch, channels, in_h, in_w, scale_h, scale_w,
+        }))
+    }
+
+    /// Broadcast add: out[outer, inner] = a[outer, inner] + b[outer].
+    /// For bias add: outer = channels, inner = batch * spatial.
+    /// For time conditioning: outer = batch * channels, inner = spatial.
+    pub fn add_broadcast(
+        &mut self,
+        a: TensorId, b: TensorId,
+        outer: u32, inner: u32,
+    ) -> Result<TensorId> {
+        let out = self.dev.add_broadcast(self.buf(a), self.buf(b), outer, inner)?;
+        Ok(self.push_result(out, Op::AddBroadcast { a, b, outer, inner }))
+    }
+
+    /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols]. Linear bias.
+    pub fn add_per_col(
+        &mut self,
+        a: TensorId, b: TensorId,
+        rows: u32, cols: u32,
+    ) -> Result<TensorId> {
+        let out = self.dev.add_per_col(self.buf(a), self.buf(b), rows, cols)?;
+        Ok(self.push_result(out, Op::AddPerCol { a, b, rows, cols }))
+    }
+
     // --- Backward ---
 
     /// Accumulate gradient into a tensor's grad buffer.
@@ -293,7 +374,24 @@ impl<'d> Tape<'d> {
                 }
 
                 Op::Conv2d { input, weight, bias, batch, in_c, in_h, in_w, out_c, out_h, out_w, kh, kw, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups } => {
-                    // grad_input via conv_transpose2d
+                    // grad_input via conv_transpose2d.
+                    // For stride > 1, we must provide output_padding so the transpose
+                    // conv recovers the original input dims. For a forward conv:
+                    //   out_h = (in_h + 2*pad - dil*(k-1) - 1) / stride + 1
+                    // The inverse transpose conv gives:
+                    //   recovered_h = (out_h - 1)*stride - 2*pad + dil*(k-1) + output_pad + 1
+                    // Solve for output_pad so recovered_h == in_h.
+                    let out_pad_h = (in_h as i32)
+                        - ((out_h as i32 - 1) * stride_h as i32
+                            - 2 * pad_h as i32
+                            + dil_h as i32 * (kh as i32 - 1)
+                            + 1);
+                    let out_pad_w = (in_w as i32)
+                        - ((out_w as i32 - 1) * stride_w as i32
+                            - 2 * pad_w as i32
+                            + dil_w as i32 * (kw as i32 - 1)
+                            + 1);
+                    ensure!(out_pad_h >= 0 && out_pad_w >= 0, "negative output_pad in conv backward");
                     let ga = self.dev.conv_transpose2d(
                         grad_out,
                         &self.bufs[weight.0 as usize],
@@ -302,7 +400,7 @@ impl<'d> Tape<'d> {
                         in_c, kh, kw,
                         (stride_h, stride_w),
                         (pad_h, pad_w),
-                        (0, 0),
+                        (out_pad_h as u32, out_pad_w as u32),
                         (dil_h, dil_w),
                         groups,
                     )?;
@@ -326,6 +424,53 @@ impl<'d> Tape<'d> {
                     if let (Some(bias_id), Some(gb_buf)) = (bias, gb) {
                         self.accum_grad(bias_id, gb_buf)?;
                     }
+                }
+
+                Op::Concat { a, b, outer, a_inner, b_inner } => {
+                    // grad_a = first a_inner of each outer block in grad_out
+                    // grad_b = last b_inner of each outer block in grad_out
+                    let combined = a_inner + b_inner;
+                    let ga = self.dev.slice_per_block(grad_out, outer, a_inner, 0, combined)?;
+                    let gb = self.dev.slice_per_block(grad_out, outer, b_inner, a_inner, combined)?;
+                    self.accum_grad(a, ga)?;
+                    self.accum_grad(b, gb)?;
+                }
+
+                Op::GroupNorm { input, gamma, beta, batch, channels, spatial, groups, eps } => {
+                    let (di, dg, db) = self.dev.group_norm_backward(
+                        grad_out,
+                        &self.bufs[input.0 as usize],
+                        &self.bufs[gamma.0 as usize],
+                        batch, channels, spatial, groups, eps,
+                    )?;
+                    self.accum_grad(input, di)?;
+                    self.accum_grad(gamma, dg)?;
+                    self.accum_grad(beta, db)?;
+                }
+
+                Op::UpsampleNearest2d { input, batch, channels, in_h, in_w, scale_h, scale_w } => {
+                    let gi = self.dev.upsample_nearest2d_backward(
+                        grad_out, batch, channels, in_h, in_w, scale_h, scale_w,
+                    )?;
+                    self.accum_grad(input, gi)?;
+                }
+
+                Op::AddBroadcast { a, b, outer, inner } => {
+                    // grad_a = grad_out (same shape)
+                    // grad_b[o] = sum over inner dim of grad_out[o, :]
+                    let ga = self.dev.scale(grad_out, 1.0)?;
+                    let gb = self.dev.sum_inner(grad_out, outer, inner)?;
+                    self.accum_grad(a, ga)?;
+                    self.accum_grad(b, gb)?;
+                }
+
+                Op::AddPerCol { a, b, rows, cols } => {
+                    // grad_a = grad_out (same shape)
+                    // grad_b[c] = sum over rows of grad_out[:, c]
+                    let ga = self.dev.scale(grad_out, 1.0)?;
+                    let gb = self.dev.sum_rows(grad_out, rows, cols)?;
+                    self.accum_grad(a, ga)?;
+                    self.accum_grad(b, gb)?;
                 }
             }
         }

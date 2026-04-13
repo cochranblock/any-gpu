@@ -86,6 +86,124 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// --- GroupNorm backward ---
+// Pass A: recompute stats (mean, inv_std) per (n, g) — reuse SHADER_GN_STATS.
+// Pass B: compute per-(n, g) reduction sums for d_input:
+//         s1 = sum over group of (grad_out * gamma)
+//         s2 = sum over group of (grad_out * gamma * x_hat)
+// Pass C: compute d_input per element using stats and sums.
+// Pass D: compute d_gamma and d_beta per channel by reduction over batch and spatial.
+
+const SHADER_GN_BACK_SUMS: &str = "
+struct P {
+    batch: u32, channels: u32, spatial: u32, groups: u32,
+    cpg: u32, eps: f32, _p0: u32, _p1: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma: array<f32>;
+@group(0) @binding(4) var<storage, read> stats: array<f32>;
+@group(0) @binding(5) var<storage, read_write> sums: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = p.batch * p.groups;
+    if idx >= total { return; }
+    let g = idx % p.groups;
+    let n = idx / p.groups;
+
+    let mean = stats[idx * 2u];
+    let inv_std = stats[idx * 2u + 1u];
+
+    var s1: f32 = 0.0;
+    var s2: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cpg; c++) {
+        let ch = g * p.cpg + c;
+        let base = n * (p.channels * p.spatial) + ch * p.spatial;
+        for (var s: u32 = 0u; s < p.spatial; s++) {
+            let dx_hat = grad_out[base + s] * gamma[ch];
+            let x_hat = (input[base + s] - mean) * inv_std;
+            s1 += dx_hat;
+            s2 += dx_hat * x_hat;
+        }
+    }
+    sums[idx * 2u] = s1;
+    sums[idx * 2u + 1u] = s2;
+}
+";
+
+const SHADER_GN_BACK_DINPUT: &str = "
+struct P {
+    batch: u32, channels: u32, spatial: u32, groups: u32,
+    cpg: u32, eps: f32, _p0: u32, _p1: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma: array<f32>;
+@group(0) @binding(4) var<storage, read> stats: array<f32>;
+@group(0) @binding(5) var<storage, read> sums: array<f32>;
+@group(0) @binding(6) var<storage, read_write> d_input: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.batch * p.channels * p.spatial;
+    if idx >= total { return; }
+
+    let s_idx = idx % p.spatial;
+    let ch = (idx / p.spatial) % p.channels;
+    let n = idx / (p.spatial * p.channels);
+    let g = ch / p.cpg;
+
+    let stat_idx = n * p.groups + g;
+    let mean = stats[stat_idx * 2u];
+    let inv_std = stats[stat_idx * 2u + 1u];
+    let x_hat = (input[idx] - mean) * inv_std;
+    let dx_hat = grad_out[idx] * gamma[ch];
+
+    let s1 = sums[stat_idx * 2u];
+    let s2 = sums[stat_idx * 2u + 1u];
+    let count = f32(p.cpg * p.spatial);
+    d_input[idx] = inv_std * (dx_hat - (s1 + x_hat * s2) / count);
+}
+";
+
+const SHADER_GN_BACK_DAFFINE: &str = "
+struct P {
+    batch: u32, channels: u32, spatial: u32, groups: u32,
+    cpg: u32, eps: f32, _p0: u32, _p1: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(3) var<storage, read> stats: array<f32>;
+@group(0) @binding(4) var<storage, read_write> d_gamma: array<f32>;
+@group(0) @binding(5) var<storage, read_write> d_beta: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let ch = gid.x;
+    if ch >= p.channels { return; }
+    let g = ch / p.cpg;
+
+    var dg: f32 = 0.0;
+    var db: f32 = 0.0;
+    for (var n: u32 = 0u; n < p.batch; n++) {
+        let stat_idx = n * p.groups + g;
+        let mean = stats[stat_idx * 2u];
+        let inv_std = stats[stat_idx * 2u + 1u];
+        let base = n * (p.channels * p.spatial) + ch * p.spatial;
+        for (var s: u32 = 0u; s < p.spatial; s++) {
+            let x_hat = (input[base + s] - mean) * inv_std;
+            dg += grad_out[base + s] * x_hat;
+            db += grad_out[base + s];
+        }
+    }
+    d_gamma[ch] = dg;
+    d_beta[ch] = db;
+}
+";
+
 impl GpuDevice {
     /// Group normalization: input[N,C,*spatial] with C/groups groups.
     /// gamma[C] and beta[C] are learnable affine params.
@@ -157,6 +275,166 @@ impl GpuDevice {
         self.queue.submit(Some(encoder.finish()));
 
         Ok(out)
+    }
+
+    /// Backward pass for group_norm. Returns (d_input, d_gamma, d_beta).
+    /// Recomputes stats from input internally to avoid storing them on the tape.
+    pub fn group_norm_backward(
+        &self,
+        grad_out: &GpuBuffer,
+        input: &GpuBuffer,
+        gamma: &GpuBuffer,
+        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
+    ) -> Result<(GpuBuffer, GpuBuffer, GpuBuffer)> {
+        ensure!(input.len == (batch * channels * spatial) as usize);
+        ensure!(grad_out.len == (batch * channels * spatial) as usize);
+        ensure!(gamma.len == channels as usize);
+        ensure!(channels % groups == 0);
+
+        let cpg = channels / groups;
+        let params = GNStatsParams {
+            batch, channels, spatial, groups,
+            channels_per_group: cpg, eps, _pad: [0; 2],
+        };
+
+        // Pass A: recompute stats per (n, g) (reuse forward stats shader).
+        let stats = self.alloc((batch * groups * 2) as usize);
+        self.dispatch_shader(
+            SHADER_GN_STATS, Some("gn_back_stats"),
+            &params, &[input], &stats,
+            super::dispatch_1d(batch * groups),
+        );
+
+        // Pass B: compute reduction sums (s1, s2) per (n, g). 5 storage bindings → raw dispatch.
+        let sums = self.alloc((batch * groups * 2) as usize);
+        {
+            let params_buf = self.upload_uniform(&params);
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gn_back_sums"),
+                source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_SUMS.into()),
+            });
+            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gn_back_sums"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: gamma.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: stats.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: sums.buffer.as_entire_binding() },
+                ],
+            });
+            let (wx, wy, wz) = super::dispatch_1d(batch * groups);
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gn_back_sums"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(wx, wy, wz);
+            }
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        // Pass C: compute d_input per element. 6 storage bindings → raw dispatch.
+        let total = batch * channels * spatial;
+        let d_input = self.alloc(total as usize);
+        {
+            let params_buf = self.upload_uniform(&params);
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gn_back_dinput"),
+                source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_DINPUT.into()),
+            });
+            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gn_back_dinput"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: gamma.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: stats.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: sums.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: d_input.buffer.as_entire_binding() },
+                ],
+            });
+            let (wx, wy, wz) = super::dispatch_1d(total);
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gn_back_dinput"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(wx, wy, wz);
+            }
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        // Pass D: compute d_gamma and d_beta per channel. 5 storage bindings → raw dispatch.
+        let d_gamma = self.alloc(channels as usize);
+        let d_beta = self.alloc(channels as usize);
+        {
+            let params_buf = self.upload_uniform(&params);
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gn_back_daffine"),
+                source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_DAFFINE.into()),
+            });
+            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gn_back_daffine"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: stats.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: d_gamma.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: d_beta.buffer.as_entire_binding() },
+                ],
+            });
+            let (wx, wy, wz) = super::dispatch_1d(channels);
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gn_back_daffine"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(wx, wy, wz);
+            }
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        Ok((d_input, d_gamma, d_beta))
     }
 }
 
