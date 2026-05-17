@@ -3,7 +3,7 @@
 
 [package]
 name = "any-gpu"
-version = "0.1.0"
+version = "0.7.1"
 edition = "2024"
 description = "Tensor engine for every GPU. AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in. wgpu under the hood."
 license = "Unlicense"
