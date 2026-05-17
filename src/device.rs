@@ -2,9 +2,9 @@
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
 // Token-Optimized Code Representation per docs/compression_map.md.
-// t500 = GpuDevice. t501 = GpuBuffer. f500..f508 device methods.
+// t500 = GpuDevice. t501 = GpuBuffer. t540 = GpuBufferF16. f500..f508, f771..f772.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher, DefaultHasher};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,9 @@ pub struct t500 {
     /// s504 = pipeline_cache. Compiled pipeline cache. Key = hash of WGSL source.
     /// Eliminates per-dispatch recompilation.
     s504: Mutex<HashMap<u64, Arc<wgpu::ComputePipeline>>>,
+    /// s521 = has_f16. True when the adapter supports wgpu::Features::SHADER_F16.
+    /// RDNA1+ (RX 5700 XT, RADV/Vulkan) exposes this. Required by f771 and f772.
+    pub s521: bool,
 }
 
 /// t501 = GpuBuffer. GPU-resident f32 buffer with element-count metadata.
@@ -34,6 +37,17 @@ pub struct t501 {
     pub(crate) s506: u64,
     /// s507 = len. Number of f32 elements.
     pub s507: usize,
+}
+
+/// t540 = GpuBufferF16. GPU-resident f16 buffer; element size is 2 bytes.
+/// Requires device.s521 (SHADER_F16) to use in shaders. Expand to f32 via f772.
+pub struct t540 {
+    /// s522 = buf. The underlying wgpu storage buffer (f16 bits packed as raw bytes).
+    pub(crate) s522: wgpu::Buffer,
+    /// s523 = size. Byte length (= s524 * 2).
+    pub(crate) s523: u64,
+    /// s524 = len. Number of f16 elements.
+    pub s524: usize,
 }
 
 impl t500 {
@@ -96,11 +110,20 @@ impl t500 {
 
         // Use the adapter's actual limits — not Limits::default() which can
         // request capabilities the driver doesn't support (SIGSEGV on RADV/RDNA1).
+        // Opt into SHADER_F16 if the adapter supports it (RDNA1+ / RADV does).
+        let v5 = v1.features();
+        let v6 = if v5.contains(wgpu::Features::SHADER_F16) {
+            wgpu::Features::SHADER_F16
+        } else {
+            wgpu::Features::empty()
+        };
+        let has_f16 = v6.contains(wgpu::Features::SHADER_F16);
+
         let (v3, v4) = v1
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("any-gpu"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: v6,
                     required_limits: v1.limits(),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -115,6 +138,7 @@ impl t500 {
             s502: v2.name.clone(),
             s503: format!("{:?}", v2.backend),
             s504: Mutex::new(HashMap::new()),
+            s521: has_f16,
         })
     }
 
@@ -273,6 +297,99 @@ impl t500 {
     pub(crate) fn f508(&self) -> usize {
         self.s504.lock().unwrap().len()
     }
+
+    /// f771 = upload_f16. Upload raw f16 bits (&[u16]) into a VRAM storage buffer.
+    /// Two f16 elements are packed per u32 (lower-then-upper 16 bits); f772 unpacks via
+    /// unpack2x16float. Odd-length slices are padded with 0x0000 (f16 +0.0).
+    pub fn f771(&self, p0: &[u16]) -> t540 {
+        // Pad to even length so every u32 in the buffer is fully initialised.
+        let mut v0 = p0.to_vec();
+        if v0.len() % 2 != 0 { v0.push(0); }
+        let v1: &[u8] = bytemuck::cast_slice(&v0);
+        let v2 = self.s500.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: v1,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        t540 { s522: v2, s523: v1.len() as u64, s524: p0.len() }
+    }
+
+    /// alloc_f16. Allocate a zero-filled f16 VRAM buffer for `p0` f16 elements.
+    /// Buffer size = ceil(p0/2)*4 bytes (4-byte aligned, last u32 zero-padded for odd p0).
+    pub(crate) fn alloc_f16(&self, p0: usize) -> t540 {
+        let pairs = (p0 + 1) / 2;
+        let v0 = (pairs * 4) as u64;
+        let v1 = self.s500.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: v0,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Zero-fill so the padding u16 (odd p0) is 0x0000 = f16(+0.0).
+        let mut v2 = self.s500.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None });
+        v2.clear_buffer(&v1, 0, None);
+        self.s501.submit(Some(v2.finish()));
+        t540 { s522: v1, s523: v0, s524: p0 }
+    }
+
+    /// f772 = f16_to_f32. GPU kernel: expand a packed-f16 buffer (t540) into a new f32
+    /// buffer (t501). One thread per u32 pair; uses unpack2x16float for the expansion.
+    /// No special device features required — unpack2x16float is standard WGSL.
+    /// Note: wgpu/Naga does not yet support `enable f16;` (WGSL extension #4384), so we
+    /// use the packing/unpacking built-ins instead.
+    pub fn f772(&self, p0: &t540) -> Result<t501> {
+        // One thread per f16 pair (u32). Pairs index into src; base = pair*2 indexes dst.
+        const SHADER: &str = "
+struct P { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> src: array<u32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let base = idx * 2u;
+    if base >= p.n { return; }
+    let v = unpack2x16float(src[idx]);
+    dst[base] = v.x;
+    if base + 1u < p.n { dst[base + 1u] = v.y; }
+}";
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct F16P { n: u32, _p: [u32; 3] }
+
+        let n = p0.s524 as u32;
+        let n_pairs = (n + 1) / 2;
+        let v0 = self.f503(p0.s524);
+        let v1 = self.f506(&F16P { n, _p: [0; 3] });
+        let v2 = self.f507(SHADER, Some("f16_to_f32"));
+        let v3 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &v2.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: v1.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: p0.s522.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: v0.s505.as_entire_binding() },
+            ],
+        });
+        let wg = n_pairs.div_ceil(256);
+        let (wg_x, wg_y) = if wg <= 65535 { (wg, 1) } else { (65535, wg.div_ceil(65535)) };
+        let mut v4 = self.s500.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut v5 = v4.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None, timestamp_writes: None });
+            v5.set_pipeline(&v2);
+            v5.set_bind_group(0, &v3, &[]);
+            v5.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+        self.s501.submit(Some(v4.finish()));
+        Ok(v0)
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +403,44 @@ mod tests {
         let v0 = dev();
         assert!(!v0.s502.is_empty(), "adapter_name should be populated");
         assert!(!v0.s503.is_empty(), "backend should be populated");
+        // s521 is bool — just verify it's accessible (true on RDNA1/Vulkan).
+        let _ = v0.s521;
+    }
+
+    // f771+f772: upload f16 bits, expand to f32 via unpack2x16float kernel, verify values.
+    #[test]
+    fn f771_f772_roundtrip() {
+        let f32_vals: [f32; 6] = [1.0, -1.0, 0.5, 2.0, 0.0, -0.25];
+        let f16_bits: Vec<u16> = f32_vals.iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let buf = dev().f771(&f16_bits);
+        assert_eq!(buf.s524, 6);
+        assert_eq!(buf.s523, 12); // 6 elements: ceil(6/2)*4 = 12 bytes
+        let expanded = dev().f772(&buf).unwrap();
+        let back = dev().f504(&expanded).unwrap();
+        assert_eq!(back.len(), 6);
+        for (&a, &b) in f32_vals.iter().zip(back.iter()) {
+            assert!((a - b).abs() < 0.01, "f16 round-trip: {a} vs {b}");
+        }
+    }
+
+    // f771+f772: odd element count — padding must not bleed into the result.
+    #[test]
+    fn f771_f772_odd_count() {
+        let f32_vals: [f32; 5] = [1.0, -1.0, 0.5, 2.0, 0.0];
+        let f16_bits: Vec<u16> = f32_vals.iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let buf = dev().f771(&f16_bits);
+        assert_eq!(buf.s524, 5);
+        assert_eq!(buf.s523, 12); // ceil(5/2)*4 = 12 bytes (one u32 has padding)
+        let expanded = dev().f772(&buf).unwrap();
+        let back = dev().f504(&expanded).unwrap();
+        assert_eq!(back.len(), 5); // padding element must NOT appear in output
+        for (&a, &b) in f32_vals.iter().zip(back.iter()) {
+            assert!((a - b).abs() < 0.01, "odd-n f16: {a} vs {b}");
+        }
     }
 
     #[test]

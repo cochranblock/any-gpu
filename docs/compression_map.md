@@ -53,6 +53,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t537 | KVAppendParams | ops/transformer (private, Sprint 7 step 2) |
 | t538 | SafetensorsModel | safetensors (Sprint 7 step 3) |
 | t539 | LayerPager | pager (Sprint 7 step 4) |
+| t540 | GpuBufferF16 | device (Sprint 7 step 5) |
 
 ## Functions (fN)
 
@@ -253,6 +254,10 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f768 | LayerPager::new |
 | f769 | LayerPager::upload (f32 slice → VRAM via staging) |
 | f770 | LayerPager::page_layer (named tensors from SafetensorsModel → VRAM map) |
+| f771 | GpuDevice::upload_f16 (&[u16] → t540; packs 2 f16 per u32) |
+| f772 | GpuDevice::f16_to_f32 (t540 → t501 via unpack2x16float kernel) |
+| f773 | LayerPager::upload_f16_raw (&[u16] → t540 via staging) |
+| f774 | LayerPager::page_layer_f16 (named tensors → HashMap<String, t540>) |
 
 ## Struct fields (sN)
 
@@ -279,6 +284,10 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | s518 | shapes | t538 (HashMap<String, Vec<u32>>) |
 | s519 | staging | t539 (LayerPager staging buffer: MAP_WRITE \| COPY_SRC) |
 | s520 | cap | t539 (staging capacity in bytes) |
+| s521 | has_f16 | t500 (SHADER_F16 device feature supported) |
+| s522 | buf | t540 (wgpu::Buffer for packed f16 data) |
+| s523 | size | t540 (byte length = ceil(s524/2)*4) |
+| s524 | len | t540 (number of f16 elements) |
 
 (Internal shader-uniform field names like `n`, `rows`, `cols`, `eps` stay as-is — they map directly to WGSL uniform struct fields and renaming would desync Rust/WGSL.)
 

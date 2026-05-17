@@ -3,15 +3,17 @@
 //
 // Sprint 7 step 4: layer paging. t539 = LayerPager owns a persistent host-visible
 // staging buffer and streams model tensors into VRAM one at a time.
-// f768 = new, f769 = upload, f770 = page_layer.
+// f768 = new, f769 = upload (f32), f770 = page_layer (f32).
+// f773 = upload_f16_raw (&[u16] → t540), f774 = page_layer_f16 (Sprint 7 step 5).
 //
 // On discrete GPUs (AMD RX 5700 XT / RADV) MAP_WRITE | COPY_SRC maps to
 // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT — the GPU DMA engine reads directly from
 // this pinned region, eliminating per-upload malloc/free of staging memory.
 
-use crate::device::{t500, t501};
+use crate::device::{t500, t501, t540};
 use crate::safetensors::t538;
 use anyhow::Result;
+use half::f16 as F16;
 use std::collections::HashMap;
 
 /// Default staging window: 512 MiB — large enough for any single tensor in a
@@ -95,6 +97,67 @@ impl t539 {
                 .f764(name)
                 .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in model", name))?;
             out.insert(name.to_owned(), self.f769(dev, data)?);
+        }
+        Ok(out)
+    }
+
+    /// f773 = LayerPager::upload_f16_raw. Upload raw f16 bits (&[u16]) into a VRAM
+    /// f16 buffer via the persistent staging buffer. Same chunked strategy as f769.
+    /// The f16 elements are packed as u32 pairs (lower/upper 16 bits) for f772.
+    pub fn f773(&self, dev: &t500, data: &[u16]) -> Result<t540> {
+        let dst = dev.alloc_f16(data.len());
+        let cap_elems = self.s520 / 2; // staging capacity in f16 elements (2 bytes each)
+
+        for (ci, chunk) in data.chunks(cap_elems).enumerate() {
+            let byte_off = (ci * cap_elems * 2) as u64;
+            let chunk_bytes: &[u8] = bytemuck::cast_slice(chunk);
+            let chunk_len = chunk_bytes.len() as u64;
+
+            let slice = self.s519.slice(..chunk_len);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Write, move |r| {
+                let _ = tx.send(r);
+            });
+            dev.s500.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap()?;
+
+            {
+                let mut view = slice.get_mapped_range_mut();
+                view.copy_from_slice(chunk_bytes);
+            }
+            self.s519.unmap();
+
+            let mut enc = dev
+                .s500
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            enc.copy_buffer_to_buffer(&self.s519, 0, &dst.s522, byte_off, chunk_len);
+            dev.s501.submit(Some(enc.finish()));
+            dev.s500.poll(wgpu::Maintain::Wait);
+        }
+
+        Ok(dst)
+    }
+
+    /// f774 = LayerPager::page_layer_f16. Upload named tensors from a SafetensorsModel
+    /// into VRAM as f16. Model weights (stored as f32 in t538) are quantized f32→f16 on
+    /// the CPU before staging, halving VRAM bandwidth during inference.
+    /// Returns a name→t540 map. Expand to f32 for computation via f772.
+    pub fn f774(
+        &self,
+        dev: &t500,
+        model: &t538,
+        names: &[&str],
+    ) -> Result<HashMap<String, t540>> {
+        let mut out = HashMap::with_capacity(names.len());
+        for &name in names {
+            let f32_data = model
+                .f764(name)
+                .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in model", name))?;
+            let f16_bits: Vec<u16> = f32_data
+                .iter()
+                .map(|&v| F16::from_f32(v).to_bits())
+                .collect();
+            out.insert(name.to_owned(), self.f773(dev, &f16_bits)?);
         }
         Ok(out)
     }
@@ -209,5 +272,65 @@ mod tests {
         let model = t538::f761(&raw).unwrap();
         let p = t539::f768(dev(), 128 * 4);
         assert!(p.f770(dev(), &model, &["nope"]).is_err());
+    }
+
+    // f773: upload f16 bits via staging, expand to f32 via f772, verify round-trip.
+    #[test]
+    fn f773_roundtrip_via_f772() {
+        let f32_vals: Vec<f32> = vec![1.0, 2.0, -1.0, 0.5, 0.0, 100.0, -0.25, 0.125];
+        let f16_bits: Vec<u16> = f32_vals.iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let p = t539::f768(dev(), 1024 * 2);
+        let buf = p.f773(dev(), &f16_bits).unwrap();
+        assert_eq!(buf.s524, 8); // 8 elements, even
+        assert_eq!(buf.s523, 16); // ceil(8/2)*4 = 16 bytes
+        let expanded = dev().f772(&buf).unwrap();
+        let back = dev().f504(&expanded).unwrap();
+        assert_eq!(back.len(), 8);
+        for (&a, &b) in f32_vals.iter().zip(back.iter()) {
+            assert!((a - b).abs() < 0.01, "f16 round-trip: {a} vs {b}");
+        }
+    }
+
+    // f773: chunked f16 upload (staging = 16 f16 elements = 32 bytes, tensor = 256).
+    // Staging must be a multiple of 4 bytes for correct u32 alignment at chunk boundaries.
+    #[test]
+    fn f773_chunked_f16_upload() {
+        let f32_vals: Vec<f32> = (0..256).map(|i| i as f32 * 0.1).collect();
+        let f16_bits: Vec<u16> = f32_vals.iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let p = t539::f768(dev(), 32 * 2); // 32 bytes = 16 f16 per chunk
+        let buf = p.f773(dev(), &f16_bits).unwrap();
+        let expanded = dev().f772(&buf).unwrap();
+        let back = dev().f504(&expanded).unwrap();
+        assert_eq!(back.len(), 256);
+        for (i, (&a, &b)) in f32_vals.iter().zip(back.iter()).enumerate() {
+            assert!((a - b).abs() < 0.01, "chunk boundary error at {i}: {a} vs {b}");
+        }
+    }
+
+    // f774: upload f32 model tensors as f16 into VRAM via page_layer_f16.
+    #[test]
+    fn f774_page_layer_f16() {
+        let w: Vec<f32> = vec![1.0, 2.0, 4.0, 8.0, 0.5, -0.5, 0.25, -0.25];
+        let w_bytes = to_bytes(&w);
+        let tensors = vec![("weight", TensorView::new(Dtype::F32, vec![8], &w_bytes).unwrap())];
+        let raw = serialize(tensors, &None).unwrap();
+        let model = t538::f761(&raw).unwrap();
+
+        let p = t539::f768(dev(), 1024 * 2);
+        let layer = p.f774(dev(), &model, &["weight"]).unwrap();
+        let buf = &layer["weight"];
+        assert_eq!(buf.s524, 8);
+        assert_eq!(buf.s523, 16); // ceil(8/2)*4 = 16 bytes
+
+        let expanded = dev().f772(buf).unwrap();
+        let back = dev().f504(&expanded).unwrap();
+        assert_eq!(back.len(), 8);
+        for (&a, &b) in w.iter().zip(back.iter()) {
+            assert!((a - b).abs() < 0.01, "f774 f32→f16→f32: {a} vs {b}");
+        }
     }
 }

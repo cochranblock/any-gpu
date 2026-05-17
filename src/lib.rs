@@ -26,7 +26,7 @@ pub mod optim;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod train;
 
-pub use device::{t500, t501};
+pub use device::{t500, t501, t540};
 pub use ops::transformer::t534;
 pub use pager::{t539, DEFAULT_STAGE_BYTES};
 pub use safetensors::t538;

@@ -17,6 +17,7 @@ bytemuck = { version = "1", features = ["derive"] }
 anyhow = "1"
 blake3 = "1"
 futures-channel = "0.3"
+half = { version = "2", features = ["bytemuck"] }
 safetensors = "0.4"
 exopack = { version = "0.2", optional = true, features = ["triple_sims"] }
 
