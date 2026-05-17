@@ -62,6 +62,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t546 | Linear | module (Sprint 7 step 7) |
 | t547 | LmConfig | lm (Sprint 7 step 7) |
 | t548 | CausalLM | lm (Sprint 7 step 7) |
+| t549 | GpuBatch | device (batch-dispatch recording guard) |
 
 ## Functions (fN)
 
@@ -78,6 +79,9 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f506 | upload_uniform | pub(crate) uniform buffer helper |
 | f507 | pipeline | pub(crate) compiled-pipeline cache lookup |
 | f508 | pipeline_cache_len | test-only |
+| f509 | begin | Enter batch recording mode; returns t549 |
+| f510 | execute | Submit batch without CPU poll (t549 method) |
+| f511 | sync | Submit batch + poll until GPU done (t549 method) |
 
 ### tensor (f520–f539)
 
@@ -325,6 +329,8 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | s519 | staging | t539 (LayerPager staging buffer: MAP_WRITE \| COPY_SRC) |
 | s520 | cap | t539 (staging capacity in bytes) |
 | s521 | has_f16 | t500 (SHADER_F16 device feature supported) |
+| s508 | batch_state | t500 (Mutex<Option<t549State>> — None=eager, Some=batch recording) |
+| s509 | has_subgroup | t500 (SUBGROUP feature; enables subgroupMax/subgroupAdd shaders) |
 | s522 | buf | t540 (wgpu::Buffer for packed f16 data) |
 | s523 | size | t540 (byte length = ceil(s524/2)*4) |
 | s524 | len | t540 (number of f16 elements) |

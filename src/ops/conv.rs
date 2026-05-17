@@ -19,10 +19,15 @@ struct t528 {
     _pad: u32,
 }
 
-// Tiled matmul: 32x32 tiles, 2x2 register blocking.
-// Each 16x16 workgroup (256 threads) covers a 32x32 output block.
-// Each thread computes a 2x2 subblock — 4 outputs, 4 register accumulators.
-// Global memory reads cut 4x vs 16x16/1x1. LDS usage: 8KB/workgroup (fits 8 per RDNA CU).
+// Single-wavefront 4x4 register-blocked tiled matmul.
+// @workgroup_size(64) = exactly one wave64 on RDNA1/RDNA2.
+// workgroupBarrier inside a single wavefront is a wavefront-local fence
+// (no cross-wavefront coordination), eliminating ~75% of barrier overhead
+// vs the previous 4-wavefront (16x16) workgroup.
+// Thread layout within the workgroup: tr = t/8 (0..8), tc = t%8 (0..8).
+// Each thread owns a 4x4 output subblock → 64 threads × 16 outputs = 1024 = 32x32.
+// LDS: 2 × 32x32 × 4B = 8 KB/workgroup (fits 8 per RDNA1 CU at 64 KB LDS).
+// Tile load: 64 threads × 16 elements = 1024 elements per A-tile and B-tile.
 const SHADER_MATMUL: &str = "
 const TILE: u32 = 32u;
 struct Dims { m: u32, n: u32, k: u32, _pad: u32, }
@@ -34,72 +39,99 @@ struct Dims { m: u32, n: u32, k: u32, _pad: u32, }
 var<workgroup> tile_a: array<f32, 1024>;
 var<workgroup> tile_b: array<f32, 1024>;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(64)
 fn main(
-    @builtin(workgroup_id) wg: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id)          wg: vec3<u32>,
+    @builtin(local_invocation_index) t:  u32,
 ) {
-    let lr = lid.x;
-    let lc = lid.y;
-    let tid = lr * 16u + lc;
+    let tr   = t / 8u;
+    let tc   = t % 8u;
+    let row0 = wg.x * TILE + tr * 4u;
+    let col0 = wg.y * TILE + tc * 4u;
 
-    let row0 = wg.x * TILE + lr * 2u;
-    let row1 = row0 + 1u;
-    let col0 = wg.y * TILE + lc * 2u;
-    let col1 = col0 + 1u;
-
-    var acc00: f32 = 0.0;
-    var acc01: f32 = 0.0;
-    var acc10: f32 = 0.0;
-    var acc11: f32 = 0.0;
+    var acc0:  f32 = 0.0; var acc1:  f32 = 0.0; var acc2:  f32 = 0.0; var acc3:  f32 = 0.0;
+    var acc4:  f32 = 0.0; var acc5:  f32 = 0.0; var acc6:  f32 = 0.0; var acc7:  f32 = 0.0;
+    var acc8:  f32 = 0.0; var acc9:  f32 = 0.0; var acc10: f32 = 0.0; var acc11: f32 = 0.0;
+    var acc12: f32 = 0.0; var acc13: f32 = 0.0; var acc14: f32 = 0.0; var acc15: f32 = 0.0;
 
     let num_tiles = (dims.k + TILE - 1u) / TILE;
 
-    for (var t: u32 = 0u; t < num_tiles; t++) {
-        // 256 threads load 1024 elements each for tile_a and tile_b (4 per thread).
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let elem = tid + i * 256u;
-            let tr = elem / TILE;
-            let tc = elem % TILE;
+    for (var tile: u32 = 0u; tile < num_tiles; tile++) {
+        // 64 threads load 16 elements each = 1024 elements per A-tile and B-tile.
+        for (var i: u32 = 0u; i < 16u; i++) {
+            let e  = t + i * 64u;
+            let er = e / TILE;
+            let ec = e % TILE;
 
-            let ga_r = wg.x * TILE + tr;
-            let ga_c = t * TILE + tc;
+            let ga_r = wg.x * TILE + er;
+            let ga_c = tile * TILE + ec;
             if ga_r < dims.m && ga_c < dims.k {
-                tile_a[elem] = a[ga_r * dims.k + ga_c];
+                tile_a[e] = a[ga_r * dims.k + ga_c];
             } else {
-                tile_a[elem] = 0.0;
+                tile_a[e] = 0.0;
             }
 
-            let gb_r = t * TILE + tr;
-            let gb_c = wg.y * TILE + tc;
+            let gb_r = tile * TILE + er;
+            let gb_c = wg.y * TILE + ec;
             if gb_r < dims.k && gb_c < dims.n {
-                tile_b[elem] = b[gb_r * dims.n + gb_c];
+                tile_b[e] = b[gb_r * dims.n + gb_c];
             } else {
-                tile_b[elem] = 0.0;
+                tile_b[e] = 0.0;
             }
         }
 
         workgroupBarrier();
 
-        // 2x2 register block — a0/a1 each reused for two b values.
-        for (var i: u32 = 0u; i < TILE; i++) {
-            let a0 = tile_a[(lr * 2u     ) * TILE + i];
-            let a1 = tile_a[(lr * 2u + 1u) * TILE + i];
-            let b0 = tile_b[i * TILE + lc * 2u     ];
-            let b1 = tile_b[i * TILE + lc * 2u + 1u];
-            acc00 = fma(a0, b0, acc00);
-            acc01 = fma(a0, b1, acc01);
-            acc10 = fma(a1, b0, acc10);
-            acc11 = fma(a1, b1, acc11);
+        // 4x4 register-block: 8 LDS reads feed 16 FMAs per k-step.
+        // a0..a3 each reused across 4 b values; b0..b3 each reused across 4 a values.
+        for (var k: u32 = 0u; k < TILE; k++) {
+            let a0 = tile_a[(tr * 4u     ) * TILE + k];
+            let a1 = tile_a[(tr * 4u + 1u) * TILE + k];
+            let a2 = tile_a[(tr * 4u + 2u) * TILE + k];
+            let a3 = tile_a[(tr * 4u + 3u) * TILE + k];
+            let b0 = tile_b[k * TILE + tc * 4u     ];
+            let b1 = tile_b[k * TILE + tc * 4u + 1u];
+            let b2 = tile_b[k * TILE + tc * 4u + 2u];
+            let b3 = tile_b[k * TILE + tc * 4u + 3u];
+            acc0  = fma(a0, b0, acc0);  acc1  = fma(a0, b1, acc1);
+            acc2  = fma(a0, b2, acc2);  acc3  = fma(a0, b3, acc3);
+            acc4  = fma(a1, b0, acc4);  acc5  = fma(a1, b1, acc5);
+            acc6  = fma(a1, b2, acc6);  acc7  = fma(a1, b3, acc7);
+            acc8  = fma(a2, b0, acc8);  acc9  = fma(a2, b1, acc9);
+            acc10 = fma(a2, b2, acc10); acc11 = fma(a2, b3, acc11);
+            acc12 = fma(a3, b0, acc12); acc13 = fma(a3, b1, acc13);
+            acc14 = fma(a3, b2, acc14); acc15 = fma(a3, b3, acc15);
         }
 
         workgroupBarrier();
     }
 
-    if row0 < dims.m && col0 < dims.n { out[row0 * dims.n + col0] = acc00; }
-    if row0 < dims.m && col1 < dims.n { out[row0 * dims.n + col1] = acc01; }
-    if row1 < dims.m && col0 < dims.n { out[row1 * dims.n + col0] = acc10; }
-    if row1 < dims.m && col1 < dims.n { out[row1 * dims.n + col1] = acc11; }
+    let r0 = row0; let r1 = row0 + 1u; let r2 = row0 + 2u; let r3 = row0 + 3u;
+    let c0 = col0; let c1 = col0 + 1u; let c2 = col0 + 2u; let c3 = col0 + 3u;
+    if r0 < dims.m {
+        if c0 < dims.n { out[r0 * dims.n + c0] = acc0;  }
+        if c1 < dims.n { out[r0 * dims.n + c1] = acc1;  }
+        if c2 < dims.n { out[r0 * dims.n + c2] = acc2;  }
+        if c3 < dims.n { out[r0 * dims.n + c3] = acc3;  }
+    }
+    if r1 < dims.m {
+        if c0 < dims.n { out[r1 * dims.n + c0] = acc4;  }
+        if c1 < dims.n { out[r1 * dims.n + c1] = acc5;  }
+        if c2 < dims.n { out[r1 * dims.n + c2] = acc6;  }
+        if c3 < dims.n { out[r1 * dims.n + c3] = acc7;  }
+    }
+    if r2 < dims.m {
+        if c0 < dims.n { out[r2 * dims.n + c0] = acc8;  }
+        if c1 < dims.n { out[r2 * dims.n + c1] = acc9;  }
+        if c2 < dims.n { out[r2 * dims.n + c2] = acc10; }
+        if c3 < dims.n { out[r2 * dims.n + c3] = acc11; }
+    }
+    if r3 < dims.m {
+        if c0 < dims.n { out[r3 * dims.n + c0] = acc12; }
+        if c1 < dims.n { out[r3 * dims.n + c1] = acc13; }
+        if c2 < dims.n { out[r3 * dims.n + c2] = acc14; }
+        if c3 < dims.n { out[r3 * dims.n + c3] = acc15; }
+    }
 }
 ";
 

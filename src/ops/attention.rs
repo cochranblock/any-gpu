@@ -18,6 +18,62 @@ struct t514 {
     _pad: [u32; 2],
 }
 
+// Fused subgroup softmax: single dispatch, one workgroup per row.
+// 256 threads cooperatively reduce across 4 subgroups via LDS.
+// subgroupMax / subgroupAdd replace multi-round tree reductions.
+// Requires wgpu::Features::SUBGROUP (s509 == true); selected at runtime.
+const SHADER_SOFTMAX_FUSED: &str = "
+struct P { rows: u32, cols: u32, _p0: u32, _p1: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out:   array<f32>;
+
+var<workgroup> wg_scratch: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id)           wg:      vec3<u32>,
+    @builtin(local_invocation_index) t:       u32,
+    @builtin(subgroup_id)            sg_id:   u32,
+    @builtin(subgroup_invocation_id) sg_lane: u32,
+) {
+    let row = wg.x + wg.y * 65535u;
+    if row >= p.rows { return; }
+    let base = row * p.cols;
+
+    var local_max: f32 = -1.0e30;
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        local_max = max(local_max, input[base + c]);
+    }
+    let sg_max = subgroupMax(local_max);
+    if sg_lane == 0u { wg_scratch[sg_id] = sg_max; }
+    workgroupBarrier();
+    var global_max: f32 = select(-1.0e30, wg_scratch[t], t < 4u);
+    global_max = subgroupMax(global_max);
+    if t == 0u { wg_scratch[4] = global_max; }
+    workgroupBarrier();
+    global_max = wg_scratch[4];
+
+    var local_sum: f32 = 0.0;
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        local_sum += exp(input[base + c] - global_max);
+    }
+    let sg_sum = subgroupAdd(local_sum);
+    if sg_lane == 0u { wg_scratch[sg_id] = sg_sum; }
+    workgroupBarrier();
+    var global_sum: f32 = select(0.0, wg_scratch[t], t < 4u);
+    global_sum = subgroupAdd(global_sum);
+    if t == 0u { wg_scratch[5] = global_sum; }
+    workgroupBarrier();
+    global_sum = wg_scratch[5];
+
+    let inv_sum = 1.0 / global_sum;
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        out[base + c] = exp(input[base + c] - global_max) * inv_sum;
+    }
+}
+";
+
 // Pass 1: one thread per row. Compute max and sum(exp(x - max)).
 const SHADER_SOFTMAX_STATS: &str = "
 struct P { rows: u32, cols: u32, _p0: u32, _p1: u32, }
@@ -360,12 +416,23 @@ fn main() {
 
 impl t500 {
     /// f620 = softmax. Softmax along the last dimension. Input shape: [rows, cols].
+    /// Uses fused subgroup reduction when s509 (SUBGROUP feature) is available,
+    /// otherwise falls back to the two-pass (stats + apply) approach.
     pub fn f620(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2) as usize);
 
         let v0 = t514 { rows: p1, cols: p2, _pad: [0; 2] };
 
-        // Pass 1: per-row max and sum
+        if self.s509 {
+            // Fused path: one workgroup per row, subgroupMax/subgroupAdd for reductions.
+            // Overflow: wg.x + wg.y * 65535 encodes row when p1 > 65535.
+            let v1 = self.f503((p1 * p2) as usize);
+            let (vx, vy) = if p1 <= 65535 { (p1, 1) } else { (65535, p1.div_ceil(65535)) };
+            self.f543(SHADER_SOFTMAX_FUSED, Some("softmax_fused"), &v0, &[p0], &v1, (vx, vy, 1));
+            return Ok(v1);
+        }
+
+        // Two-pass fallback: stats pass then normalize pass.
         let v1 = self.f503((p1 * 2) as usize);
         self.f543(
             SHADER_SOFTMAX_STATS, Some("softmax_stats"),
@@ -373,7 +440,6 @@ impl t500 {
             super::f540(p1),
         );
 
-        // Pass 2: normalize
         let v2 = p1 * p2;
         let v3 = self.f503(v2 as usize);
 

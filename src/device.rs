@@ -68,6 +68,10 @@ pub struct t500 {
     /// s521 = has_f16. True when the adapter supports wgpu::Features::SHADER_F16.
     /// RDNA1+ (RX 5700 XT, RADV/Vulkan) exposes this. Required by f771 and f772.
     pub s521: bool,
+    /// s509 = has_subgroup. True when the adapter supports wgpu::Features::SUBGROUP.
+    /// Enables subgroupMax/subgroupAdd in WGSL shaders for O(1) intra-wavefront reductions.
+    /// RDNA1+ via VK_EXT_subgroup_size_control (Vulkan 1.3 on RADV).
+    pub s509: bool,
     /// s508 = batch_state. Active batch encoder, or None in eager mode.
     pub(crate) s508: Mutex<Option<t549State>>,
 }
@@ -155,12 +159,11 @@ impl t500 {
         // request capabilities the driver doesn't support (SIGSEGV on RADV/RDNA1).
         // Opt into SHADER_F16 if the adapter supports it (RDNA1+ / RADV does).
         let v5 = v1.features();
-        let v6 = if v5.contains(wgpu::Features::SHADER_F16) {
-            wgpu::Features::SHADER_F16
-        } else {
-            wgpu::Features::empty()
-        };
-        let has_f16 = v6.contains(wgpu::Features::SHADER_F16);
+        let has_f16 = v5.contains(wgpu::Features::SHADER_F16);
+        let has_sg = v5.contains(wgpu::Features::SUBGROUP);
+        let mut v6 = wgpu::Features::empty();
+        if has_f16 { v6 |= wgpu::Features::SHADER_F16; }
+        if has_sg  { v6 |= wgpu::Features::SUBGROUP; }
 
         let (v3, v4) = v1
             .request_device(
@@ -182,6 +185,7 @@ impl t500 {
             s503: format!("{:?}", v2.backend),
             s504: Mutex::new(HashMap::new()),
             s521: has_f16,
+            s509: has_sg,
             s508: Mutex::new(None),
         })
     }
