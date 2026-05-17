@@ -32,7 +32,7 @@ pub mod module;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lm;
 
-pub use device::{t500, t501, t540};
+pub use device::{t500, t501, t540, t549};
 pub use ops::transformer::t534;
 pub use pager::{t539, DEFAULT_STAGE_BYTES};
 pub use safetensors::t538;

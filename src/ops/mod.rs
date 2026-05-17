@@ -138,17 +138,33 @@ impl t500 {
             entries: &v2,
         });
 
-        let mut v6 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut v7 = v6.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: p1,
-                timestamp_writes: None,
-            });
-            v7.set_pipeline(&v1);
-            v7.set_bind_group(0, &v5, &[]);
-            v7.dispatch_workgroups(p5.0, p5.1, p5.2);
+        let mut v6 = self.s508.lock().unwrap();
+        if let Some(ref mut batch) = *v6 {
+            // Batch mode: record into the active encoder, defer submission.
+            {
+                let mut v7 = batch.enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: p1, timestamp_writes: None,
+                });
+                v7.set_pipeline(&v1);
+                v7.set_bind_group(0, &v5, &[]);
+                v7.dispatch_workgroups(p5.0, p5.1, p5.2);
+            }
+            batch.keep.push(v5);
+        } else {
+            // Eager mode: own encoder, submit immediately.
+            drop(v6);
+            let mut v7 = self.s500.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut v8 = v7.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: p1, timestamp_writes: None,
+                });
+                v8.set_pipeline(&v1);
+                v8.set_bind_group(0, &v5, &[]);
+                v8.dispatch_workgroups(p5.0, p5.1, p5.2);
+            }
+            self.s501.submit(Some(v7.finish()));
         }
-        self.s501.submit(Some(v6.finish()));
     }
 }
 

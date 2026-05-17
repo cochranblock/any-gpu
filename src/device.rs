@@ -10,6 +10,47 @@ use std::hash::{Hash, Hasher, DefaultHasher};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
+/// t549 = GpuBatch. Recording guard returned by f509 (begin).
+/// All ops dispatched while this is live record into a single CommandEncoder.
+/// Call f511 (sync) or f510 (execute) to submit; dropping auto-submits.
+pub struct t549<'a>(&'a t500);
+
+/// Internal state for batch recording. Lives inside t500.s508.
+pub(crate) struct t549State {
+    pub(crate) enc: wgpu::CommandEncoder,
+    /// BindGroups keep their referenced uniform buffers alive until submission.
+    pub(crate) keep: Vec<wgpu::BindGroup>,
+}
+
+impl<'a> t549<'a> {
+    /// f510 = execute. Submit all recorded ops to the GPU without waiting.
+    pub fn f510(self) {
+        let dev = self.0;
+        std::mem::forget(self);
+        if let Some(st) = dev.s508.lock().unwrap().take() {
+            dev.s501.submit(Some(st.enc.finish()));
+        }
+    }
+
+    /// f511 = sync. Submit all recorded ops and block until GPU completes.
+    pub fn f511(self) {
+        let dev = self.0;
+        std::mem::forget(self);
+        if let Some(st) = dev.s508.lock().unwrap().take() {
+            dev.s501.submit(Some(st.enc.finish()));
+            dev.s500.poll(wgpu::Maintain::Wait);
+        }
+    }
+}
+
+impl Drop for t549<'_> {
+    fn drop(&mut self) {
+        if let Some(st) = self.0.s508.lock().unwrap().take() {
+            self.0.s501.submit(Some(st.enc.finish()));
+        }
+    }
+}
+
 /// t500 = GpuDevice. wgpu picks the right backend — Vulkan, Metal, DX12.
 /// One codepath, every vendor.
 pub struct t500 {
@@ -27,6 +68,8 @@ pub struct t500 {
     /// s521 = has_f16. True when the adapter supports wgpu::Features::SHADER_F16.
     /// RDNA1+ (RX 5700 XT, RADV/Vulkan) exposes this. Required by f771 and f772.
     pub s521: bool,
+    /// s508 = batch_state. Active batch encoder, or None in eager mode.
+    pub(crate) s508: Mutex<Option<t549State>>,
 }
 
 /// t501 = GpuBuffer. GPU-resident f32 buffer with element-count metadata.
@@ -139,6 +182,7 @@ impl t500 {
             s503: format!("{:?}", v2.backend),
             s504: Mutex::new(HashMap::new()),
             s521: has_f16,
+            s508: Mutex::new(None),
         })
     }
 
@@ -296,6 +340,17 @@ impl t500 {
     #[cfg(test)]
     pub(crate) fn f508(&self) -> usize {
         self.s504.lock().unwrap().len()
+    }
+
+    /// f509 = begin. Enter batch recording mode. All subsequent op dispatches
+    /// record into a single CommandEncoder instead of submitting immediately.
+    /// Call f511 (sync) or f510 (execute) on the returned t549 to flush.
+    /// Dropping t549 without calling either auto-submits without polling.
+    pub fn f509(&self) -> t549<'_> {
+        let enc = self.s500.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("batch") });
+        *self.s508.lock().unwrap() = Some(t549State { enc, keep: Vec::new() });
+        t549(self)
     }
 
     /// f771 = upload_f16. Upload raw f16 bits (&[u16]) into a VRAM storage buffer.
