@@ -40,10 +40,11 @@ wgpu (auto-selects backend)
     │
     ├── elementwise: add, sub, mul, scale, relu, sigmoid, swish, tanh, gelu (tanh-approx)
     ├── backward: relu_bw, sigmoid_bw, swish_bw, tanh_bw
-    ├── conv: tiled matmul (16x16 shared mem), batch_matmul, conv2d, conv_transpose2d
+    ├── conv: tiled matmul (wave64 4×4 reg-blocked, 168 GFLOPS @ 512²), batch_matmul, conv2d, conv_transpose2d
     ├── conv grad: conv2d_grad_weight, conv2d_grad_bias
     ├── norm: group_norm (two-pass), layer_norm (two-pass), rms_norm (two-pass)
-    ├── attention: softmax (two-pass), sdpa, causal_mask, causal_sdpa, rope,
+    ├── attention: softmax (subgroup-fused single-dispatch when s509, two-pass fallback),
+    │             sdpa, causal_mask, causal_sdpa, rope,
     │             fused_sdpa (online-softmax, no N×N alloc), split_heads, merge_heads, repeat_kv
     ├── tensor: concat, transpose, slice, broadcast_add, sum_inner, add_per_col, sum_rows
     ├── transformer: embedding_lookup (gather), argmax (last-dim), kv_append
@@ -83,7 +84,7 @@ NanoSign (model integrity)
 
 ### Current state
 
-Sprint 7 complete (2026-05-17). 256 tests, all passing on bt (AMD RX 5700 XT, RADV/Vulkan). Full LLM inference stack shipped: tokenizer, LLaMA-compatible CausalLM, HTTP serve binary. Verified on 4 GPUs across 3 nodes.
+Sprint 7 complete + perf sprint (2026-05-17). 256 tests, all passing on bt (AMD RX 5700 XT, RADV/Vulkan). Full LLM inference stack shipped: tokenizer, LLaMA-compatible CausalLM, HTTP serve binary. Matmul upgraded to wave64 4×4 register-blocking (168 GFLOPS @ 512²). Softmax upgraded to subgroup-fused single dispatch (subgroupMax/subgroupAdd). Verified on 4 GPUs across 3 nodes.
 
 | Category | Ops |
 |----------|-----|
@@ -130,7 +131,7 @@ Currently: `GpuDevice` struct wraps wgpu directly. Public methods for each op (m
 | Lines of Rust | ~8,500+ across 15+ source files (device, ops×7, tensor, autograd, optim, train, nanosign, safetensors, pager, tokenizer, module, lm, bin/any-gpu-serve) |
 | Public ops | 27 GPU forward ops + 7 backward ops + 4 head ops (split/merge/repeat_kv + fused SDPA) + 7 NanoSign + KVCache (6) + SafetensorsModel (6) |
 | Modules | device, ops (7 submodules incl. transformer), tensor, autograd, optim, train, nanosign, safetensors, pager, tokenizer, module, lm |
-| WGSL shaders | 56+ (forward + activation backward + conv2d grad + norm backward + adamw + causal_mask + rope + kv_append + fused_sdpa + split_heads + merge_heads + repeat_kv + unpack2x16float) |
+| WGSL shaders | 58+ (forward + activation backward + conv2d grad + norm backward + adamw + causal_mask + rope + kv_append + fused_sdpa + split_heads + merge_heads + repeat_kv + unpack2x16float + softmax_fused_subgroup) |
 | Tests | 256 (62 GPU ops + 29 transformer-inference step-1 + 21 step-2 incl. KV cache round-trip + 19 safetensors loader + 7 hardcoded backstops + 5 pager + 5 f16 storage + 6 fused SDPA + 17 inference stack + 17 autograd + 11 device + 17 tensor + 13 nanosign + 8 optim + 1 train + 24 elementwise backward + more) |
 | Determinism gate | exopack TRIPLE SIMS (`cargo run --release --bin any-gpu-test --features tests`) — 3/3 passes on bt RX 5700 XT, 96/4/3 ms (pass 1 includes pipeline compile; pass 2+3 hit the cache) |
 | Bench binary (release) | ~1.5 MB (opt-z, LTO, strip, panic=abort) |
