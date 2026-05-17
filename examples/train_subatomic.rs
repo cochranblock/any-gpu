@@ -7,7 +7,7 @@
 //! Usage: cargo run --release --example train_subatomic
 // Unlicense — cochranblock.org
 
-use any_gpu::GpuDevice;
+use any_gpu::t500;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
@@ -86,7 +86,7 @@ fn featurize(text: &str, dim: usize) -> Vec<f32> {
 // ── GPU-accelerated training ───────────────────────────────
 
 fn train_on_gpu(
-    gpu: &GpuDevice,
+    gpu: &t500,
     name: &str,
     features: &[Vec<f32>],
     labels: &[usize],
@@ -116,13 +116,13 @@ fn train_on_gpu(
 
         // Batch: process all examples, accumulate gradients on GPU.
         // Upload weights matrix to GPU.
-        let w_gpu = gpu.upload(&weights);
+        let w_gpu = gpu.f502(&weights);
 
         for (i, feat) in features.iter().enumerate() {
             let target = labels[i];
 
             // Upload feature vector as [1, dim] row.
-            let x_gpu = gpu.upload(feat);
+            let x_gpu = gpu.f502(feat);
 
             // Forward: logits = x @ W^T → [1, nc]
             // matmul(a, b, m, n, k): a=[m,k], b=[k,n] → [m,n]
@@ -139,17 +139,17 @@ fn train_on_gpu(
                     w_t[d * num_classes + c] = weights[c * dim + d];
                 }
             }
-            let wt_gpu = gpu.upload(&w_t);
+            let wt_gpu = gpu.f502(&w_t);
 
-            let logits_gpu = gpu.matmul(&x_gpu, &wt_gpu, 1, num_classes as u32, dim as u32)
+            let logits_gpu = gpu.f580(&x_gpu, &wt_gpu, 1, num_classes as u32, dim as u32)
                 .expect("matmul failed");
 
             // Softmax on GPU: [1, nc]
-            let probs_gpu = gpu.softmax(&logits_gpu, 1, num_classes as u32)
+            let probs_gpu = gpu.f620(&logits_gpu, 1, num_classes as u32)
                 .expect("softmax failed");
 
             // Download probs for loss computation and gradient.
-            let probs = gpu.read(&probs_gpu).expect("read probs");
+            let probs = gpu.f504(&probs_gpu).expect("read probs");
 
             // Loss.
             total_loss -= probs[target].max(1e-10).ln();
@@ -164,10 +164,10 @@ fn train_on_gpu(
 
             // Weight update: W[c][d] -= lr * grad[c] * feat[d]
             // GPU: grad_w = grad^T @ x → [nc, 1] @ [1, dim] = [nc, dim]
-            let grad_gpu = gpu.upload(&grad);
-            let grad_w_gpu = gpu.matmul(&grad_gpu, &x_gpu, num_classes as u32, dim as u32, 1)
+            let grad_gpu = gpu.f502(&grad);
+            let grad_w_gpu = gpu.f580(&grad_gpu, &x_gpu, num_classes as u32, dim as u32, 1)
                 .expect("grad matmul failed");
-            let grad_w = gpu.read(&grad_w_gpu).expect("read grad_w");
+            let grad_w = gpu.f504(&grad_w_gpu).expect("read grad_w");
 
             // Apply update (CPU — tiny operation).
             for j in 0..weights.len() {
@@ -248,7 +248,7 @@ fn save_model(name: &str, weights: &[f32], bias: &[f32], class_names: &[&str], a
 fn main() {
     eprintln!("=== Subatomic Model Training on AMD Vulkan ===\n");
 
-    let gpu = GpuDevice::gpu().expect("failed to init GPU");
+    let gpu = t500::f500().expect("failed to init GPU");
     eprintln!();
 
     // ── 1. Slop Detector (binary: clean=0, slop=1) ─────────

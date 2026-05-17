@@ -1,9 +1,9 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
-// Element-wise ops: add, mul, sub, scale, relu, sigmoid, swish, tanh.
+// Element-wise ops: f550..f558 forward, f559..f562 backward, f563 = gelu.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
 const SHADER_ADD: &str = "
@@ -101,9 +101,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// GELU — tanh approximation as used by GPT-2 / BERT / ViT and the `approximate="tanh"`
+// path in PyTorch. sqrt(2/pi) ~= 0.7978845608. The exact erf form is not exposed in WGSL.
+const SHADER_GELU: &str = "
+struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    if idx >= params.n { return; }
+    let x = a[idx];
+    let inner = 0.7978845608 * (x + 0.044715 * x * x * x);
+    out[idx] = 0.5 * x * (1.0 + tanh(inner));
+}
+";
+
+/// t512 = ScaleParams. Uniform for f553 (scale).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ScaleParams {
+struct t512 {
     n: u32,
     scale: f32,
     _pad: [u32; 2],
@@ -184,275 +202,364 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-impl GpuDevice {
-    pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(a.len == b.len, "add: length mismatch ({} vs {})", a.len, b.len);
-        self.binary_op(SHADER_ADD, a, b)
+impl t500 {
+    /// f550 = add. Element-wise add of two equally sized buffers.
+    pub fn f550(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507, "add: length mismatch ({} vs {})", p0.s507, p1.s507);
+        self.f542(SHADER_ADD, p0, p1)
     }
 
-    pub fn sub(&self, a: &GpuBuffer, b: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(a.len == b.len, "sub: length mismatch ({} vs {})", a.len, b.len);
-        self.binary_op(SHADER_SUB, a, b)
+    /// f551 = sub. Element-wise subtraction.
+    pub fn f551(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507, "sub: length mismatch ({} vs {})", p0.s507, p1.s507);
+        self.f542(SHADER_SUB, p0, p1)
     }
 
-    pub fn mul(&self, a: &GpuBuffer, b: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(a.len == b.len, "mul: length mismatch ({} vs {})", a.len, b.len);
-        self.binary_op(SHADER_MUL, a, b)
+    /// f552 = mul. Element-wise multiply.
+    pub fn f552(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507, "mul: length mismatch ({} vs {})", p0.s507, p1.s507);
+        self.f542(SHADER_MUL, p0, p1)
     }
 
-    pub fn relu(&self, a: &GpuBuffer) -> Result<GpuBuffer> {
-        self.unary_op(SHADER_RELU, a)
+    /// f554 = relu.
+    pub fn f554(&self, p0: &t501) -> Result<t501> {
+        self.f541(SHADER_RELU, p0)
     }
 
-    pub fn sigmoid(&self, a: &GpuBuffer) -> Result<GpuBuffer> {
-        self.unary_op(SHADER_SIGMOID, a)
+    /// f555 = sigmoid.
+    pub fn f555(&self, p0: &t501) -> Result<t501> {
+        self.f541(SHADER_SIGMOID, p0)
     }
 
-    pub fn swish(&self, a: &GpuBuffer) -> Result<GpuBuffer> {
-        self.unary_op(SHADER_SWISH, a)
+    /// f556 = swish (a.k.a. SiLU): x * sigmoid(x).
+    pub fn f556(&self, p0: &t501) -> Result<t501> {
+        self.f541(SHADER_SWISH, p0)
     }
 
-    pub fn tanh_act(&self, a: &GpuBuffer) -> Result<GpuBuffer> {
-        self.unary_op(SHADER_TANH, a)
+    /// f557 = tanh_act.
+    pub fn f557(&self, p0: &t501) -> Result<t501> {
+        self.f541(SHADER_TANH, p0)
     }
 
-    pub fn scale(&self, a: &GpuBuffer, s: f32) -> Result<GpuBuffer> {
-        let out = self.alloc(a.len);
-        let params = ScaleParams { n: a.len as u32, scale: s, _pad: [0; 2] };
-        self.dispatch_shader(SHADER_SCALE, None, &params, &[a], &out, super::dispatch_1d(a.len as u32));
-        Ok(out)
+    /// f563 = gelu (tanh approximation). 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3))).
+    /// Used by GPT-2, BERT, ViT, and `approximate="tanh"` in PyTorch.
+    pub fn f563(&self, p0: &t501) -> Result<t501> {
+        self.f541(SHADER_GELU, p0)
+    }
+
+    /// f553 = scale. out = a * scalar.
+    pub fn f553(&self, p0: &t501, p1: f32) -> Result<t501> {
+        let v0 = self.f503(p0.s507);
+        let v1 = t512 { n: p0.s507 as u32, scale: p1, _pad: [0; 2] };
+        self.f543(SHADER_SCALE, None, &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        Ok(v0)
     }
 
     // --- Backward shaders for autograd ---
 
-    /// ReLU backward: grad_a = grad_out * (input > 0)
-    pub fn relu_backward(&self, grad_out: &GpuBuffer, input: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(grad_out.len == input.len);
-        self.binary_op(SHADER_RELU_BACKWARD, grad_out, input)
+    /// f559 = relu_backward. grad_a = grad_out * (input > 0).
+    pub fn f559(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507);
+        self.f542(SHADER_RELU_BACKWARD, p0, p1)
     }
 
-    /// Sigmoid backward: grad_a = grad_out * output * (1 - output)
-    pub fn sigmoid_backward(&self, grad_out: &GpuBuffer, output: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(grad_out.len == output.len);
-        self.binary_op(SHADER_SIGMOID_BACKWARD, grad_out, output)
+    /// f560 = sigmoid_backward. grad_a = grad_out * output * (1 - output).
+    pub fn f560(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507);
+        self.f542(SHADER_SIGMOID_BACKWARD, p0, p1)
     }
 
-    /// Swish backward: grad_a = grad_out * (sig(x) + x * sig(x) * (1 - sig(x)))
-    pub fn swish_backward(&self, grad_out: &GpuBuffer, input: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(grad_out.len == input.len);
-        self.binary_op(SHADER_SWISH_BACKWARD, grad_out, input)
+    /// f561 = swish_backward. grad_a = grad_out * (sig(x) + x * sig(x) * (1 - sig(x))).
+    pub fn f561(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507);
+        self.f542(SHADER_SWISH_BACKWARD, p0, p1)
     }
 
-    /// Tanh backward: grad_a = grad_out * (1 - output^2)
-    pub fn tanh_backward(&self, grad_out: &GpuBuffer, output: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(grad_out.len == output.len);
-        self.binary_op(SHADER_TANH_BACKWARD, grad_out, output)
+    /// f562 = tanh_backward. grad_a = grad_out * (1 - output^2).
+    pub fn f562(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507);
+        self.f542(SHADER_TANH_BACKWARD, p0, p1)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    use crate::ops::f544;
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     // CPU references for cross-validation
     fn cpu_sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
     fn cpu_swish(x: f32) -> f32 { x * cpu_sigmoid(x) }
 
     #[test]
-    fn test_add() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
-        let result = dev().read(&dev().add(&a, &b).unwrap()).unwrap();
-        assert_eq!(result, vec![11.0, 22.0, 33.0, 44.0]);
+    fn f550_basic() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f502(&[10.0, 20.0, 30.0, 40.0]);
+        let v2 = dev().f504(&dev().f550(&v0, &v1).unwrap()).unwrap();
+        assert_eq!(v2, vec![11.0, 22.0, 33.0, 44.0]);
     }
 
     #[test]
-    fn test_add_odd_size() {
+    fn f550_odd_size() {
         // 13 elements — not aligned to workgroup size 256
-        let a_data: Vec<f32> = (0..13).map(|i| i as f32).collect();
-        let b_data: Vec<f32> = (0..13).map(|i| i as f32 * 10.0).collect();
-        let expected: Vec<f32> = a_data.iter().zip(&b_data).map(|(a, b)| a + b).collect();
-        let result = dev().read(&dev().add(&dev().upload(&a_data), &dev().upload(&b_data)).unwrap()).unwrap();
-        assert_eq!(result, expected);
+        let v0: Vec<f32> = (0..13).map(|i| i as f32).collect();
+        let v1: Vec<f32> = (0..13).map(|i| i as f32 * 10.0).collect();
+        let v2: Vec<f32> = v0.iter().zip(&v1).map(|(a, b)| a + b).collect();
+        let v3 = dev().f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        assert_eq!(v3, v2);
     }
 
     #[test]
-    fn test_add_single_element() {
-        let result = dev().read(&dev().add(&dev().upload(&[42.0]), &dev().upload(&[-42.0])).unwrap()).unwrap();
-        assert_eq!(result, vec![0.0]);
+    fn f550_single_element() {
+        let v0 = dev().f504(&dev().f550(&dev().f502(&[42.0]), &dev().f502(&[-42.0])).unwrap()).unwrap();
+        assert_eq!(v0, vec![0.0]);
     }
 
     #[test]
-    fn test_sub() {
-        let a = dev().upload(&[10.0, 20.0, 30.0]);
-        let b = dev().upload(&[1.0, 2.0, 3.0]);
-        let result = dev().read(&dev().sub(&a, &b).unwrap()).unwrap();
-        assert_eq!(result, vec![9.0, 18.0, 27.0]);
+    fn f551_basic() {
+        let v0 = dev().f502(&[10.0, 20.0, 30.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v2 = dev().f504(&dev().f551(&v0, &v1).unwrap()).unwrap();
+        assert_eq!(v2, vec![9.0, 18.0, 27.0]);
     }
 
     #[test]
-    fn test_mul() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[10.0, 20.0, 30.0, 40.0]);
-        let result = dev().read(&dev().mul(&a, &b).unwrap()).unwrap();
-        assert_eq!(result, vec![10.0, 40.0, 90.0, 160.0]);
+    fn f552_basic() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f502(&[10.0, 20.0, 30.0, 40.0]);
+        let v2 = dev().f504(&dev().f552(&v0, &v1).unwrap()).unwrap();
+        assert_eq!(v2, vec![10.0, 40.0, 90.0, 160.0]);
     }
 
     #[test]
-    fn test_mul_zeros() {
-        let a = dev().upload(&[1.0, 2.0, 3.0]);
-        let b = dev().upload(&[0.0, 0.0, 0.0]);
-        let result = dev().read(&dev().mul(&a, &b).unwrap()).unwrap();
-        assert_eq!(result, vec![0.0, 0.0, 0.0]);
+    fn f552_zeros() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[0.0, 0.0, 0.0]);
+        let v2 = dev().f504(&dev().f552(&v0, &v1).unwrap()).unwrap();
+        assert_eq!(v2, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_relu() {
-        let a = dev().upload(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
-        let result = dev().read(&dev().relu(&a).unwrap()).unwrap();
-        assert_eq!(result, vec![0.0, 0.0, 0.0, 1.0, 2.0]);
+    fn f554_basic() {
+        let v0 = dev().f502(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
+        let v1 = dev().f504(&dev().f554(&v0).unwrap()).unwrap();
+        assert_eq!(v1, vec![0.0, 0.0, 0.0, 1.0, 2.0]);
     }
 
     #[test]
-    fn test_relu_all_negative() {
-        let result = dev().read(&dev().relu(&dev().upload(&[-100.0, -0.001, -1e-10])).unwrap()).unwrap();
-        assert_eq!(result, vec![0.0, 0.0, 0.0]);
+    fn f554_all_negative() {
+        let v0 = dev().f504(&dev().f554(&dev().f502(&[-100.0, -0.001, -1e-10])).unwrap()).unwrap();
+        assert_eq!(v0, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_sigmoid_vs_cpu() {
-        let data: Vec<f32> = vec![-50.0, -10.0, -1.0, 0.0, 1.0, 10.0, 50.0];
-        let expected: Vec<f32> = data.iter().map(|&x| cpu_sigmoid(x)).collect();
-        let result = dev().read(&dev().sigmoid(&dev().upload(&data)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+    fn f555_vs_cpu() {
+        let v0: Vec<f32> = vec![-50.0, -10.0, -1.0, 0.0, 1.0, 10.0, 50.0];
+        let v1: Vec<f32> = v0.iter().map(|&x| cpu_sigmoid(x)).collect();
+        let v2 = dev().f504(&dev().f555(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
     }
 
     #[test]
-    fn test_swish_vs_cpu() {
-        let data: Vec<f32> = vec![-5.0, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0];
-        let expected: Vec<f32> = data.iter().map(|&x| cpu_swish(x)).collect();
-        let result = dev().read(&dev().swish(&dev().upload(&data)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+    fn f556_vs_cpu() {
+        let v0: Vec<f32> = vec![-5.0, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0];
+        let v1: Vec<f32> = v0.iter().map(|&x| cpu_swish(x)).collect();
+        let v2 = dev().f504(&dev().f556(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
     }
 
     #[test]
-    fn test_tanh_vs_cpu() {
-        let data: Vec<f32> = vec![-10.0, -1.0, 0.0, 1.0, 10.0];
-        let expected: Vec<f32> = data.iter().map(|&x| x.tanh()).collect();
-        let result = dev().read(&dev().tanh_act(&dev().upload(&data)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+    fn f557_vs_cpu() {
+        let v0: Vec<f32> = vec![-10.0, -1.0, 0.0, 1.0, 10.0];
+        let v1: Vec<f32> = v0.iter().map(|&x| x.tanh()).collect();
+        let v2 = dev().f504(&dev().f557(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
     }
 
     #[test]
-    fn test_scale() {
-        let result = dev().read(&dev().scale(&dev().upload(&[1.0, 2.0, 3.0, 4.0]), 0.5).unwrap()).unwrap();
-        assert_eq!(result, vec![0.5, 1.0, 1.5, 2.0]);
+    fn f555_known_reference_values() {
+        // Hardcoded sigmoid values from the math definition 1/(1+e^-x), computed
+        // at f64 precision externally. Independent of our shader AND the cpu_sigmoid
+        // helper (which shares the shader's formula). A bug in either expression
+        // would diverge from these reference values.
+        let v0: Vec<f32> = vec![-10.0, -2.0, -1.0, 0.0, 1.0, 2.0, 10.0];
+        let v1: Vec<f32> = vec![
+            4.5397868e-5,   // sigmoid(-10)
+            0.11920292,     // sigmoid(-2)
+            0.26894142,     // sigmoid(-1)
+            0.5,            // sigmoid(0)
+            0.73105858,     // sigmoid(1)
+            0.88079708,     // sigmoid(2)
+            0.9999546,      // sigmoid(10)
+        ];
+        let v2 = dev().f504(&dev().f555(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-5);
     }
 
     #[test]
-    fn test_scale_zero() {
-        let result = dev().read(&dev().scale(&dev().upload(&[99.0, -99.0]), 0.0).unwrap()).unwrap();
-        assert_eq!(result, vec![0.0, 0.0]);
+    fn f556_known_reference_values() {
+        // Hardcoded SiLU (= x * sigmoid(x)) values at f64 precision. Independent
+        // of the cpu_swish helper which is the same formula as the shader.
+        let v0: Vec<f32> = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let v1: Vec<f32> = vec![
+            -0.23840584,    // silu(-2) = -2 * sigmoid(-2)
+            -0.26894142,    // silu(-1)
+             0.0,           // silu(0)
+             0.73105858,    // silu(1)
+             1.76159416,    // silu(2)
+        ];
+        let v2 = dev().f504(&dev().f556(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-5);
     }
 
     #[test]
-    fn test_scale_negative() {
-        let result = dev().read(&dev().scale(&dev().upload(&[1.0, -2.0, 3.0]), -2.0).unwrap()).unwrap();
-        assert_eq!(result, vec![-2.0, 4.0, -6.0]);
+    fn f563_vs_pytorch_reference() {
+        // Reference values from torch.nn.functional.gelu(x, approximate="tanh").
+        // Independent of our shader — if the shader and these diverge, one is wrong.
+        let v0: Vec<f32> = vec![-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0];
+        let v1: Vec<f32> = vec![
+            -0.04540231,
+            -0.15880801,
+            -0.15428598,
+             0.0,
+             0.34571400,
+             0.84119199,
+             1.95459769,
+        ];
+        let v2 = dev().f504(&dev().f563(&dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
+    }
+
+    #[test]
+    fn f563_zero_is_zero() {
+        let v0 = dev().f504(&dev().f563(&dev().f502(&[0.0])).unwrap()).unwrap();
+        assert!(v0[0].abs() < 1e-6);
+    }
+
+    #[test]
+    fn f563_large_positive_passes_through() {
+        let v0 = vec![10.0f32, 100.0];
+        let v1 = dev().f504(&dev().f563(&dev().f502(&v0)).unwrap()).unwrap();
+        assert!((v1[0] - 10.0).abs() < 1e-3);
+        assert!((v1[1] - 100.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn f563_large_negative_kills_signal() {
+        let v0 = vec![-10.0f32, -100.0];
+        let v1 = dev().f504(&dev().f563(&dev().f502(&v0)).unwrap()).unwrap();
+        assert!(v1[0].abs() < 1e-3);
+        assert!(v1[1].abs() < 1e-3);
+    }
+
+    #[test]
+    fn f553_basic() {
+        let v0 = dev().f504(&dev().f553(&dev().f502(&[1.0, 2.0, 3.0, 4.0]), 0.5).unwrap()).unwrap();
+        assert_eq!(v0, vec![0.5, 1.0, 1.5, 2.0]);
+    }
+
+    #[test]
+    fn f553_zero() {
+        let v0 = dev().f504(&dev().f553(&dev().f502(&[99.0, -99.0]), 0.0).unwrap()).unwrap();
+        assert_eq!(v0, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn f553_negative() {
+        let v0 = dev().f504(&dev().f553(&dev().f502(&[1.0, -2.0, 3.0]), -2.0).unwrap()).unwrap();
+        assert_eq!(v0, vec![-2.0, 4.0, -6.0]);
     }
 
     // --- Error path tests ---
 
     #[test]
-    fn test_add_length_mismatch() {
-        let a = dev().upload(&[1.0, 2.0]);
-        let b = dev().upload(&[1.0, 2.0, 3.0]);
-        assert!(dev().add(&a, &b).is_err());
+    fn f550_length_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0]);
+        assert!(dev().f550(&v0, &v1).is_err());
     }
 
     #[test]
-    fn test_sub_length_mismatch() {
-        let a = dev().upload(&[1.0]);
-        let b = dev().upload(&[1.0, 2.0]);
-        assert!(dev().sub(&a, &b).is_err());
+    fn f551_length_mismatch() {
+        let v0 = dev().f502(&[1.0]);
+        let v1 = dev().f502(&[1.0, 2.0]);
+        assert!(dev().f551(&v0, &v1).is_err());
     }
 
     #[test]
-    fn test_mul_length_mismatch() {
-        let a = dev().upload(&[1.0, 2.0, 3.0]);
-        let b = dev().upload(&[1.0]);
-        assert!(dev().mul(&a, &b).is_err());
+    fn f552_length_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[1.0]);
+        assert!(dev().f552(&v0, &v1).is_err());
     }
 
     // --- CPU cross-validation for add/sub/mul ---
 
     #[test]
-    fn test_add_vs_cpu() {
-        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3 - 15.0).collect();
-        let b: Vec<f32> = (0..100).map(|i| (i as f32) * -0.2 + 10.0).collect();
-        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
-        let result = dev().read(&dev().add(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-5);
+    fn f550_vs_cpu() {
+        let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3 - 15.0).collect();
+        let v1: Vec<f32> = (0..100).map(|i| (i as f32) * -0.2 + 10.0).collect();
+        let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x + y).collect();
+        let v3 = dev().f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-5);
     }
 
     #[test]
-    fn test_sub_vs_cpu() {
-        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.7).collect();
-        let b: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3).collect();
-        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
-        let result = dev().read(&dev().sub(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-5);
+    fn f551_vs_cpu() {
+        let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.7).collect();
+        let v1: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3).collect();
+        let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x - y).collect();
+        let v3 = dev().f504(&dev().f551(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-5);
     }
 
     #[test]
-    fn test_mul_vs_cpu() {
-        let a: Vec<f32> = (0..100).map(|i| (i as f32) * 0.1 - 5.0).collect();
-        let b: Vec<f32> = (0..100).map(|i| (i as f32) * 0.05 + 0.5).collect();
-        let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x * y).collect();
-        let result = dev().read(&dev().mul(&dev().upload(&a), &dev().upload(&b)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+    fn f552_vs_cpu() {
+        let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.1 - 5.0).collect();
+        let v1: Vec<f32> = (0..100).map(|i| (i as f32) * 0.05 + 0.5).collect();
+        let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x * y).collect();
+        let v3 = dev().f504(&dev().f552(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-4);
     }
 
     // --- Backward shader direct tests ---
 
     #[test]
-    fn test_relu_backward_vs_cpu() {
-        let grad = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-        let input = dev().upload(&[-1.0, 0.5, 0.0, -0.1, 2.0]);
-        let result = dev().read(&dev().relu_backward(&grad, &input).unwrap()).unwrap();
-        // relu_backward: grad * (input > 0)
-        assert_approx(&result, &[0.0, 2.0, 0.0, 0.0, 5.0], 1e-5);
+    fn f559_vs_cpu() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let v1 = dev().f502(&[-1.0, 0.5, 0.0, -0.1, 2.0]);
+        let v2 = dev().f504(&dev().f559(&v0, &v1).unwrap()).unwrap();
+        f544(&v2, &[0.0, 2.0, 0.0, 0.0, 5.0], 1e-5);
     }
 
     #[test]
-    fn test_sigmoid_backward_vs_cpu() {
-        let sig_out = vec![0.5, 0.7311, 0.2689]; // sigmoid outputs
-        let grad = vec![1.0, 1.0, 1.0];
-        let expected: Vec<f32> = sig_out.iter().zip(&grad).map(|(s, g)| g * s * (1.0 - s)).collect();
-        let result = dev().read(&dev().sigmoid_backward(&dev().upload(&grad), &dev().upload(&sig_out)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+    fn f560_vs_cpu() {
+        let v0 = vec![0.5, 0.7311, 0.2689]; // sigmoid outputs
+        let v1 = vec![1.0, 1.0, 1.0];
+        let v2: Vec<f32> = v0.iter().zip(&v1).map(|(s, g)| g * s * (1.0 - s)).collect();
+        let v3 = dev().f504(&dev().f560(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-3);
     }
 
     #[test]
-    fn test_swish_backward_vs_cpu() {
-        let input = vec![0.0, 1.0, -1.0, 2.0];
-        let grad = vec![1.0, 1.0, 1.0, 1.0];
-        let expected: Vec<f32> = input.iter().map(|&x| {
+    fn f561_vs_cpu() {
+        let v0 = vec![0.0, 1.0, -1.0, 2.0];
+        let v1 = vec![1.0, 1.0, 1.0, 1.0];
+        let v2: Vec<f32> = v0.iter().map(|&x| {
             let s = 1.0f32 / (1.0f32 + (-(x as f32)).exp());
             s + x * s * (1.0 - s)
         }).collect();
-        let result = dev().read(&dev().swish_backward(&dev().upload(&grad), &dev().upload(&input)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        let v3 = dev().f504(&dev().f561(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-3);
     }
 
     #[test]
-    fn test_tanh_backward_vs_cpu() {
-        let tanh_out = vec![0.0, 0.7616, -0.7616, 0.9951]; // tanh outputs
-        let grad = vec![1.0, 1.0, 1.0, 1.0];
-        let expected: Vec<f32> = tanh_out.iter().map(|&t| 1.0 - t * t).collect();
-        let result = dev().read(&dev().tanh_backward(&dev().upload(&grad), &dev().upload(&tanh_out)).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+    fn f562_vs_cpu() {
+        let v0 = vec![0.0, 0.7616, -0.7616, 0.9951]; // tanh outputs
+        let v1 = vec![1.0, 1.0, 1.0, 1.0];
+        let v2: Vec<f32> = v0.iter().map(|&t| 1.0 - t * t).collect();
+        let v3 = dev().f504(&dev().f562(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-3);
     }
 }

@@ -1,132 +1,127 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
-// Training loop: forward + backward + optimizer step.
-// One function call, not a framework.
+// Training loop: forward + backward + optimizer step. One function call, not a framework.
+// t509=StepResult. f730=train_step.
 
-use crate::autograd::{Tape, TensorId};
-use crate::device::GpuDevice;
-use crate::optim::AdamW;
+use crate::autograd::{t506, t503};
+use crate::device::t500;
+use crate::optim::t507;
 use anyhow::Result;
 
-/// Training step result.
-pub struct StepResult {
+/// t509 = StepResult. Outcome of one f730 call.
+pub struct t509 {
     pub loss: f32,
     pub step: u32,
 }
 
-/// Train an MLP (or any differentiable graph) for one step.
-/// `forward_fn` builds the computation graph on the tape and returns (loss_id, param_ids).
+/// f730 = train_step. Train an MLP (or any differentiable graph) for one step.
+/// `p3` builds the computation graph on the tape and returns (loss_id, param_ids).
 /// The training loop runs backward, extracts gradients, and updates params.
-pub fn train_step(
-    dev: &GpuDevice,
-    opt: &mut AdamW,
-    step_num: u32,
-    forward_fn: impl FnOnce(&mut Tape) -> Result<(TensorId, Vec<TensorId>)>,
-) -> Result<StepResult> {
-    let mut tape = Tape::new(dev);
+pub fn f730(
+    p0: &t500,
+    p1: &mut t507,
+    p2: u32,
+    p3: impl FnOnce(&mut t506) -> Result<(t503, Vec<t503>)>,
+) -> Result<t509> {
+    let mut v0 = t506::f680(p0);
 
     // Forward: user builds the graph
-    let (loss_id, param_ids) = forward_fn(&mut tape)?;
+    let (v1, v2) = p3(&mut v0)?;
 
     // Read loss value
-    let loss_val = tape.read(loss_id)?[0];
+    let v3 = v0.f682(v1)?[0];
 
     // Backward
-    tape.backward(loss_id)?;
+    v0.f702(v1)?;
 
     // Extract param buffers and grad buffers for optimizer
-    let mut params: Vec<_> = param_ids.iter().map(|id| {
-        // We need to extract the buffer from the tape.
-        // For now, read grad and param, re-upload for optimizer.
-        // This is inefficient (CPU roundtrip) but correct. Pipeline caching will fix later.
-        tape.read(*id).unwrap()
+    let mut v4: Vec<_> = v2.iter().map(|v5| {
+        v0.f682(*v5).unwrap()
     }).collect();
 
-    let grads: Vec<_> = param_ids.iter().map(|id| {
-        tape.read_grad(*id).unwrap().unwrap_or_else(|| vec![0.0; params[0].len()])
+    let v6: Vec<_> = v2.iter().map(|v7| {
+        v0.f683(*v7).unwrap().unwrap_or_else(|| vec![0.0; v4[0].len()])
     }).collect();
 
     // Upload params as mutable GPU buffers and grads as read-only
-    let mut param_bufs: Vec<_> = params.iter().map(|p| dev.upload(p)).collect();
-    let grad_bufs: Vec<_> = grads.iter().map(|g| dev.upload(g)).collect();
+    let mut v8: Vec<_> = v4.iter().map(|v9| p0.f502(v9)).collect();
+    let v10: Vec<_> = v6.iter().map(|v11| p0.f502(v11)).collect();
 
     // Optimizer step (in-place update on GPU)
-    opt.step(dev, &mut param_bufs, &grad_bufs)?;
+    p1.f721(p0, &mut v8, &v10)?;
 
     // Read updated params back (caller can use these for next step)
-    for (i, buf) in param_bufs.iter().enumerate() {
-        params[i] = dev.read(buf)?;
+    for (v12, v13) in v8.iter().enumerate() {
+        v4[v12] = p0.f504(v13)?;
     }
 
-    Ok(StepResult { loss: loss_val, step: step_num })
+    Ok(t509 { loss: v3, step: p2 })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
+    use crate::ops::f544;
 
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     #[test]
-    fn test_train_step_linear_regression() {
+    fn f730_linear_regression() {
         // Train y = 2x + 1 with MSE loss
-        // Input: x = [1, 2, 3], target: y = [3, 5, 7]
-        let x_data = vec![1.0, 2.0, 3.0];
-        let y_data = vec![3.0, 5.0, 7.0];
+        let v0 = vec![1.0, 2.0, 3.0];
+        let v1 = vec![3.0, 5.0, 7.0];
 
-        // Initial params: w=0.0, b=0.0
-        let mut w = vec![0.0f32];
-        let mut b = vec![0.0f32];
+        let mut v2 = vec![0.0f32];
+        let mut v3 = vec![0.0f32];
 
-        let mut opt = AdamW::new(0.1);
-        opt.weight_decay = 0.0;
+        let mut v4 = t507::f720(0.1);
+        v4.weight_decay = 0.0;
 
-        let mut last_loss = f32::MAX;
-        for step in 0..50 {
-            let x = x_data.clone();
-            let y = y_data.clone();
-            let w_val = w.clone();
-            let b_val = b.clone();
+        let mut v5 = f32::MAX;
+        for v6 in 0..50 {
+            let v7 = v0.clone();
+            let v8 = v1.clone();
+            let v9 = v2.clone();
+            let v10 = v3.clone();
 
-            let mut tape = Tape::new(dev());
-            let w_id = tape.leaf(&w_val);
-            let b_id = tape.leaf(&b_val);
-            let x_id = tape.leaf(&x);
-            let y_id = tape.leaf(&y);
+            let mut v11 = t506::f680(dev());
+            let v12 = v11.f681(&v9);
+            let v13 = v11.f681(&v10);
+            let v14 = v11.f681(&v7);
+            let v15 = v11.f681(&v8);
 
             // Forward: pred = x * w + b (broadcast w and b across elements)
-            // Since our ops are element-wise, we need w and b as 3-element vectors
-            let w3_id = tape.leaf(&[w_val[0], w_val[0], w_val[0]]);
-            let b3_id = tape.leaf(&[b_val[0], b_val[0], b_val[0]]);
-            let xw = tape.mul(x_id, w3_id).unwrap();
-            let pred = tape.add(xw, b3_id).unwrap();
-            let loss = tape.mse_loss(pred, y_id).unwrap();
+            let v16 = v11.f681(&[v9[0], v9[0], v9[0]]);
+            let v17 = v11.f681(&[v10[0], v10[0], v10[0]]);
+            let v18 = v11.f688(v14, v16).unwrap();
+            let v19 = v11.f686(v18, v17).unwrap();
+            let v20 = v11.f695(v19, v15).unwrap();
 
-            let loss_val = tape.read(loss).unwrap()[0];
-            tape.backward(loss).unwrap();
+            let v21 = v11.f682(v20).unwrap()[0];
+            v11.f702(v20).unwrap();
 
             // Get gradients for the broadcast params
-            let gw3 = tape.read_grad(w3_id).unwrap().unwrap();
-            let gb3 = tape.read_grad(b3_id).unwrap().unwrap();
+            let v22 = v11.f683(v16).unwrap().unwrap();
+            let v23 = v11.f683(v17).unwrap().unwrap();
 
-            // Sum gradients (since w3 and b3 are broadcast copies of w and b)
-            let gw_sum: f32 = gw3.iter().sum();
-            let gb_sum: f32 = gb3.iter().sum();
+            // Sum gradients (since v16 and v17 are broadcast copies of v12 and v13)
+            let v24: f32 = v22.iter().sum();
+            let v25: f32 = v23.iter().sum();
 
-            // Manual SGD for simplicity (AdamW tested separately)
-            w[0] -= 0.01 * gw_sum;
-            b[0] -= 0.01 * gb_sum;
+            v2[0] -= 0.01 * v24;
+            v3[0] -= 0.01 * v25;
 
-            if step % 10 == 0 {
-                assert!(loss_val < last_loss || step == 0, "loss should decrease: step {step} loss {loss_val} >= prev {last_loss}");
+            if v6 % 10 == 0 {
+                assert!(v21 < v5 || v6 == 0, "loss should decrease: step {v6} loss {v21} >= prev {v5}");
             }
-            last_loss = loss_val;
+            v5 = v21;
+
+            // Unused but mirror originals
+            let _ = (v12, v13);
         }
 
-        // After 50 steps, w should approach 2.0 and b should approach 1.0
-        assert!((w[0] - 2.0).abs() < 0.5, "w should be near 2.0, got {}", w[0]);
-        assert!((b[0] - 1.0).abs() < 0.5, "b should be near 1.0, got {}", b[0]);
+        assert!((v2[0] - 2.0).abs() < 0.5, "w should be near 2.0, got {}", v2[0]);
+        assert!((v3[0] - 1.0).abs() < 0.5, "b should be near 1.0, got {}", v3[0]);
     }
 }

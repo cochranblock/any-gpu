@@ -1,16 +1,18 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
-// Softmax and scaled dot-product attention.
+// f620=softmax, f621=scaled_dot_product_attention, f622=mse_loss,
+// f623=scaled_dot_product_attention_causal, f624=apply_causal_mask, f625=rope.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
 // --- Softmax (two-pass) ---
 
+/// t514 = SoftmaxParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SoftmaxParams {
+struct t514 {
     rows: u32,
     cols: u32,
     _pad: [u32; 2],
@@ -62,12 +64,115 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // --- MSE Loss ---
 
+/// t513 = ReduceParams. Single-uint uniform for reductions like mse_loss.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ReduceParams {
+struct t513 {
     n: u32,
     _pad: [u32; 3],
 }
+
+// --- Causal mask (Sprint 7 step 2) ---
+//
+// In-place mask of upper-triangular positions to -INF (effectively zero after softmax).
+// Supports asymmetric q_seq_len vs kv_seq_len for KV-cache decoding: position i in Q
+// corresponds to absolute position i + (kv_seq_len - q_seq_len) in KV, and can attend
+// to j ≤ that. Prefill (q==kv): standard triangular. Decode (q=1, kv=N): no mask.
+
+/// t535 = CausalMaskParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t535 {
+    batch_heads: u32,
+    q_seq_len: u32,
+    kv_seq_len: u32,
+    _pad: u32,
+}
+
+const SHADER_CAUSAL_MASK: &str = "
+struct P { batch_heads: u32, q_seq_len: u32, kv_seq_len: u32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> scores: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.batch_heads * p.q_seq_len * p.kv_seq_len;
+    if idx >= total { return; }
+
+    let kv_per_q = p.q_seq_len * p.kv_seq_len;
+    let rem = idx % kv_per_q;
+    let i = rem / p.kv_seq_len;
+    let j = rem % p.kv_seq_len;
+
+    // offset = kv_seq_len - q_seq_len (always >= 0; checked on Rust side).
+    let offset = p.kv_seq_len - p.q_seq_len;
+    if j > i + offset {
+        scores[idx] = -1.0e30;
+    }
+}
+";
+
+// --- Rotary Position Embeddings (Sprint 7 step 2) ---
+//
+// Applies RoPE rotation to a tensor of shape [batch_heads, seq_len, head_dim] where
+// head_dim is even. For each pair (2d, 2d+1) at position s in the sequence (with absolute
+// position s + start_pos for KV-cache decode), rotates by angle = (s + start_pos) * theta
+// where theta = base^(-2d/head_dim). Llama/Mistral/Qwen/Gemma convention with adjacent pairing.
+
+/// t536 = RopeParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t536 {
+    batch_heads: u32,
+    seq_len: u32,
+    head_dim: u32,
+    start_pos: u32,
+    base: f32,
+    _pad: [u32; 3],
+}
+
+const SHADER_ROPE: &str = "
+struct P {
+    batch_heads: u32, seq_len: u32, head_dim: u32, start_pos: u32,
+    base: f32, _p0: u32, _p1: u32, _p2: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.batch_heads * p.seq_len * p.head_dim;
+    if idx >= total { return; }
+
+    let d = idx % p.head_dim;
+    let s = (idx / p.head_dim) % p.seq_len;
+    let bh = idx / (p.seq_len * p.head_dim);
+
+    let pair_idx = d / 2u;
+    let is_first = (d % 2u) == 0u;
+    let pos_f = f32(p.start_pos + s);
+
+    // inv_freq = base^(-2 * pair_idx / head_dim). Computed as exp(log(base) * exponent).
+    let exponent = -2.0 * f32(pair_idx) / f32(p.head_dim);
+    let inv_freq = pow(p.base, exponent);
+    let angle = pos_f * inv_freq;
+    let cos_a = cos(angle);
+    let sin_a = sin(angle);
+
+    let base_idx = bh * p.seq_len * p.head_dim + s * p.head_dim + pair_idx * 2u;
+    let x_a = input[base_idx];
+    let x_b = input[base_idx + 1u];
+
+    if is_first {
+        out[idx] = x_a * cos_a - x_b * sin_a;
+    } else {
+        out[idx] = x_a * sin_a + x_b * cos_a;
+    }
+}
+";
+
+// --- MSE Loss ---
 
 const SHADER_MSE_SUM: &str = "
 struct P { n: u32, _p0: u32, _p1: u32, _p2: u32, }
@@ -86,108 +191,182 @@ fn main() {
 }
 ";
 
-impl GpuDevice {
-    /// Softmax along the last dimension. Input shape: [rows, cols].
-    pub fn softmax(&self, input: &GpuBuffer, rows: u32, cols: u32) -> Result<GpuBuffer> {
-        ensure!(input.len == (rows * cols) as usize);
+impl t500 {
+    /// f620 = softmax. Softmax along the last dimension. Input shape: [rows, cols].
+    pub fn f620(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
+        ensure!(p0.s507 == (p1 * p2) as usize);
 
-        let params = SoftmaxParams { rows, cols, _pad: [0; 2] };
+        let v0 = t514 { rows: p1, cols: p2, _pad: [0; 2] };
 
         // Pass 1: per-row max and sum
-        let stats = self.alloc((rows * 2) as usize);
-        self.dispatch_shader(
+        let v1 = self.f503((p1 * 2) as usize);
+        self.f543(
             SHADER_SOFTMAX_STATS, Some("softmax_stats"),
-            &params, &[input], &stats,
-            super::dispatch_1d(rows),
+            &v0, &[p0], &v1,
+            super::f540(p1),
         );
 
         // Pass 2: normalize
-        let total = rows * cols;
-        let out = self.alloc(total as usize);
+        let v2 = p1 * p2;
+        let v3 = self.f503(v2 as usize);
 
-        let params_buf = self.upload_uniform(&params);
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let v4 = self.f506(&v0);
+        let v5 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("softmax_apply"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SOFTMAX_APPLY.into()),
         });
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let v6 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("softmax_apply"),
             layout: None,
-            module: &shader,
+            module: &v5,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let v7 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &pipeline.get_bind_group_layout(0),
+            layout: &v6.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: stats.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: out.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: v4.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: v1.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: v3.s505.as_entire_binding() },
             ],
         });
-        let (wx, wy, wz) = super::dispatch_1d(total);
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let (v8, v9, v10) = super::f540(v2);
+        let mut v11 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut v12 = v11.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("softmax_apply"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wx, wy, wz);
+            v12.set_pipeline(&v6);
+            v12.set_bind_group(0, &v7, &[]);
+            v12.dispatch_workgroups(v8, v9, v10);
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.s501.submit(Some(v11.finish()));
 
-        Ok(out)
+        Ok(v3)
     }
 
-    /// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.
+    /// f621 = scaled_dot_product_attention. softmax(Q @ K^T / sqrt(d_k)) @ V.
     /// Q,K,V: [batch_heads, seq_len, d_k]. Returns [batch_heads, seq_len, d_k].
-    pub fn scaled_dot_product_attention(
+    pub fn f621(
         &self,
-        q: &GpuBuffer, k: &GpuBuffer, v: &GpuBuffer,
-        batch_heads: u32, seq_len: u32, d_k: u32,
-    ) -> Result<GpuBuffer> {
+        p0: &t501, p1: &t501, p2: &t501,
+        p3: u32, p4: u32, p5: u32,
+    ) -> Result<t501> {
         // 1. K^T: [batch_heads, d_k, seq_len]
-        let kt = self.transpose(k, batch_heads, seq_len, d_k, 1)?;
+        let v0 = self.f641(p1, p3, p4, p5, 1)?;
 
         // 2. scores = Q @ K^T: [batch_heads, seq_len, seq_len]
-        let scores = self.batch_matmul(q, &kt, batch_heads, seq_len, seq_len, d_k)?;
+        let v1 = self.f581(p0, &v0, p3, p4, p4, p5)?;
 
         // 3. Scale by 1/sqrt(d_k)
-        let scale = 1.0 / (d_k as f32).sqrt();
-        let scaled = self.scale(&scores, scale)?;
+        let v2 = 1.0 / (p5 as f32).sqrt();
+        let v3 = self.f553(&v1, v2)?;
 
         // 4. Softmax over last dim (each row of seq_len)
-        let attn = self.softmax(&scaled, batch_heads * seq_len, seq_len)?;
+        let v4 = self.f620(&v3, p3 * p4, p4)?;
 
         // 5. attn @ V: [batch_heads, seq_len, d_k]
-        self.batch_matmul(&attn, v, batch_heads, seq_len, d_k, seq_len)
+        self.f581(&v4, p2, p3, p4, p5, p4)
     }
 
-    /// MSE loss: mean((pred - target)^2). Returns a 1-element buffer.
-    pub fn mse_loss(&self, pred: &GpuBuffer, target: &GpuBuffer) -> Result<GpuBuffer> {
-        ensure!(pred.len == target.len, "mse: length mismatch");
-        let out = self.alloc(1);
-        let params = ReduceParams { n: pred.len as u32, _pad: [0; 3] };
-        self.dispatch_shader(
+    /// f624 = apply_causal_mask. In-place sets `scores[bh, i, j] = -1e30` for j > i + (kv-q).
+    /// `scores` shape: [batch_heads, q_seq_len, kv_seq_len]. Requires kv_seq_len >= q_seq_len.
+    pub fn f624(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<()> {
+        ensure!(p3 >= p2, "apply_causal_mask: kv_seq_len ({}) must be >= q_seq_len ({})", p3, p2);
+        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "apply_causal_mask: size mismatch");
+        let v0 = t535 { batch_heads: p1, q_seq_len: p2, kv_seq_len: p3, _pad: 0 };
+        self.f543(
+            SHADER_CAUSAL_MASK, Some("apply_causal_mask"),
+            &v0, &[], p0,
+            super::f540(p1 * p2 * p3),
+        );
+        Ok(())
+    }
+
+    /// f623 = scaled_dot_product_attention_causal. SDPA with a causal mask.
+    /// Supports asymmetric q_seq_len <= kv_seq_len for KV-cache decode steps.
+    /// Q: [batch_heads, q_seq_len, d_k]. K,V: [batch_heads, kv_seq_len, d_k].
+    /// Returns: [batch_heads, q_seq_len, d_k].
+    pub fn f623(
+        &self,
+        p0: &t501, p1: &t501, p2: &t501,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+    ) -> Result<t501> {
+        ensure!(p5 >= p4, "causal SDPA: kv_seq_len ({}) must be >= q_seq_len ({})", p5, p4);
+        ensure!(p0.s507 == (p3 * p4 * p6) as usize, "causal SDPA: Q size mismatch");
+        ensure!(p1.s507 == (p3 * p5 * p6) as usize, "causal SDPA: K size mismatch");
+        ensure!(p2.s507 == (p3 * p5 * p6) as usize, "causal SDPA: V size mismatch");
+
+        // 1. K^T: [batch_heads, d_k, kv_seq_len]
+        let v0 = self.f641(p1, p3, p5, p6, 1)?;
+
+        // 2. scores = Q @ K^T: [batch_heads, q_seq_len, kv_seq_len]
+        let v1 = self.f581(p0, &v0, p3, p4, p5, p6)?;
+
+        // 3. Scale by 1/sqrt(d_k)
+        let v2 = 1.0 / (p6 as f32).sqrt();
+        let v3 = self.f553(&v1, v2)?;
+
+        // 4. Apply causal mask in place
+        self.f624(&v3, p3, p4, p5)?;
+
+        // 5. Softmax over last dim (each row of kv_seq_len)
+        let v4 = self.f620(&v3, p3 * p4, p5)?;
+
+        // 6. attn @ V: [batch_heads, q_seq_len, d_k]
+        self.f581(&v4, p2, p3, p4, p6, p5)
+    }
+
+    /// f625 = rope. Rotary position embeddings on a tensor [batch_heads, seq_len, head_dim].
+    /// `head_dim` must be even. `start_pos` shifts absolute position for KV-cache decode.
+    /// `base` is the rotation base (Llama/Mistral default: 10000.0).
+    pub fn f625(
+        &self,
+        p0: &t501,
+        p1: u32, p2: u32, p3: u32, p4: u32, p5: f32,
+    ) -> Result<t501> {
+        ensure!(p3 % 2 == 0, "rope: head_dim ({}) must be even", p3);
+        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "rope: input size mismatch");
+        ensure!(p5 > 0.0, "rope: base must be positive");
+
+        let v0 = p1 * p2 * p3;
+        let v1 = self.f503(v0 as usize);
+        let v2 = t536 {
+            batch_heads: p1, seq_len: p2, head_dim: p3, start_pos: p4,
+            base: p5, _pad: [0; 3],
+        };
+        self.f543(
+            SHADER_ROPE, Some("rope"),
+            &v2, &[p0], &v1,
+            super::f540(v0),
+        );
+        Ok(v1)
+    }
+
+    /// f622 = mse_loss. mean((pred - target)^2). Returns a 1-element buffer.
+    pub fn f622(&self, p0: &t501, p1: &t501) -> Result<t501> {
+        ensure!(p0.s507 == p1.s507, "mse: length mismatch");
+        let v0 = self.f503(1);
+        let v1 = t513 { n: p0.s507 as u32, _pad: [0; 3] };
+        self.f543(
             SHADER_MSE_SUM, Some("mse"),
-            &params, &[pred, target], &out,
+            &v1, &[p0, p1], &v0,
             (1, 1, 1),
         );
-        Ok(out)
+        Ok(v0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
+    use crate::ops::f544;
 
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     // CPU reference softmax
     fn cpu_softmax(input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
@@ -206,7 +385,6 @@ mod tests {
     // CPU reference attention
     fn cpu_attention(q: &[f32], k: &[f32], v: &[f32], seq: usize, dk: usize) -> Vec<f32> {
         let scale = 1.0 / (dk as f32).sqrt();
-        // scores = Q @ K^T * scale: [seq, seq]
         let mut scores = vec![0.0f32; seq * seq];
         for i in 0..seq {
             for j in 0..seq {
@@ -216,7 +394,6 @@ mod tests {
             }
         }
         let attn = cpu_softmax(&scores, seq, seq);
-        // out = attn @ V: [seq, dk]
         let mut out = vec![0.0f32; seq * dk];
         for i in 0..seq {
             for d in 0..dk {
@@ -229,110 +406,363 @@ mod tests {
     }
 
     #[test]
-    fn test_softmax_vs_cpu() {
-        let data: Vec<f32> = vec![1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 5.0, 5.0, 5.0];
-        let expected = cpu_softmax(&data, 3, 3);
-        let result = dev().read(&dev().softmax(&dev().upload(&data), 3, 3).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
-        // Verify each row sums to 1.0
-        for r in 0..3 {
-            let sum: f32 = result[r*3..(r+1)*3].iter().sum();
-            assert!((sum - 1.0).abs() < 1e-4, "row {r} sum = {sum}");
+    fn f620_vs_cpu() {
+        let v0: Vec<f32> = vec![1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 5.0, 5.0, 5.0];
+        let v1 = cpu_softmax(&v0, 3, 3);
+        let v2 = dev().f504(&dev().f620(&dev().f502(&v0), 3, 3).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
+        for v3 in 0..3 {
+            let v4: f32 = v2[v3*3..(v3+1)*3].iter().sum();
+            assert!((v4 - 1.0).abs() < 1e-4, "row {v3} sum = {v4}");
         }
     }
 
     #[test]
-    fn test_softmax_large_values() {
-        // Numerical stability: large values should not overflow
-        let data = vec![1000.0, 1001.0, 1002.0];
-        let expected = cpu_softmax(&data, 1, 3);
-        let result = dev().read(&dev().softmax(&dev().upload(&data), 1, 3).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
-        let sum: f32 = result.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-4, "sum = {sum}");
+    fn f620_large_values() {
+        let v0 = vec![1000.0, 1001.0, 1002.0];
+        let v1 = cpu_softmax(&v0, 1, 3);
+        let v2 = dev().f504(&dev().f620(&dev().f502(&v0), 1, 3).unwrap()).unwrap();
+        f544(&v2, &v1, 1e-4);
+        let v3: f32 = v2.iter().sum();
+        assert!((v3 - 1.0).abs() < 1e-4, "sum = {v3}");
     }
 
     #[test]
-    fn test_softmax_single_element() {
-        let result = dev().read(&dev().softmax(&dev().upload(&[42.0]), 1, 1).unwrap()).unwrap();
-        assert_approx(&result, &[1.0], 1e-5);
+    fn f620_single_element() {
+        let v0 = dev().f504(&dev().f620(&dev().f502(&[42.0]), 1, 1).unwrap()).unwrap();
+        f544(&v0, &[1.0], 1e-5);
     }
 
     #[test]
-    fn test_attention_vs_cpu() {
-        // 1 head, seq=3, d_k=4 — fully verified against CPU reference
-        let q: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
-        let k: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
-        let v: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
-        let expected = cpu_attention(&q, &k, &v, 3, 4);
-        let result = dev().read(&dev().scaled_dot_product_attention(
-            &dev().upload(&q), &dev().upload(&k), &dev().upload(&v), 1, 3, 4
+    fn f621_vs_cpu() {
+        let v0: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
+        let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
+        let v3 = cpu_attention(&v0, &v1, &v2, 3, 4);
+        let v4 = dev().f504(&dev().f621(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 3, 4
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v4, &v3, 1e-3);
     }
 
     #[test]
-    fn test_attention_uniform_qk() {
-        // When Q and K are identical uniform vectors, attention is uniform -> output = mean(V) per position
-        let q = vec![1.0, 1.0, 1.0, 1.0]; // seq=2, dk=2, both rows identical
-        let k = q.clone();
-        let v = vec![0.0, 10.0, 20.0, 30.0]; // seq=2, dk=2
-        let expected = cpu_attention(&q, &k, &v, 2, 2);
-        let result = dev().read(&dev().scaled_dot_product_attention(
-            &dev().upload(&q), &dev().upload(&k), &dev().upload(&v), 1, 2, 2
+    fn f621_uniform_qk() {
+        let v0 = vec![1.0, 1.0, 1.0, 1.0];
+        let v1 = v0.clone();
+        let v2 = vec![0.0, 10.0, 20.0, 30.0];
+        let v3 = cpu_attention(&v0, &v1, &v2, 2, 2);
+        let v4 = dev().f504(&dev().f621(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 2, 2
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v4, &v3, 1e-3);
     }
 
     #[test]
-    fn test_mse_loss() {
-        let pred = dev().upload(&[1.0, 2.0, 3.0]);
-        let target = dev().upload(&[1.5, 2.5, 3.5]);
-        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
-        // MSE = ((0.5)^2 * 3) / 3 = 0.25
-        assert_approx(&result, &[0.25], 1e-5);
+    fn f620_known_uniform_input() {
+        // Analytical: softmax over k equal values = uniform 1/k.
+        // softmax([0,0,0]) = [1/3, 1/3, 1/3]. Independent of our cpu_softmax helper.
+        let v0 = dev().f504(&dev().f620(&dev().f502(&[0.0f32; 3]), 1, 3).unwrap()).unwrap();
+        let v1 = 1.0_f32 / 3.0;
+        f544(&v0, &[v1, v1, v1], 1e-6);
     }
 
     #[test]
-    fn test_mse_loss_zero() {
-        let a = dev().upload(&[1.0, 2.0, 3.0]);
-        let result = dev().read(&dev().mse_loss(&a, &a).unwrap()).unwrap();
-        assert_approx(&result, &[0.0], 1e-6);
+    fn f620_known_binary_input() {
+        // softmax([0, 1]) = [1/(1+e), e/(1+e)]. With e at f64 precision:
+        //   1/(1+e) ≈ 0.26894142, e/(1+e) ≈ 0.73105858 (same numbers as sigmoid(1)/sigmoid(-1)).
+        let v0 = dev().f504(&dev().f620(&dev().f502(&[0.0f32, 1.0]), 1, 2).unwrap()).unwrap();
+        f544(&v0, &[0.26894142, 0.73105858], 1e-5);
     }
 
     #[test]
-    fn test_mse_loss_known_value() {
-        let pred = dev().upload(&[0.0, 0.0, 0.0]);
-        let target = dev().upload(&[1.0, 2.0, 3.0]);
-        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
-        assert_approx(&result, &[14.0 / 3.0], 1e-5);
+    fn f621_known_uniform_attention() {
+        // When Q == K (any uniform value), all scores are equal -> softmax = uniform 1/seq_len
+        // -> each output row = mean(V over kv dim). Independent of cpu_attention helper.
+        // Q = K = zero, V = [[1, 5], [3, 7]] -> output[i, :] = mean(V) per col = [(1+3)/2, (5+7)/2] = [2, 6].
+        let v0 = vec![0.0f32; 4]; // [1 head, 2 seq, d_k=2]
+        let v1 = v0.clone();
+        let v2 = vec![1.0f32, 5.0, 3.0, 7.0];
+        let v3 = dev().f504(&dev().f621(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 2, 2,
+        ).unwrap()).unwrap();
+        f544(&v3, &[2.0, 6.0, 2.0, 6.0], 1e-4);
     }
 
     #[test]
-    fn test_softmax_size_mismatch() {
-        let input = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
-        assert!(dev().softmax(&input, 2, 3).is_err()); // expects 6
+    fn f622_basic() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[1.5, 2.5, 3.5]);
+        let v2 = dev().f504(&dev().f622(&v0, &v1).unwrap()).unwrap();
+        f544(&v2, &[0.25], 1e-5);
     }
 
     #[test]
-    fn test_mse_loss_length_mismatch() {
-        let pred = dev().upload(&[1.0, 2.0]);
-        let target = dev().upload(&[1.0, 2.0, 3.0]);
-        assert!(dev().mse_loss(&pred, &target).is_err());
+    fn f622_zero() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f504(&dev().f622(&v0, &v0).unwrap()).unwrap();
+        f544(&v1, &[0.0], 1e-6);
     }
 
     #[test]
-    fn test_mse_loss_single_element() {
-        let result = dev().read(&dev().mse_loss(&dev().upload(&[5.0]), &dev().upload(&[3.0])).unwrap()).unwrap();
-        assert_approx(&result, &[4.0], 1e-5); // (5-3)^2 / 1 = 4
+    fn f622_known_value() {
+        let v0 = dev().f502(&[0.0, 0.0, 0.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v2 = dev().f504(&dev().f622(&v0, &v1).unwrap()).unwrap();
+        f544(&v2, &[14.0 / 3.0], 1e-5);
     }
 
     #[test]
-    fn test_mse_loss_negative_values() {
-        let pred = dev().upload(&[-1.0, -2.0]);
-        let target = dev().upload(&[1.0, 2.0]);
-        let result = dev().read(&dev().mse_loss(&pred, &target).unwrap()).unwrap();
-        // ((-1-1)^2 + (-2-2)^2) / 2 = (4 + 16) / 2 = 10
-        assert_approx(&result, &[10.0], 1e-5);
+    fn f620_size_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        assert!(dev().f620(&v0, 2, 3).is_err());
+    }
+
+    #[test]
+    fn f622_length_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0]);
+        assert!(dev().f622(&v0, &v1).is_err());
+    }
+
+    #[test]
+    fn f622_single_element() {
+        let v0 = dev().f504(&dev().f622(&dev().f502(&[5.0]), &dev().f502(&[3.0])).unwrap()).unwrap();
+        f544(&v0, &[4.0], 1e-5);
+    }
+
+    #[test]
+    fn f622_negative_values() {
+        let v0 = dev().f502(&[-1.0, -2.0]);
+        let v1 = dev().f502(&[1.0, 2.0]);
+        let v2 = dev().f504(&dev().f622(&v0, &v1).unwrap()).unwrap();
+        f544(&v2, &[10.0], 1e-5);
+    }
+
+    // --- f624 = apply_causal_mask ---
+
+    #[test]
+    fn f624_square_triangular() {
+        // 1 head, q=kv=3, all-zero scores -> upper triangle becomes -1e30, diagonal+lower stay 0
+        let v0 = dev().f502(&[0.0f32; 9]);
+        dev().f624(&v0, 1, 3, 3).unwrap();
+        let v1 = dev().f504(&v0).unwrap();
+        // Row 0: j=0 keep, j=1 masked, j=2 masked
+        // Row 1: j=0 keep, j=1 keep, j=2 masked
+        // Row 2: j=0 keep, j=1 keep, j=2 keep
+        assert_eq!(v1[0], 0.0);     assert!(v1[1] < -1e29); assert!(v1[2] < -1e29);
+        assert_eq!(v1[3], 0.0);     assert_eq!(v1[4], 0.0); assert!(v1[5] < -1e29);
+        assert_eq!(v1[6], 0.0);     assert_eq!(v1[7], 0.0); assert_eq!(v1[8], 0.0);
+    }
+
+    #[test]
+    fn f624_decode_no_mask() {
+        // q=1, kv=4: position 0 in Q is at absolute kv index 3, can attend to all of {0,1,2,3}.
+        // No score should be masked.
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0]);
+        dev().f624(&v0, 1, 1, 4).unwrap();
+        let v1 = dev().f504(&v0).unwrap();
+        assert_eq!(v1, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn f624_partial_offset() {
+        // q=2, kv=4: q rows are at absolute kv indices {2, 3}.
+        // Row 0 (abs 2): j<=2 keep, j=3 masked.
+        // Row 1 (abs 3): all keep.
+        let v0 = dev().f502(&[0.0f32; 8]); // 1 head, 2*4 = 8 scores
+        dev().f624(&v0, 1, 2, 4).unwrap();
+        let v1 = dev().f504(&v0).unwrap();
+        assert_eq!(v1[0], 0.0); assert_eq!(v1[1], 0.0); assert_eq!(v1[2], 0.0); assert!(v1[3] < -1e29);
+        assert_eq!(v1[4], 0.0); assert_eq!(v1[5], 0.0); assert_eq!(v1[6], 0.0); assert_eq!(v1[7], 0.0);
+    }
+
+    #[test]
+    fn f624_kv_smaller_than_q_errors() {
+        let v0 = dev().f502(&[0.0f32; 6]);
+        assert!(dev().f624(&v0, 1, 3, 2).is_err());
+    }
+
+    // --- f623 = causal SDPA ---
+    // CPU reference: scores masked, then softmax + V product.
+
+    fn cpu_causal_attention(q: &[f32], k: &[f32], v: &[f32], q_seq: usize, kv_seq: usize, dk: usize) -> Vec<f32> {
+        let scale = 1.0 / (dk as f32).sqrt();
+        let offset = kv_seq - q_seq;
+        // scores: [q_seq, kv_seq]
+        let mut scores = vec![0.0f32; q_seq * kv_seq];
+        for i in 0..q_seq {
+            for j in 0..kv_seq {
+                let mut s = 0.0;
+                for d in 0..dk { s += q[i * dk + d] * k[j * dk + d]; }
+                scores[i * kv_seq + j] = s * scale;
+                if j > i + offset {
+                    scores[i * kv_seq + j] = -1.0e30;
+                }
+            }
+        }
+        // softmax each row
+        let mut attn = vec![0.0f32; q_seq * kv_seq];
+        for i in 0..q_seq {
+            let row = &scores[i * kv_seq..(i + 1) * kv_seq];
+            let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let sum: f32 = row.iter().map(|&x| (x - mx).exp()).sum();
+            for j in 0..kv_seq {
+                attn[i * kv_seq + j] = (row[j] - mx).exp() / sum;
+            }
+        }
+        // out = attn @ V: [q_seq, dk]
+        let mut out = vec![0.0f32; q_seq * dk];
+        for i in 0..q_seq {
+            for d in 0..dk {
+                let mut s = 0.0;
+                for j in 0..kv_seq { s += attn[i * kv_seq + j] * v[j * dk + d]; }
+                out[i * dk + d] = s;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f623_prefill_vs_cpu() {
+        // q_seq = kv_seq = 3, d_k = 4, 1 head — standard triangular mask
+        let v0: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
+        let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
+        let v3 = cpu_causal_attention(&v0, &v1, &v2, 3, 3, 4);
+        let v4 = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 3, 3, 4,
+        ).unwrap()).unwrap();
+        f544(&v4, &v3, 1e-3);
+    }
+
+    #[test]
+    fn f623_decode_step_vs_unmasked() {
+        // q_seq = 1, kv_seq = 4 — no mask should apply, so f623 should match unmasked f621
+        // if we run f621 with seq_len=4 and only look at the first row of output (which corresponds
+        // to the Q row). To compare apples to apples, build a Q with the same single row replicated
+        // 4 times, run unmasked f621, and verify f623's single-row output matches f621's first row.
+        let v0_one = vec![0.1f32, -0.2, 0.3, -0.4]; // Q's single row [1, d_k=4]
+        let v1: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05 + 0.1).collect(); // K [4, 4]
+        let v2: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.7).collect(); // V [4, 4]
+
+        // f623 with q_seq=1, kv_seq=4
+        let v3 = dev().f504(&dev().f623(
+            &dev().f502(&v0_one), &dev().f502(&v1), &dev().f502(&v2),
+            1, 1, 4, 4,
+        ).unwrap()).unwrap();
+        // CPU reference: causal mask with q=1 kv=4 -> no mask
+        let v4 = cpu_causal_attention(&v0_one, &v1, &v2, 1, 4, 4);
+        f544(&v3, &v4, 1e-3);
+    }
+
+    #[test]
+    fn f623_partial_decode_vs_cpu() {
+        // q_seq = 2, kv_seq = 5, d_k = 4 — partial mask. Q's rows are at abs positions {3, 4}.
+        let v0: Vec<f32> = (0..8).map(|i| (i as f32) * 0.07).collect();
+        let v1: Vec<f32> = (0..20).map(|i| (i as f32) * 0.04 - 0.2).collect();
+        let v2: Vec<f32> = (0..20).map(|i| (i as f32) * 0.11).collect();
+        let v3 = cpu_causal_attention(&v0, &v1, &v2, 2, 5, 4);
+        let v4 = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 2, 5, 4,
+        ).unwrap()).unwrap();
+        f544(&v4, &v3, 1e-3);
+    }
+
+    #[test]
+    fn f623_first_row_only_sees_first_kv() {
+        // Construct V where each kv position has a one-hot at a unique slot.
+        // Row 0 of Q with causal mask sees only kv position 0, so output[0, :] = V[0, :].
+        let v_data: Vec<f32> = (0..16).map(|i| if i < 4 { 100.0 } else { (i as f32) - 4.0 }).collect();
+        // Q row 0: any vector; doesn't matter for first row's masked attention (only j=0 in distribution)
+        let q_data = vec![1.0f32, 0.5, -0.3, 0.7,
+                          0.0,    0.0, 0.0,  0.0,
+                          0.0,    0.0, 0.0,  0.0,
+                          0.0,    0.0, 0.0,  0.0];
+        let k_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
+        let v_out = dev().f504(&dev().f623(
+            &dev().f502(&q_data), &dev().f502(&k_data), &dev().f502(&v_data),
+            1, 4, 4, 4,
+        ).unwrap()).unwrap();
+        // First row of output (positions [0..4]) must equal V[0, :] (since the mask leaves only j=0)
+        f544(&v_out[..4], &v_data[..4], 1e-3);
+    }
+
+    // --- f625 = rope ---
+    // RoPE: pos 0 -> identity. Non-zero pos -> hand-computed cos/sin rotation.
+
+    #[test]
+    fn f625_position_zero_is_identity() {
+        // start_pos=0, seq_len=1 -> position 0 -> angle = 0 -> cos=1, sin=0 -> output = input
+        let v0 = vec![1.0f32, 2.0, 3.0, 4.0]; // 1 head, 1 seq, head_dim=4
+        let v1 = dev().f504(&dev().f625(
+            &dev().f502(&v0), 1, 1, 4, 0, 10000.0,
+        ).unwrap()).unwrap();
+        f544(&v1, &v0, 1e-5);
+    }
+
+    #[test]
+    fn f625_known_rotation() {
+        // 1 head, seq_len=1, head_dim=2, start_pos=1, base=10000.
+        // pair_idx=0, exponent=0 -> inv_freq=1.0. pos=1 -> angle=1.0 -> cos(1), sin(1).
+        // Input [1.0, 0.0] (x_a=1, x_b=0):
+        //   out[0] = 1*cos(1) - 0*sin(1) = cos(1) ≈ 0.5403
+        //   out[1] = 1*sin(1) + 0*cos(1) = sin(1) ≈ 0.8415
+        let v0 = vec![1.0f32, 0.0];
+        let v1 = dev().f504(&dev().f625(
+            &dev().f502(&v0), 1, 1, 2, 1, 10000.0,
+        ).unwrap()).unwrap();
+        f544(&v1, &[0.54030231, 0.84147098], 1e-4);
+    }
+
+    #[test]
+    fn f625_rotation_preserves_norm() {
+        // RoPE rotations are orthogonal — input/output norms (per pair) must match.
+        let v0: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 - 1.0).collect(); // 1 head, 4 seq, head_dim=8
+        let v1 = dev().f504(&dev().f625(
+            &dev().f502(&v0), 1, 4, 8, 0, 10000.0,
+        ).unwrap()).unwrap();
+        // For each (seq, pair), the (x_a, x_b) norm must equal (out_a, out_b) norm.
+        for s in 0..4usize {
+            for pair in 0..4usize {
+                let base_i = s * 8 + pair * 2;
+                let in_norm_sq = v0[base_i].powi(2) + v0[base_i + 1].powi(2);
+                let out_norm_sq = v1[base_i].powi(2) + v1[base_i + 1].powi(2);
+                assert!((in_norm_sq - out_norm_sq).abs() < 1e-3,
+                    "norm mismatch at s={s} pair={pair}: in={in_norm_sq} out={out_norm_sq}");
+            }
+        }
+    }
+
+    #[test]
+    fn f625_start_pos_shift() {
+        // RoPE(input, start_pos=5, seq_len=1) should equal RoPE(input padded by 5 zeros, start_pos=0)[5]
+        // Easier: rope at seq position s with start_pos=0 should equal rope at seq position 0 with start_pos=s.
+        let v0 = vec![0.7f32, -0.3, 0.5, 0.2]; // [1, 1, 4]
+        let result_a = dev().f504(&dev().f625(
+            &dev().f502(&v0), 1, 1, 4, 5, 10000.0,
+        ).unwrap()).unwrap();
+
+        // Build a 6-seq input where position 5 is v0, others zero; rope at start_pos=0; take row 5
+        let mut padded = vec![0.0f32; 24];
+        padded[20..24].copy_from_slice(&v0); // seq=5, head_dim=4
+        let result_b_full = dev().f504(&dev().f625(
+            &dev().f502(&padded), 1, 6, 4, 0, 10000.0,
+        ).unwrap()).unwrap();
+        let result_b = &result_b_full[20..24];
+        f544(&result_a, result_b, 1e-4);
+    }
+
+    #[test]
+    fn f625_odd_head_dim_errors() {
+        let v0 = vec![1.0f32; 5];
+        assert!(dev().f625(&dev().f502(&v0), 1, 1, 5, 0, 10000.0).is_err());
+    }
+
+    #[test]
+    fn f625_zero_base_errors() {
+        let v0 = vec![1.0f32; 4];
+        assert!(dev().f625(&dev().f502(&v0), 1, 1, 4, 0, 0.0).is_err());
     }
 }

@@ -15,8 +15,21 @@ categories = ["science", "graphics"]
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
 anyhow = "1"
-pollster = "0.4"
 blake3 = "1"
+futures-channel = "0.3"
+safetensors = "0.4"
+exopack = { version = "0.2", optional = true, features = ["triple_sims"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Gpu", "GpuAdapter", "GpuDevice", "Window", "Navigator"] }
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
 
 [dependencies.candle-core]
 version = "0.10"
@@ -24,12 +37,19 @@ optional = true
 
 [dev-dependencies]
 rand = "0.8"
+tempfile = "3"
 
 [features]
 default = []
 cuda = ["candle-core/cuda"]
 metal = ["candle-core/metal"]
 candle-bench = ["candle-core"]
+tests = ["dep:exopack"]
+
+[[bin]]
+name = "any-gpu-test"
+path = "src/bin/any-gpu-test.rs"
+required-features = ["tests"]
 
 [[example]]
 name = "candle_bench"

@@ -1,0 +1,289 @@
+<!-- Unlicense — cochranblock.org -->
+<!-- Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7 -->
+
+# any-gpu Compression Map
+
+Tokenization for traceability. Convention: workspace tokenization rules (see `kova/assets/prompts/tokenization.mdc`).
+
+Numbering range: any-gpu uses **t500+** for types and **f500+** for functions so it never collides with [kova's map](../../kova/docs/compression_map.md) (max kova: T215, f402).
+
+Preserved (not compressed): Rust std types, primitives, traits, ecosystem types (`Arc`, `HashMap`, `Mutex`, `Path`, `PathBuf`, `wgpu::*`, `bytemuck::Pod`, `anyhow::Result`, `blake3::Hash`). Local file-private `struct P { ... }`, `struct Params`, and `struct Dims` shader-uniform wrappers are already-compressed local-scope names and stay as-is.
+
+## Types (tN)
+
+| Token | Human name | Module |
+|-------|------------|--------|
+| t500 | GpuDevice | device |
+| t501 | GpuBuffer | device |
+| t502 | Tensor | tensor |
+| t503 | TensorId | autograd |
+| t504 | Op | autograd |
+| t505 | TapeEntry | autograd |
+| t506 | Tape | autograd |
+| t507 | AdamW | optim |
+| t508 | AdamWParams | optim (private) |
+| t509 | StepResult | train |
+| t510 | NanoSignResult | nanosign |
+| t511 | ElemParams | ops/mod (private) |
+| t512 | ScaleParams | ops/elementwise (private) |
+| t513 | ReduceParams | ops/attention (private) |
+| t514 | SoftmaxParams | ops/attention (private) |
+| t515 | ConcatParams | ops/tensor_ops (private) |
+| t516 | SliceParams | ops/tensor_ops (private) |
+| t517 | BroadcastAddParams | ops/tensor_ops (private) |
+| t518 | SumInnerParams | ops/tensor_ops (private) |
+| t519 | AddPerColParams | ops/tensor_ops (private) |
+| t520 | SumRowsParams | ops/tensor_ops (private) |
+| t521 | TransposeParams | ops/tensor_ops (private) |
+| t522 | GNStatsParams | ops/norm (private) |
+| t523 | LNParams | ops/norm (private) |
+| t524 | EmbedParams | ops/transformer (private) |
+| t525 | ArgmaxParams | ops/transformer (private) |
+| t526 | UpsampleParams | ops/upsample (private) |
+| t527 | UpsampleBackwardParams | ops/upsample (private) |
+| t528 | MatmulDims | ops/conv (private) |
+| t529 | BatchMatmulDims | ops/conv (private) |
+| t530 | Conv2dParams | ops/conv (private) |
+| t531 | ConvTranspose2dParams | ops/conv (private) |
+| t532 | Conv2dGradParams | ops/conv (private) |
+| t533 | Conv2dGradBiasParams | ops/conv (private) |
+| t534 | KVCache | ops/transformer (Sprint 7 step 2) |
+| t535 | CausalMaskParams | ops/attention (private, Sprint 7 step 2) |
+| t536 | RopeParams | ops/attention (private, Sprint 7 step 2) |
+| t537 | KVAppendParams | ops/transformer (private, Sprint 7 step 2) |
+| t538 | SafetensorsModel | safetensors (Sprint 7 step 3) |
+
+## Functions (fN)
+
+### device (f500–f519)
+
+| Token | Human name | Notes |
+|-------|------------|-------|
+| f500 | gpu | Blocking init, desktop only |
+| f501 | gpu_async | Async init, desktop + wasm |
+| f502 | upload | Upload &[f32] to GPU |
+| f503 | alloc | Empty GPU buffer of N f32s |
+| f504 | read | Blocking readback to Vec<f32> |
+| f505 | read_async | Async readback |
+| f506 | upload_uniform | pub(crate) uniform buffer helper |
+| f507 | pipeline | pub(crate) compiled-pipeline cache lookup |
+| f508 | pipeline_cache_len | test-only |
+
+### tensor (f520–f539)
+
+| Token | Human name |
+|-------|------------|
+| f520 | Tensor::new |
+| f521 | Tensor::from_buf |
+| f522 | Tensor::zeros |
+| f523 | Tensor::shape |
+| f524 | Tensor::ndim |
+| f525 | Tensor::numel |
+| f526 | Tensor::to_vec |
+| f527 | Tensor::to_vec_async |
+| f528 | Tensor::buffer |
+| f529 | Tensor::reshape |
+| f530 | Tensor::dim |
+
+### ops/mod helpers (f540–f549)
+
+| Token | Human name |
+|-------|------------|
+| f540 | dispatch_1d |
+| f541 | unary_op |
+| f542 | binary_op |
+| f543 | dispatch_shader |
+| f544 | assert_approx (test) |
+
+### ops/elementwise (f550–f579)
+
+| Token | Human name |
+|-------|------------|
+| f550 | add |
+| f551 | sub |
+| f552 | mul |
+| f553 | scale |
+| f554 | relu |
+| f555 | sigmoid |
+| f556 | swish |
+| f557 | tanh_act |
+| f558 | gelu |
+| f559 | relu_backward |
+| f560 | sigmoid_backward |
+| f561 | swish_backward |
+| f562 | tanh_backward |
+| f563 | gelu (tanh approximation) |
+
+### ops/conv (f580–f599)
+
+| Token | Human name |
+|-------|------------|
+| f580 | matmul |
+| f581 | batch_matmul |
+| f582 | conv2d |
+| f583 | conv_transpose2d |
+| f584 | conv2d_grad_weight (pub crate) |
+| f585 | conv2d_grad_bias (pub crate) |
+
+### ops/norm (f600–f619)
+
+| Token | Human name |
+|-------|------------|
+| f600 | group_norm |
+| f601 | group_norm_backward |
+| f602 | layer_norm |
+| f603 | rms_norm |
+
+### ops/attention (f620–f639)
+
+| Token | Human name |
+|-------|------------|
+| f620 | softmax |
+| f621 | scaled_dot_product_attention |
+| f622 | mse_loss |
+| f623 | scaled_dot_product_attention_causal (Sprint 7 step 2) |
+| f624 | apply_causal_mask (Sprint 7 step 2) |
+| f625 | rope — rotary position embeddings (Sprint 7 step 2) |
+
+### ops/tensor_ops (f640–f659)
+
+| Token | Human name |
+|-------|------------|
+| f640 | concat |
+| f641 | transpose |
+| f642 | add_broadcast |
+| f643 | slice_per_block (pub crate) |
+| f644 | sum_inner (pub crate) |
+| f645 | add_per_col |
+| f646 | sum_rows (pub crate) |
+
+### ops/upsample (f660–f669)
+
+| Token | Human name |
+|-------|------------|
+| f660 | upsample_nearest2d |
+| f661 | upsample_nearest2d_backward |
+
+### ops/transformer (f670–f679)
+
+| Token | Human name |
+|-------|------------|
+| f670 | embedding_lookup |
+| f671 | argmax |
+| f672 | KVCache::new (Sprint 7 step 2) |
+| f673 | KVCache::append (Sprint 7 step 2) |
+| f674 | KVCache::reset (Sprint 7 step 2) |
+| f675 | KVCache::cursor (Sprint 7 step 2) |
+| f676 | KVCache::k_buffer (Sprint 7 step 2) |
+| f677 | KVCache::v_buffer (Sprint 7 step 2) |
+
+### autograd (f680–f719)
+
+| Token | Human name |
+|-------|------------|
+| f680 | Tape::new |
+| f681 | Tape::leaf |
+| f682 | Tape::read |
+| f683 | Tape::read_grad |
+| f684 | Tape::push_result (private) |
+| f685 | Tape::buf (private) |
+| f686 | Tape::add |
+| f687 | Tape::sub |
+| f688 | Tape::mul |
+| f689 | Tape::scale |
+| f690 | Tape::relu |
+| f691 | Tape::sigmoid |
+| f692 | Tape::swish |
+| f693 | Tape::tanh_act |
+| f694 | Tape::matmul |
+| f695 | Tape::mse_loss |
+| f696 | Tape::conv2d |
+| f697 | Tape::concat |
+| f698 | Tape::group_norm |
+| f699 | Tape::upsample_nearest2d |
+| f700 | Tape::add_broadcast |
+| f701 | Tape::add_per_col |
+| f702 | Tape::backward |
+| f703 | Tape::accum_grad (private) |
+
+### optim (f720–f729)
+
+| Token | Human name |
+|-------|------------|
+| f720 | AdamW::new |
+| f721 | AdamW::step |
+
+### train (f730–f739)
+
+| Token | Human name |
+|-------|------------|
+| f730 | train_step |
+
+### nanosign (f740–f759)
+
+| Token | Human name |
+|-------|------------|
+| f740 | sign |
+| f741 | verify |
+| f742 | verify_bytes |
+| f743 | sign_bytes |
+| f744 | strip_bytes |
+| f745 | save_signed |
+| f746 | load_verified |
+| f747 | hex (private) |
+
+### safetensors loader (f760–f779) — Sprint 7 step 3
+
+| Token | Human name |
+|-------|------------|
+| f760 | SafetensorsModel::load (from path; signature-aware via f746) |
+| f761 | SafetensorsModel::from_bytes |
+| f762 | SafetensorsModel::names |
+| f763 | SafetensorsModel::shape |
+| f764 | SafetensorsModel::data |
+| f765 | SafetensorsModel::upload (to GPU as t501) |
+| f766 | bf16_to_f32 (free fn) |
+| f767 | f16_to_f32 (free fn) |
+
+## Struct fields (sN)
+
+| Token | Human name | Owner type |
+|-------|------------|------------|
+| s500 | device | t500 (GpuDevice) |
+| s501 | queue | t500 |
+| s502 | adapter_name | t500 |
+| s503 | backend | t500 |
+| s504 | pipeline_cache | t500 |
+| s505 | buffer | t501 (GpuBuffer) |
+| s506 | size | t501 |
+| s507 | len | t501 |
+| s508 | buf | t502 (Tensor) |
+| s509 | dims | t502 |
+| s510 | ndim | t502 |
+| s511 | k | t534 (KVCache) |
+| s512 | v | t534 |
+| s513 | cursor | t534 |
+| s514 | max_seq | t534 |
+| s515 | batch_heads | t534 |
+| s516 | head_dim | t534 |
+| s517 | tensors | t538 (HashMap<String, Vec<f32>>) |
+| s518 | shapes | t538 (HashMap<String, Vec<u32>>) |
+
+(Internal shader-uniform field names like `n`, `rows`, `cols`, `eps` stay as-is — they map directly to WGSL uniform struct fields and renaming would desync Rust/WGSL.)
+
+## Crate-root allow attribute
+
+`src/lib.rs` carries `#![allow(non_camel_case_types, non_snake_case, dead_code, unused_imports)]` per the workspace tokenization rule.
+
+## Documentation pattern
+
+Every tokenized item carries a doc comment mapping back to the human name, per the workspace convention:
+
+```rust
+/// f580 = matmul. C = A @ B where A is [m,k] and B is [k,n].
+pub fn f580(&self, ...) { ... }
+```
+
+## Test naming
+
+Tests in any-gpu use the function-under-test token as a prefix: `f580_basic`, `f580_vs_cpu`, `f602_constant_input`. The existing test names migrate via mechanical rename keyed by the function they exercise.

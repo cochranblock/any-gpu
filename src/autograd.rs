@@ -1,35 +1,37 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
 // Autograd: reverse-mode automatic differentiation.
 // Flat tape, enum ops, no trait objects. The tape owns all tensors.
+// t503=TensorId, t504=Op, t505=TapeEntry, t506=Tape.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{Result, ensure};
 
-/// Tensor ID — index into the tape's tensor storage.
+/// t503 = TensorId. Index into the tape's tensor storage.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct TensorId(pub u32);
+pub struct t503(pub u32);
 
-/// Recorded operation for backward pass.
+/// t504 = Op. Recorded operation for backward pass. Variant names stay descriptive
+/// (Add, Sub, ...) — they're enum tags, not part of the function-token map.
 #[derive(Copy, Clone, Debug)]
-pub enum Op {
+pub enum t504 {
     /// Leaf tensor (parameter or input). No backward.
     Leaf,
-    Add { a: TensorId, b: TensorId },
-    Sub { a: TensorId, b: TensorId },
-    Mul { a: TensorId, b: TensorId },
-    Scale { a: TensorId, s: f32 },
-    Relu { a: TensorId },
-    Sigmoid { a: TensorId },
-    Swish { a: TensorId },
-    Tanh { a: TensorId },
-    Matmul { a: TensorId, b: TensorId, m: u32, n: u32, k: u32 },
-    MseLoss { pred: TensorId, target: TensorId },
+    Add { a: t503, b: t503 },
+    Sub { a: t503, b: t503 },
+    Mul { a: t503, b: t503 },
+    Scale { a: t503, s: f32 },
+    Relu { a: t503 },
+    Sigmoid { a: t503 },
+    Swish { a: t503 },
+    Tanh { a: t503 },
+    Matmul { a: t503, b: t503, m: u32, n: u32, k: u32 },
+    MseLoss { pred: t503, target: t503 },
     Conv2d {
-        input: TensorId,
-        weight: TensorId,
-        bias: Option<TensorId>,
+        input: t503,
+        weight: t503,
+        bias: Option<t503>,
         batch: u32, in_c: u32, in_h: u32, in_w: u32,
         out_c: u32, out_h: u32, out_w: u32,
         kh: u32, kw: u32,
@@ -39,438 +41,435 @@ pub enum Op {
         groups: u32,
     },
     /// Concat a[outer, a_inner] and b[outer, b_inner] along trailing axis.
-    Concat { a: TensorId, b: TensorId, outer: u32, a_inner: u32, b_inner: u32 },
+    Concat { a: t503, b: t503, outer: u32, a_inner: u32, b_inner: u32 },
     /// GroupNorm with learnable affine (gamma, beta).
     GroupNorm {
-        input: TensorId, gamma: TensorId, beta: TensorId,
+        input: t503, gamma: t503, beta: t503,
         batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
     },
     /// Nearest-neighbor 2D upsample.
     UpsampleNearest2d {
-        input: TensorId,
+        input: t503,
         batch: u32, channels: u32, in_h: u32, in_w: u32,
         scale_h: u32, scale_w: u32,
     },
     /// Broadcast add: out[outer, inner] = a[outer, inner] + b[outer].
-    AddBroadcast { a: TensorId, b: TensorId, outer: u32, inner: u32 },
+    AddBroadcast { a: t503, b: t503, outer: u32, inner: u32 },
     /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols] (Linear bias).
-    AddPerCol { a: TensorId, b: TensorId, rows: u32, cols: u32 },
+    AddPerCol { a: t503, b: t503, rows: u32, cols: u32 },
 }
 
-/// Tape entry: one recorded operation.
-struct TapeEntry {
-    op: Op,
-    output: TensorId,
+/// t505 = TapeEntry. One recorded operation.
+struct t505 {
+    op: t504,
+    output: t503,
 }
 
-/// Autograd tape. Records forward operations, runs backward to compute gradients.
-pub struct Tape<'d> {
-    dev: &'d GpuDevice,
-    entries: Vec<TapeEntry>,
-    bufs: Vec<GpuBuffer>,
-    grads: Vec<Option<GpuBuffer>>,
+/// t506 = Tape. Records forward operations, runs backward to compute gradients.
+pub struct t506<'d> {
+    dev: &'d t500,
+    entries: Vec<t505>,
+    bufs: Vec<t501>,
+    grads: Vec<Option<t501>>,
 }
 
-impl<'d> Tape<'d> {
-    pub fn new(dev: &'d GpuDevice) -> Self {
+impl<'d> t506<'d> {
+    /// f680 = Tape::new. Fresh tape bound to a device.
+    pub fn f680(p0: &'d t500) -> Self {
         Self {
-            dev,
+            dev: p0,
             entries: Vec::new(),
             bufs: Vec::new(),
             grads: Vec::new(),
         }
     }
 
-    /// Register a leaf tensor (parameter or input data). No backward through this.
-    pub fn leaf(&mut self, data: &[f32]) -> TensorId {
-        let buf = self.dev.upload(data);
-        let id = TensorId(self.bufs.len() as u32);
-        self.bufs.push(buf);
+    /// f681 = Tape::leaf. Register a leaf tensor (parameter or input data).
+    /// No backward through this.
+    pub fn f681(&mut self, p0: &[f32]) -> t503 {
+        let v0 = self.dev.f502(p0);
+        let v1 = t503(self.bufs.len() as u32);
+        self.bufs.push(v0);
         self.grads.push(None);
-        self.entries.push(TapeEntry { op: Op::Leaf, output: id });
-        id
+        self.entries.push(t505 { op: t504::Leaf, output: v1 });
+        v1
     }
 
-    /// Read tensor data back to CPU.
-    pub fn read(&self, id: TensorId) -> Result<Vec<f32>> {
-        self.dev.read(&self.bufs[id.0 as usize])
+    /// f682 = Tape::read. Read tensor data back to CPU.
+    pub fn f682(&self, p0: t503) -> Result<Vec<f32>> {
+        self.dev.f504(&self.bufs[p0.0 as usize])
     }
 
-    /// Read gradient data back to CPU. Returns None if no gradient computed.
-    pub fn read_grad(&self, id: TensorId) -> Result<Option<Vec<f32>>> {
-        match &self.grads[id.0 as usize] {
-            Some(buf) => Ok(Some(self.dev.read(buf)?)),
+    /// f683 = Tape::read_grad. Read gradient data back to CPU. Returns None if no
+    /// gradient computed.
+    pub fn f683(&self, p0: t503) -> Result<Option<Vec<f32>>> {
+        match &self.grads[p0.0 as usize] {
+            Some(v0) => Ok(Some(self.dev.f504(v0)?)),
             None => Ok(None),
         }
     }
 
-    fn push_result(&mut self, buf: GpuBuffer, op: Op) -> TensorId {
-        let id = TensorId(self.bufs.len() as u32);
-        self.bufs.push(buf);
+    /// f684 = Tape::push_result. Append a result buffer + op to the tape.
+    fn f684(&mut self, p0: t501, p1: t504) -> t503 {
+        let v0 = t503(self.bufs.len() as u32);
+        self.bufs.push(p0);
         self.grads.push(None);
-        self.entries.push(TapeEntry { op, output: id });
-        id
+        self.entries.push(t505 { op: p1, output: v0 });
+        v0
     }
 
-    fn buf(&self, id: TensorId) -> &GpuBuffer {
-        &self.bufs[id.0 as usize]
+    /// f685 = Tape::buf. Borrow the buffer for a tape id.
+    fn f685(&self, p0: t503) -> &t501 {
+        &self.bufs[p0.0 as usize]
     }
 
     // --- Forward ops (recorded on tape) ---
 
-    pub fn add(&mut self, a: TensorId, b: TensorId) -> Result<TensorId> {
-        let out = self.dev.add(self.buf(a), self.buf(b))?;
-        Ok(self.push_result(out, Op::Add { a, b }))
+    /// f686 = Tape::add.
+    pub fn f686(&mut self, p0: t503, p1: t503) -> Result<t503> {
+        let v0 = self.dev.f550(self.f685(p0), self.f685(p1))?;
+        Ok(self.f684(v0, t504::Add { a: p0, b: p1 }))
     }
 
-    pub fn sub(&mut self, a: TensorId, b: TensorId) -> Result<TensorId> {
-        let out = self.dev.sub(self.buf(a), self.buf(b))?;
-        Ok(self.push_result(out, Op::Sub { a, b }))
+    /// f687 = Tape::sub.
+    pub fn f687(&mut self, p0: t503, p1: t503) -> Result<t503> {
+        let v0 = self.dev.f551(self.f685(p0), self.f685(p1))?;
+        Ok(self.f684(v0, t504::Sub { a: p0, b: p1 }))
     }
 
-    pub fn mul(&mut self, a: TensorId, b: TensorId) -> Result<TensorId> {
-        let out = self.dev.mul(self.buf(a), self.buf(b))?;
-        Ok(self.push_result(out, Op::Mul { a, b }))
+    /// f688 = Tape::mul.
+    pub fn f688(&mut self, p0: t503, p1: t503) -> Result<t503> {
+        let v0 = self.dev.f552(self.f685(p0), self.f685(p1))?;
+        Ok(self.f684(v0, t504::Mul { a: p0, b: p1 }))
     }
 
-    pub fn scale(&mut self, a: TensorId, s: f32) -> Result<TensorId> {
-        let out = self.dev.scale(self.buf(a), s)?;
-        Ok(self.push_result(out, Op::Scale { a, s }))
+    /// f689 = Tape::scale.
+    pub fn f689(&mut self, p0: t503, p1: f32) -> Result<t503> {
+        let v0 = self.dev.f553(self.f685(p0), p1)?;
+        Ok(self.f684(v0, t504::Scale { a: p0, s: p1 }))
     }
 
-    pub fn relu(&mut self, a: TensorId) -> Result<TensorId> {
-        let out = self.dev.relu(self.buf(a))?;
-        Ok(self.push_result(out, Op::Relu { a }))
+    /// f690 = Tape::relu.
+    pub fn f690(&mut self, p0: t503) -> Result<t503> {
+        let v0 = self.dev.f554(self.f685(p0))?;
+        Ok(self.f684(v0, t504::Relu { a: p0 }))
     }
 
-    pub fn sigmoid(&mut self, a: TensorId) -> Result<TensorId> {
-        let out = self.dev.sigmoid(self.buf(a))?;
-        Ok(self.push_result(out, Op::Sigmoid { a }))
+    /// f691 = Tape::sigmoid.
+    pub fn f691(&mut self, p0: t503) -> Result<t503> {
+        let v0 = self.dev.f555(self.f685(p0))?;
+        Ok(self.f684(v0, t504::Sigmoid { a: p0 }))
     }
 
-    pub fn swish(&mut self, a: TensorId) -> Result<TensorId> {
-        let out = self.dev.swish(self.buf(a))?;
-        Ok(self.push_result(out, Op::Swish { a }))
+    /// f692 = Tape::swish.
+    pub fn f692(&mut self, p0: t503) -> Result<t503> {
+        let v0 = self.dev.f556(self.f685(p0))?;
+        Ok(self.f684(v0, t504::Swish { a: p0 }))
     }
 
-    pub fn tanh_act(&mut self, a: TensorId) -> Result<TensorId> {
-        let out = self.dev.tanh_act(self.buf(a))?;
-        Ok(self.push_result(out, Op::Tanh { a }))
+    /// f693 = Tape::tanh_act.
+    pub fn f693(&mut self, p0: t503) -> Result<t503> {
+        let v0 = self.dev.f557(self.f685(p0))?;
+        Ok(self.f684(v0, t504::Tanh { a: p0 }))
     }
 
-    pub fn matmul(&mut self, a: TensorId, b: TensorId, m: u32, n: u32, k: u32) -> Result<TensorId> {
-        let out = self.dev.matmul(self.buf(a), self.buf(b), m, n, k)?;
-        Ok(self.push_result(out, Op::Matmul { a, b, m, n, k }))
+    /// f694 = Tape::matmul.
+    pub fn f694(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: u32) -> Result<t503> {
+        let v0 = self.dev.f580(self.f685(p0), self.f685(p1), p2, p3, p4)?;
+        Ok(self.f684(v0, t504::Matmul { a: p0, b: p1, m: p2, n: p3, k: p4 }))
     }
 
-    pub fn mse_loss(&mut self, pred: TensorId, target: TensorId) -> Result<TensorId> {
-        let out = self.dev.mse_loss(self.buf(pred), self.buf(target))?;
-        Ok(self.push_result(out, Op::MseLoss { pred, target }))
+    /// f695 = Tape::mse_loss.
+    pub fn f695(&mut self, p0: t503, p1: t503) -> Result<t503> {
+        let v0 = self.dev.f622(self.f685(p0), self.f685(p1))?;
+        Ok(self.f684(v0, t504::MseLoss { pred: p0, target: p1 }))
     }
 
-    pub fn conv2d(
+    /// f696 = Tape::conv2d.
+    pub fn f696(
         &mut self,
-        input: TensorId,
-        weight: TensorId,
-        bias: Option<TensorId>,
-        batch: u32, in_c: u32, in_h: u32, in_w: u32,
-        out_c: u32, kh: u32, kw: u32,
-        stride: (u32, u32), padding: (u32, u32),
-        dilation: (u32, u32), groups: u32,
-    ) -> Result<TensorId> {
-        let out_h = (in_h + 2 * padding.0 - dilation.0 * (kh - 1) - 1) / stride.0 + 1;
-        let out_w = (in_w + 2 * padding.1 - dilation.1 * (kw - 1) - 1) / stride.1 + 1;
-        let out = self.dev.conv2d(
-            self.buf(input), self.buf(weight),
-            bias.map(|id| &self.bufs[id.0 as usize]).as_deref(),
-            batch, in_c, in_h, in_w, out_c, kh, kw, stride, padding, dilation, groups,
+        p0: t503,
+        p1: t503,
+        p2: Option<t503>,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+        p7: u32, p8: u32, p9: u32,
+        p10: (u32, u32), p11: (u32, u32),
+        p12: (u32, u32), p13: u32,
+    ) -> Result<t503> {
+        let v0 = (p5 + 2 * p11.0 - p12.0 * (p8 - 1) - 1) / p10.0 + 1;
+        let v1 = (p6 + 2 * p11.1 - p12.1 * (p9 - 1) - 1) / p10.1 + 1;
+        let v2 = self.dev.f582(
+            self.f685(p0), self.f685(p1),
+            p2.map(|v3| &self.bufs[v3.0 as usize]).as_deref(),
+            p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13,
         )?;
-        Ok(self.push_result(out, Op::Conv2d {
-            input, weight, bias,
-            batch, in_c, in_h, in_w,
-            out_c, out_h, out_w,
-            kh, kw,
-            stride_h: stride.0, stride_w: stride.1,
-            pad_h: padding.0, pad_w: padding.1,
-            dil_h: dilation.0, dil_w: dilation.1,
-            groups,
+        Ok(self.f684(v2, t504::Conv2d {
+            input: p0, weight: p1, bias: p2,
+            batch: p3, in_c: p4, in_h: p5, in_w: p6,
+            out_c: p7, out_h: v0, out_w: v1,
+            kh: p8, kw: p9,
+            stride_h: p10.0, stride_w: p10.1,
+            pad_h: p11.0, pad_w: p11.1,
+            dil_h: p12.0, dil_w: p12.1,
+            groups: p13,
         }))
     }
 
-    /// Concat two tensors along trailing axis: a[outer, a_inner] + b[outer, b_inner]
-    /// -> out[outer, a_inner + b_inner].
-    pub fn concat(
+    /// f697 = Tape::concat. Two tensors along trailing axis: a[outer, a_inner] +
+    /// b[outer, b_inner] -> out[outer, a_inner + b_inner].
+    pub fn f697(
         &mut self,
-        a: TensorId, b: TensorId,
-        outer: u32, a_inner: u32, b_inner: u32,
-    ) -> Result<TensorId> {
-        let out = self.dev.concat(self.buf(a), self.buf(b), outer, a_inner, b_inner)?;
-        Ok(self.push_result(out, Op::Concat { a, b, outer, a_inner, b_inner }))
+        p0: t503, p1: t503,
+        p2: u32, p3: u32, p4: u32,
+    ) -> Result<t503> {
+        let v0 = self.dev.f640(self.f685(p0), self.f685(p1), p2, p3, p4)?;
+        Ok(self.f684(v0, t504::Concat { a: p0, b: p1, outer: p2, a_inner: p3, b_inner: p4 }))
     }
 
-    /// Group normalization with learnable affine. input shape [batch, channels, spatial].
-    pub fn group_norm(
+    /// f698 = Tape::group_norm. GroupNorm with learnable affine. Input shape
+    /// [batch, channels, spatial].
+    pub fn f698(
         &mut self,
-        input: TensorId, gamma: TensorId, beta: TensorId,
-        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
-    ) -> Result<TensorId> {
-        let out = self.dev.group_norm(
-            self.buf(input), self.buf(gamma), self.buf(beta),
-            batch, channels, spatial, groups, eps,
+        p0: t503, p1: t503, p2: t503,
+        p3: u32, p4: u32, p5: u32, p6: u32, p7: f32,
+    ) -> Result<t503> {
+        let v0 = self.dev.f600(
+            self.f685(p0), self.f685(p1), self.f685(p2),
+            p3, p4, p5, p6, p7,
         )?;
-        Ok(self.push_result(out, Op::GroupNorm {
-            input, gamma, beta, batch, channels, spatial, groups, eps,
+        Ok(self.f684(v0, t504::GroupNorm {
+            input: p0, gamma: p1, beta: p2,
+            batch: p3, channels: p4, spatial: p5, groups: p6, eps: p7,
         }))
     }
 
-    /// Nearest-neighbor 2D upsample. input: [batch, channels, in_h, in_w]
+    /// f699 = Tape::upsample_nearest2d. input: [batch, channels, in_h, in_w]
     /// -> [batch, channels, in_h * scale_h, in_w * scale_w].
-    pub fn upsample_nearest2d(
+    pub fn f699(
         &mut self,
-        input: TensorId,
-        batch: u32, channels: u32, in_h: u32, in_w: u32,
-        scale_h: u32, scale_w: u32,
-    ) -> Result<TensorId> {
-        let out = self.dev.upsample_nearest2d(
-            self.buf(input), batch, channels, in_h, in_w, scale_h, scale_w,
+        p0: t503,
+        p1: u32, p2: u32, p3: u32, p4: u32,
+        p5: u32, p6: u32,
+    ) -> Result<t503> {
+        let v0 = self.dev.f660(
+            self.f685(p0), p1, p2, p3, p4, p5, p6,
         )?;
-        Ok(self.push_result(out, Op::UpsampleNearest2d {
-            input, batch, channels, in_h, in_w, scale_h, scale_w,
+        Ok(self.f684(v0, t504::UpsampleNearest2d {
+            input: p0, batch: p1, channels: p2, in_h: p3, in_w: p4, scale_h: p5, scale_w: p6,
         }))
     }
 
-    /// Broadcast add: out[outer, inner] = a[outer, inner] + b[outer].
+    /// f700 = Tape::add_broadcast. out[outer, inner] = a[outer, inner] + b[outer].
     /// For bias add: outer = channels, inner = batch * spatial.
     /// For time conditioning: outer = batch * channels, inner = spatial.
-    pub fn add_broadcast(
+    pub fn f700(
         &mut self,
-        a: TensorId, b: TensorId,
-        outer: u32, inner: u32,
-    ) -> Result<TensorId> {
-        let out = self.dev.add_broadcast(self.buf(a), self.buf(b), outer, inner)?;
-        Ok(self.push_result(out, Op::AddBroadcast { a, b, outer, inner }))
+        p0: t503, p1: t503,
+        p2: u32, p3: u32,
+    ) -> Result<t503> {
+        let v0 = self.dev.f642(self.f685(p0), self.f685(p1), p2, p3)?;
+        Ok(self.f684(v0, t504::AddBroadcast { a: p0, b: p1, outer: p2, inner: p3 }))
     }
 
-    /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols]. Linear bias.
-    pub fn add_per_col(
+    /// f701 = Tape::add_per_col. out[rows, cols] = a[rows, cols] + b[cols]. Linear bias.
+    pub fn f701(
         &mut self,
-        a: TensorId, b: TensorId,
-        rows: u32, cols: u32,
-    ) -> Result<TensorId> {
-        let out = self.dev.add_per_col(self.buf(a), self.buf(b), rows, cols)?;
-        Ok(self.push_result(out, Op::AddPerCol { a, b, rows, cols }))
+        p0: t503, p1: t503,
+        p2: u32, p3: u32,
+    ) -> Result<t503> {
+        let v0 = self.dev.f645(self.f685(p0), self.f685(p1), p2, p3)?;
+        Ok(self.f684(v0, t504::AddPerCol { a: p0, b: p1, rows: p2, cols: p3 }))
     }
 
     // --- Backward ---
 
-    /// Accumulate gradient into a tensor's grad buffer.
-    fn accum_grad(&mut self, id: TensorId, grad: GpuBuffer) -> Result<()> {
-        match &self.grads[id.0 as usize] {
-            Some(existing) => {
-                let summed = self.dev.add(existing, &grad)?;
-                self.grads[id.0 as usize] = Some(summed);
+    /// f703 = Tape::accum_grad. Accumulate gradient into a tensor's grad buffer.
+    fn f703(&mut self, p0: t503, p1: t501) -> Result<()> {
+        match &self.grads[p0.0 as usize] {
+            Some(v0) => {
+                let v1 = self.dev.f550(v0, &p1)?;
+                self.grads[p0.0 as usize] = Some(v1);
             }
             None => {
-                self.grads[id.0 as usize] = Some(grad);
+                self.grads[p0.0 as usize] = Some(p1);
             }
         }
         Ok(())
     }
 
-    /// Run backward pass from a loss tensor. Computes gradients for all tensors on the tape.
-    pub fn backward(&mut self, loss: TensorId) -> Result<()> {
-        ensure!(self.bufs[loss.0 as usize].len == 1, "backward: loss must be a scalar (1 element)");
+    /// f702 = Tape::backward. Run backward pass from a loss tensor. Computes
+    /// gradients for all tensors on the tape.
+    pub fn f702(&mut self, p0: t503) -> Result<()> {
+        ensure!(self.bufs[p0.0 as usize].s507 == 1, "backward: loss must be a scalar (1 element)");
 
         // Seed: d(loss)/d(loss) = 1.0
-        self.grads[loss.0 as usize] = Some(self.dev.upload(&[1.0]));
+        self.grads[p0.0 as usize] = Some(self.dev.f502(&[1.0]));
 
         // Walk tape in reverse
-        for i in (0..self.entries.len()).rev() {
-            let entry = &self.entries[i];
-            let out_id = entry.output;
+        for v0 in (0..self.entries.len()).rev() {
+            let v1 = &self.entries[v0];
+            let v2 = v1.output;
 
             // Skip if no gradient flows to this node
-            let grad_out = match &self.grads[out_id.0 as usize] {
-                Some(g) => g,
+            let v3 = match &self.grads[v2.0 as usize] {
+                Some(v4) => v4,
                 None => continue,
             };
 
-            // Clone the grad_out reference data we need before mutating self
-            // We need to read grad_out's buffer info before calling accum_grad
-            match entry.op {
-                Op::Leaf => {} // no backward for leaves
+            match v1.op {
+                t504::Leaf => {}
 
-                Op::Add { a, b } => {
-                    // grad_a = grad_out, grad_b = grad_out
-                    let ga = self.dev.scale(grad_out, 1.0)?; // copy
-                    let gb = self.dev.scale(grad_out, 1.0)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::Add { a, b } => {
+                    let v5 = self.dev.f553(v3, 1.0)?;
+                    let v6 = self.dev.f553(v3, 1.0)?;
+                    self.f703(a, v5)?;
+                    self.f703(b, v6)?;
                 }
 
-                Op::Sub { a, b } => {
-                    // grad_a = grad_out, grad_b = -grad_out
-                    let ga = self.dev.scale(grad_out, 1.0)?;
-                    let gb = self.dev.scale(grad_out, -1.0)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::Sub { a, b } => {
+                    let v5 = self.dev.f553(v3, 1.0)?;
+                    let v6 = self.dev.f553(v3, -1.0)?;
+                    self.f703(a, v5)?;
+                    self.f703(b, v6)?;
                 }
 
-                Op::Mul { a, b } => {
-                    // grad_a = grad_out * b, grad_b = grad_out * a
-                    let ga = self.dev.mul(grad_out, &self.bufs[b.0 as usize])?;
-                    let gb = self.dev.mul(grad_out, &self.bufs[a.0 as usize])?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::Mul { a, b } => {
+                    let v5 = self.dev.f552(v3, &self.bufs[b.0 as usize])?;
+                    let v6 = self.dev.f552(v3, &self.bufs[a.0 as usize])?;
+                    self.f703(a, v5)?;
+                    self.f703(b, v6)?;
                 }
 
-                Op::Scale { a, s } => {
-                    // grad_a = grad_out * s
-                    let ga = self.dev.scale(grad_out, s)?;
-                    self.accum_grad(a, ga)?;
+                t504::Scale { a, s } => {
+                    let v5 = self.dev.f553(v3, s)?;
+                    self.f703(a, v5)?;
                 }
 
-                Op::Relu { a } => {
-                    // grad_a = grad_out * (input > 0)
-                    let ga = self.dev.relu_backward(grad_out, &self.bufs[a.0 as usize])?;
-                    self.accum_grad(a, ga)?;
+                t504::Relu { a } => {
+                    let v5 = self.dev.f559(v3, &self.bufs[a.0 as usize])?;
+                    self.f703(a, v5)?;
                 }
 
-                Op::Sigmoid { a } => {
-                    // grad_a = grad_out * sig * (1 - sig) where sig = output
-                    let ga = self.dev.sigmoid_backward(grad_out, &self.bufs[out_id.0 as usize])?;
-                    self.accum_grad(a, ga)?;
+                t504::Sigmoid { a } => {
+                    let v5 = self.dev.f560(v3, &self.bufs[v2.0 as usize])?;
+                    self.f703(a, v5)?;
                 }
 
-                Op::Swish { a } => {
-                    // grad_a = grad_out * (sig + x * sig * (1 - sig)) where sig = sigmoid(x)
-                    let ga = self.dev.swish_backward(grad_out, &self.bufs[a.0 as usize])?;
-                    self.accum_grad(a, ga)?;
+                t504::Swish { a } => {
+                    let v5 = self.dev.f561(v3, &self.bufs[a.0 as usize])?;
+                    self.f703(a, v5)?;
                 }
 
-                Op::Tanh { a } => {
-                    // grad_a = grad_out * (1 - tanh(x)^2) where tanh(x) = output
-                    let ga = self.dev.tanh_backward(grad_out, &self.bufs[out_id.0 as usize])?;
-                    self.accum_grad(a, ga)?;
+                t504::Tanh { a } => {
+                    let v5 = self.dev.f562(v3, &self.bufs[v2.0 as usize])?;
+                    self.f703(a, v5)?;
                 }
 
-                Op::Matmul { a, b, m, n, k } => {
-                    // grad_a = grad_out @ B^T  (grad_out is m x n, B is k x n, B^T is n x k -> grad_a is m x k)
-                    let bt = self.dev.transpose(&self.bufs[b.0 as usize], 1, k, n, 1)?;
-                    let ga = self.dev.matmul(grad_out, &bt, m, k, n)?;
-                    // grad_b = A^T @ grad_out  (A is m x k, A^T is k x m, grad_out is m x n -> grad_b is k x n)
-                    let at = self.dev.transpose(&self.bufs[a.0 as usize], 1, m, k, 1)?;
-                    let gb = self.dev.matmul(&at, grad_out, k, n, m)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::Matmul { a, b, m, n, k } => {
+                    // grad_a = grad_out @ B^T
+                    let v5 = self.dev.f641(&self.bufs[b.0 as usize], 1, k, n, 1)?;
+                    let v6 = self.dev.f580(v3, &v5, m, k, n)?;
+                    // grad_b = A^T @ grad_out
+                    let v7 = self.dev.f641(&self.bufs[a.0 as usize], 1, m, k, 1)?;
+                    let v8 = self.dev.f580(&v7, v3, k, n, m)?;
+                    self.f703(a, v6)?;
+                    self.f703(b, v8)?;
                 }
 
-                Op::MseLoss { pred, target } => {
+                t504::MseLoss { pred, target } => {
                     // grad_pred = 2 * (pred - target) / n
-                    let n = self.bufs[pred.0 as usize].len as f32;
-                    let diff = self.dev.sub(&self.bufs[pred.0 as usize], &self.bufs[target.0 as usize])?;
-                    let ga = self.dev.scale(&diff, 2.0 / n)?;
-                    self.accum_grad(pred, ga)?;
+                    let v5 = self.bufs[pred.0 as usize].s507 as f32;
+                    let v6 = self.dev.f551(&self.bufs[pred.0 as usize], &self.bufs[target.0 as usize])?;
+                    let v7 = self.dev.f553(&v6, 2.0 / v5)?;
+                    self.f703(pred, v7)?;
                 }
 
-                Op::Conv2d { input, weight, bias, batch, in_c, in_h, in_w, out_c, out_h, out_w, kh, kw, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups } => {
-                    // grad_input via conv_transpose2d.
-                    // For stride > 1, we must provide output_padding so the transpose
-                    // conv recovers the original input dims. For a forward conv:
-                    //   out_h = (in_h + 2*pad - dil*(k-1) - 1) / stride + 1
-                    // The inverse transpose conv gives:
-                    //   recovered_h = (out_h - 1)*stride - 2*pad + dil*(k-1) + output_pad + 1
-                    // Solve for output_pad so recovered_h == in_h.
-                    let out_pad_h = (in_h as i32)
+                t504::Conv2d { input, weight, bias, batch, in_c, in_h, in_w, out_c, out_h, out_w, kh, kw, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups } => {
+                    // grad_input via f583 (conv_transpose2d).
+                    let v5 = (in_h as i32)
                         - ((out_h as i32 - 1) * stride_h as i32
                             - 2 * pad_h as i32
                             + dil_h as i32 * (kh as i32 - 1)
                             + 1);
-                    let out_pad_w = (in_w as i32)
+                    let v6 = (in_w as i32)
                         - ((out_w as i32 - 1) * stride_w as i32
                             - 2 * pad_w as i32
                             + dil_w as i32 * (kw as i32 - 1)
                             + 1);
-                    ensure!(out_pad_h >= 0 && out_pad_w >= 0, "negative output_pad in conv backward");
-                    let ga = self.dev.conv_transpose2d(
-                        grad_out,
+                    ensure!(v5 >= 0 && v6 >= 0, "negative output_pad in conv backward");
+                    let v7 = self.dev.f583(
+                        v3,
                         &self.bufs[weight.0 as usize],
                         None,
                         batch, out_c, out_h, out_w,
                         in_c, kh, kw,
                         (stride_h, stride_w),
                         (pad_h, pad_w),
-                        (out_pad_h as u32, out_pad_w as u32),
+                        (v5 as u32, v6 as u32),
                         (dil_h, dil_w),
                         groups,
                     )?;
                     // grad_weight
-                    let gw = self.dev.conv2d_grad_weight(
+                    let v8 = self.dev.f584(
                         &self.bufs[input.0 as usize],
-                        grad_out,
+                        v3,
                         batch, in_c, in_h, in_w,
                         out_c, out_h, out_w, kh, kw,
                         stride_h, stride_w, pad_h, pad_w,
                         dil_h, dil_w, groups,
                     )?;
                     // grad_bias
-                    let gb = if bias.is_some() {
-                        Some(self.dev.conv2d_grad_bias(grad_out, batch, out_c, out_h, out_w)?)
+                    let v9 = if bias.is_some() {
+                        Some(self.dev.f585(v3, batch, out_c, out_h, out_w)?)
                     } else {
                         None
                     };
-                    self.accum_grad(input, ga)?;
-                    self.accum_grad(weight, gw)?;
-                    if let (Some(bias_id), Some(gb_buf)) = (bias, gb) {
-                        self.accum_grad(bias_id, gb_buf)?;
+                    self.f703(input, v7)?;
+                    self.f703(weight, v8)?;
+                    if let (Some(v10), Some(v11)) = (bias, v9) {
+                        self.f703(v10, v11)?;
                     }
                 }
 
-                Op::Concat { a, b, outer, a_inner, b_inner } => {
-                    // grad_a = first a_inner of each outer block in grad_out
-                    // grad_b = last b_inner of each outer block in grad_out
-                    let combined = a_inner + b_inner;
-                    let ga = self.dev.slice_per_block(grad_out, outer, a_inner, 0, combined)?;
-                    let gb = self.dev.slice_per_block(grad_out, outer, b_inner, a_inner, combined)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::Concat { a, b, outer, a_inner, b_inner } => {
+                    let v5 = a_inner + b_inner;
+                    let v6 = self.dev.f643(v3, outer, a_inner, 0, v5)?;
+                    let v7 = self.dev.f643(v3, outer, b_inner, a_inner, v5)?;
+                    self.f703(a, v6)?;
+                    self.f703(b, v7)?;
                 }
 
-                Op::GroupNorm { input, gamma, beta, batch, channels, spatial, groups, eps } => {
-                    let (di, dg, db) = self.dev.group_norm_backward(
-                        grad_out,
+                t504::GroupNorm { input, gamma, beta, batch, channels, spatial, groups, eps } => {
+                    let (v5, v6, v7) = self.dev.f601(
+                        v3,
                         &self.bufs[input.0 as usize],
                         &self.bufs[gamma.0 as usize],
                         batch, channels, spatial, groups, eps,
                     )?;
-                    self.accum_grad(input, di)?;
-                    self.accum_grad(gamma, dg)?;
-                    self.accum_grad(beta, db)?;
+                    self.f703(input, v5)?;
+                    self.f703(gamma, v6)?;
+                    self.f703(beta, v7)?;
                 }
 
-                Op::UpsampleNearest2d { input, batch, channels, in_h, in_w, scale_h, scale_w } => {
-                    let gi = self.dev.upsample_nearest2d_backward(
-                        grad_out, batch, channels, in_h, in_w, scale_h, scale_w,
+                t504::UpsampleNearest2d { input, batch, channels, in_h, in_w, scale_h, scale_w } => {
+                    let v5 = self.dev.f661(
+                        v3, batch, channels, in_h, in_w, scale_h, scale_w,
                     )?;
-                    self.accum_grad(input, gi)?;
+                    self.f703(input, v5)?;
                 }
 
-                Op::AddBroadcast { a, b, outer, inner } => {
-                    // grad_a = grad_out (same shape)
-                    // grad_b[o] = sum over inner dim of grad_out[o, :]
-                    let ga = self.dev.scale(grad_out, 1.0)?;
-                    let gb = self.dev.sum_inner(grad_out, outer, inner)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::AddBroadcast { a, b, outer, inner } => {
+                    let v5 = self.dev.f553(v3, 1.0)?;
+                    let v6 = self.dev.f644(v3, outer, inner)?;
+                    self.f703(a, v5)?;
+                    self.f703(b, v6)?;
                 }
 
-                Op::AddPerCol { a, b, rows, cols } => {
-                    // grad_a = grad_out (same shape)
-                    // grad_b[c] = sum over rows of grad_out[:, c]
-                    let ga = self.dev.scale(grad_out, 1.0)?;
-                    let gb = self.dev.sum_rows(grad_out, rows, cols)?;
-                    self.accum_grad(a, ga)?;
-                    self.accum_grad(b, gb)?;
+                t504::AddPerCol { a, b, rows, cols } => {
+                    let v5 = self.dev.f553(v3, 1.0)?;
+                    let v6 = self.dev.f646(v3, rows, cols)?;
+                    self.f703(a, v5)?;
+                    self.f703(b, v6)?;
                 }
             }
         }
@@ -481,331 +480,285 @@ impl<'d> Tape<'d> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
+    use crate::ops::f544;
 
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     #[test]
-    fn test_backward_add() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[1.0, 2.0, 3.0]);
-        let b = tape.leaf(&[4.0, 5.0, 6.0]);
-        let c = tape.add(a, b).unwrap();
-        // sum c to scalar for loss
-        // c = [5, 7, 9], loss = mean(c^2) - but let's use a simpler path
-        // Just test: loss = sum(c) via scale trick: loss_val = c[0]+c[1]+c[2]
-        // Actually, let's test with mse against zero
-        let target = tape.leaf(&[0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(c, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f686_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0, 2.0, 3.0]);
+        let v2 = v0.f681(&[4.0, 5.0, 6.0]);
+        let v3 = v0.f686(v1, v2).unwrap();
+        let v4 = v0.f681(&[0.0, 0.0, 0.0]);
+        let v5 = v0.f695(v3, v4).unwrap();
+        v0.f702(v5).unwrap();
 
-        // MSE = (5^2 + 7^2 + 9^2)/3 = (25+49+81)/3 = 155/3
-        let loss_val = tape.read(loss).unwrap();
-        assert_approx(&loss_val, &[155.0 / 3.0], 1e-3);
+        let v6 = v0.f682(v5).unwrap();
+        f544(&v6, &[155.0 / 3.0], 1e-3);
 
-        // d(MSE)/d(pred) = 2*(pred-target)/n = 2*[5,7,9]/3
-        // d(pred)/d(a) = 1, d(pred)/d(b) = 1
-        // So grad_a = grad_b = 2*[5,7,9]/3
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        let gb = tape.read_grad(b).unwrap().unwrap();
-        assert_approx(&ga, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
-        assert_approx(&gb, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        let v8 = v0.f683(v2).unwrap().unwrap();
+        f544(&v7, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
+        f544(&v8, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_mul() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[2.0, 3.0]);
-        let b = tape.leaf(&[4.0, 5.0]);
-        let c = tape.mul(a, b).unwrap(); // c = [8, 15]
-        let target = tape.leaf(&[0.0, 0.0]);
-        let loss = tape.mse_loss(c, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f688_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[2.0, 3.0]);
+        let v2 = v0.f681(&[4.0, 5.0]);
+        let v3 = v0.f688(v1, v2).unwrap();
+        let v4 = v0.f681(&[0.0, 0.0]);
+        let v5 = v0.f695(v3, v4).unwrap();
+        v0.f702(v5).unwrap();
 
-        // MSE = (64 + 225)/2 = 144.5
-        let loss_val = tape.read(loss).unwrap();
-        assert_approx(&loss_val, &[144.5], 1e-3);
+        let v6 = v0.f682(v5).unwrap();
+        f544(&v6, &[144.5], 1e-3);
 
-        // d(MSE)/d(c) = 2*[8,15]/2 = [8, 15]
-        // d(c)/d(a) = b = [4, 5], d(c)/d(b) = a = [2, 3]
-        // grad_a = [8,15] * [4,5] = [32, 75]
-        // grad_b = [8,15] * [2,3] = [16, 45]
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        let gb = tape.read_grad(b).unwrap().unwrap();
-        assert_approx(&ga, &[32.0, 75.0], 1e-3);
-        assert_approx(&gb, &[16.0, 45.0], 1e-3);
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        let v8 = v0.f683(v2).unwrap().unwrap();
+        f544(&v7, &[32.0, 75.0], 1e-3);
+        f544(&v8, &[16.0, 45.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_matmul() {
-        let mut tape = Tape::new(dev());
-        // A = [[1, 2]], B = [[3], [4]] -> C = [[11]]
-        let a = tape.leaf(&[1.0, 2.0]); // 1x2
-        let b = tape.leaf(&[3.0, 4.0]); // 2x1
-        let c = tape.matmul(a, b, 1, 1, 2).unwrap(); // 1x1 = [[11]]
-        let target = tape.leaf(&[0.0]);
-        let loss = tape.mse_loss(c, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f694_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0, 2.0]);
+        let v2 = v0.f681(&[3.0, 4.0]);
+        let v3 = v0.f694(v1, v2, 1, 1, 2).unwrap();
+        let v4 = v0.f681(&[0.0]);
+        let v5 = v0.f695(v3, v4).unwrap();
+        v0.f702(v5).unwrap();
 
-        // MSE = 121/1 = 121
-        let loss_val = tape.read(loss).unwrap();
-        assert_approx(&loss_val, &[121.0], 1e-3);
+        let v6 = v0.f682(v5).unwrap();
+        f544(&v6, &[121.0], 1e-3);
 
-        // d(MSE)/d(c) = 2*11/1 = 22
-        // grad_a = grad_out @ B^T = [22] @ [3, 4] = [66, 88]
-        // grad_b = A^T @ grad_out = [[1],[2]] @ [22] = [22, 44]
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        let gb = tape.read_grad(b).unwrap().unwrap();
-        assert_approx(&ga, &[66.0, 88.0], 1e-3);
-        assert_approx(&gb, &[22.0, 44.0], 1e-3);
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        let v8 = v0.f683(v2).unwrap().unwrap();
+        f544(&v7, &[66.0, 88.0], 1e-3);
+        f544(&v8, &[22.0, 44.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_relu() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[-1.0, 2.0, -3.0, 4.0]);
-        let b = tape.relu(a).unwrap(); // [0, 2, 0, 4]
-        let target = tape.leaf(&[0.0, 0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(b, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f690_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[-1.0, 2.0, -3.0, 4.0]);
+        let v2 = v0.f690(v1).unwrap();
+        let v3 = v0.f681(&[0.0, 0.0, 0.0, 0.0]);
+        let v4 = v0.f695(v2, v3).unwrap();
+        v0.f702(v4).unwrap();
 
-        // MSE = (0 + 4 + 0 + 16)/4 = 5
-        let loss_val = tape.read(loss).unwrap();
-        assert_approx(&loss_val, &[5.0], 1e-3);
+        let v5 = v0.f682(v4).unwrap();
+        f544(&v5, &[5.0], 1e-3);
 
-        // d(MSE)/d(b) = 2*[0,2,0,4]/4 = [0, 1, 0, 2]
-        // d(relu)/d(a) = [0, 1, 0, 1] (mask where a > 0)
-        // grad_a = [0, 1, 0, 2] * [0, 1, 0, 1] = [0, 1, 0, 2]
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &[0.0, 1.0, 0.0, 2.0], 1e-3);
+        let v6 = v0.f683(v1).unwrap().unwrap();
+        f544(&v6, &[0.0, 1.0, 0.0, 2.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_scale() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[1.0, 2.0, 3.0]);
-        let b = tape.scale(a, 3.0).unwrap();
-        let target = tape.leaf(&[0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(b, target).unwrap();
-        tape.backward(loss).unwrap();
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &[6.0, 12.0, 18.0], 1e-3);
+    fn f689_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0, 2.0, 3.0]);
+        let v2 = v0.f689(v1, 3.0).unwrap();
+        let v3 = v0.f681(&[0.0, 0.0, 0.0]);
+        let v4 = v0.f695(v2, v3).unwrap();
+        v0.f702(v4).unwrap();
+        let v5 = v0.f683(v1).unwrap().unwrap();
+        f544(&v5, &[6.0, 12.0, 18.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_sub() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[5.0, 10.0]);
-        let b = tape.leaf(&[1.0, 2.0]);
-        let c = tape.sub(a, b).unwrap(); // [4, 8]
-        let target = tape.leaf(&[0.0, 0.0]);
-        let loss = tape.mse_loss(c, target).unwrap();
-        tape.backward(loss).unwrap();
-        // d(MSE)/d(c) = 2*[4,8]/2 = [4, 8]
-        // grad_a = [4, 8] * 1 = [4, 8], grad_b = [4, 8] * (-1) = [-4, -8]
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        let gb = tape.read_grad(b).unwrap().unwrap();
-        assert_approx(&ga, &[4.0, 8.0], 1e-3);
-        assert_approx(&gb, &[-4.0, -8.0], 1e-3);
+    fn f687_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[5.0, 10.0]);
+        let v2 = v0.f681(&[1.0, 2.0]);
+        let v3 = v0.f687(v1, v2).unwrap();
+        let v4 = v0.f681(&[0.0, 0.0]);
+        let v5 = v0.f695(v3, v4).unwrap();
+        v0.f702(v5).unwrap();
+        let v6 = v0.f683(v1).unwrap().unwrap();
+        let v7 = v0.f683(v2).unwrap().unwrap();
+        f544(&v6, &[4.0, 8.0], 1e-3);
+        f544(&v7, &[-4.0, -8.0], 1e-3);
     }
 
     #[test]
-    fn test_backward_sigmoid() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[0.0, 1.0, -1.0]);
-        let b = tape.sigmoid(a).unwrap();
-        let target = tape.leaf(&[0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(b, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f691_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[0.0, 1.0, -1.0]);
+        let v2 = v0.f691(v1).unwrap();
+        let v3 = v0.f681(&[0.0, 0.0, 0.0]);
+        let v4 = v0.f695(v2, v3).unwrap();
+        v0.f702(v4).unwrap();
 
-        // sig(0)=0.5, sig(1)=0.7311, sig(-1)=0.2689
-        // d(MSE)/d(b) = 2*[0.5, 0.7311, 0.2689]/3
-        // d(sig)/d(a) = sig*(1-sig) = [0.25, 0.1966, 0.1966]
-        // grad_a = d(MSE)/d(b) * d(sig)/d(a)
-        let s = [0.5f32, 0.7311, 0.2689];
-        let expected: Vec<f32> = (0..3).map(|i| 2.0 * s[i] / 3.0 * s[i] * (1.0 - s[i])).collect();
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &expected, 1e-3);
+        let v5 = [0.5f32, 0.7311, 0.2689];
+        let v6: Vec<f32> = (0..3).map(|i| 2.0 * v5[i] / 3.0 * v5[i] * (1.0 - v5[i])).collect();
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        f544(&v7, &v6, 1e-3);
     }
 
     #[test]
-    fn test_backward_tanh() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[0.0, 1.0, -1.0]);
-        let b = tape.tanh_act(a).unwrap();
-        let target = tape.leaf(&[0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(b, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f693_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[0.0, 1.0, -1.0]);
+        let v2 = v0.f693(v1).unwrap();
+        let v3 = v0.f681(&[0.0, 0.0, 0.0]);
+        let v4 = v0.f695(v2, v3).unwrap();
+        v0.f702(v4).unwrap();
 
-        // tanh(0)=0, tanh(1)=0.7616, tanh(-1)=-0.7616
-        // d(MSE)/d(b) = 2*[0, 0.7616, -0.7616]/3
-        // d(tanh)/d(a) = 1-tanh^2 = [1, 0.4200, 0.4200]
-        let t = [0.0f32, 0.7616, -0.7616];
-        let expected: Vec<f32> = (0..3).map(|i| 2.0 * t[i] / 3.0 * (1.0 - t[i] * t[i])).collect();
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &expected, 1e-2);
+        let v5 = [0.0f32, 0.7616, -0.7616];
+        let v6: Vec<f32> = (0..3).map(|i| 2.0 * v5[i] / 3.0 * (1.0 - v5[i] * v5[i])).collect();
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        f544(&v7, &v6, 1e-2);
     }
 
     #[test]
-    fn test_backward_swish() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[0.0, 1.0, -1.0]);
-        let b = tape.swish(a).unwrap();
-        let target = tape.leaf(&[0.0, 0.0, 0.0]);
-        let loss = tape.mse_loss(b, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f692_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[0.0, 1.0, -1.0]);
+        let v2 = v0.f692(v1).unwrap();
+        let v3 = v0.f681(&[0.0, 0.0, 0.0]);
+        let v4 = v0.f695(v2, v3).unwrap();
+        v0.f702(v4).unwrap();
 
-        // swish(x) = x*sig(x), d(swish)/d(x) = sig(x) + x*sig(x)*(1-sig(x))
-        let x = [0.0f32, 1.0, -1.0];
-        let sw: Vec<f32> = x.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
-        let expected: Vec<f32> = (0..3).map(|i| {
-            let s = 1.0 / (1.0 + (-x[i]).exp());
-            let d_swish = s + x[i] * s * (1.0 - s);
-            2.0 * sw[i] / 3.0 * d_swish
+        let v5 = [0.0f32, 1.0, -1.0];
+        let v6: Vec<f32> = v5.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        let v7: Vec<f32> = (0..3).map(|i| {
+            let s = 1.0 / (1.0 + (-v5[i]).exp());
+            let d = s + v5[i] * s * (1.0 - s);
+            2.0 * v6[i] / 3.0 * d
         }).collect();
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &expected, 1e-2);
+        let v8 = v0.f683(v1).unwrap().unwrap();
+        f544(&v8, &v7, 1e-2);
     }
 
     #[test]
-    fn test_read_grad_before_backward() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[1.0, 2.0]);
-        assert!(tape.read_grad(a).unwrap().is_none());
+    fn f683_before_backward() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0, 2.0]);
+        assert!(v0.f683(v1).unwrap().is_none());
     }
 
     #[test]
-    fn test_backward_non_scalar_loss() {
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[1.0, 2.0]);
-        // Try backward on a non-scalar — should error
-        assert!(tape.backward(a).is_err());
+    fn f702_non_scalar_loss() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0, 2.0]);
+        assert!(v0.f702(v1).is_err());
     }
 
     #[test]
-    fn test_backward_diamond_graph() {
-        // a -> b = a*2, a -> c = a*3, d = b+c, loss = mse(d, target)
-        // Tests gradient accumulation: a receives grad from both b and c paths
-        let mut tape = Tape::new(dev());
-        let a = tape.leaf(&[1.0]); // scalar
-        let b = tape.scale(a, 2.0).unwrap(); // 2
-        let c = tape.scale(a, 3.0).unwrap(); // 3
-        let d = tape.add(b, c).unwrap(); // 5
-        let target = tape.leaf(&[0.0]);
-        let loss = tape.mse_loss(d, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f702_diamond_graph() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0]);
+        let v2 = v0.f689(v1, 2.0).unwrap();
+        let v3 = v0.f689(v1, 3.0).unwrap();
+        let v4 = v0.f686(v2, v3).unwrap();
+        let v5 = v0.f681(&[0.0]);
+        let v6 = v0.f695(v4, v5).unwrap();
+        v0.f702(v6).unwrap();
 
-        // d=5, MSE=25, d(MSE)/d(d)=10
-        // grad_b = 10, grad_c = 10
-        // grad_a from b path: 10*2 = 20
-        // grad_a from c path: 10*3 = 30
-        // total grad_a = 50
-        let ga = tape.read_grad(a).unwrap().unwrap();
-        assert_approx(&ga, &[50.0], 1e-3);
+        let v7 = v0.f683(v1).unwrap().unwrap();
+        f544(&v7, &[50.0], 1e-3);
     }
 
     #[test]
-    fn test_tape_leaf_data_roundtrip() {
-        let mut tape = Tape::new(dev());
-        let data = vec![1.5, -2.7, 0.0, 99.9];
-        let a = tape.leaf(&data);
-        assert_eq!(tape.read(a).unwrap(), data);
+    fn f681_data_roundtrip() {
+        let mut v0 = t506::f680(dev());
+        let v1 = vec![1.5, -2.7, 0.0, 99.9];
+        let v2 = v0.f681(&v1);
+        assert_eq!(v0.f682(v2).unwrap(), v1);
     }
 
     #[test]
-    fn test_tape_conv2d_forward() {
-        // 1x1x3x3 input, 1x1x1x1 weight=1, bias=0 -> output == input
-        let mut tape = Tape::new(dev());
-        let input_data: Vec<f32> = (1..=9).map(|x| x as f32).collect();
-        let inp = tape.leaf(&input_data);
-        let w = tape.leaf(&[1.0f32]);
-        let b = tape.leaf(&[0.0f32]);
-        let out = tape.conv2d(inp, w, Some(b), 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-        let result = tape.read(out).unwrap();
-        assert_approx(&result, &input_data, 1e-5);
+    fn f696_forward() {
+        let mut v0 = t506::f680(dev());
+        let v1: Vec<f32> = (1..=9).map(|x| x as f32).collect();
+        let v2 = v0.f681(&v1);
+        let v3 = v0.f681(&[1.0f32]);
+        let v4 = v0.f681(&[0.0f32]);
+        let v5 = v0.f696(v2, v3, Some(v4), 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v6 = v0.f682(v5).unwrap();
+        f544(&v6, &v1, 1e-5);
     }
 
     #[test]
-    fn test_tape_conv2d_backward_weight_grad() {
-        let eps = 1e-3f32;
-        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
-        let weight_data = vec![0.5f32];
+    fn f696_backward_weight_grad() {
+        let v0 = 1e-3f32;
+        let v1: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let v2 = vec![0.5f32];
 
-        let run = |w_val: f32| -> f32 {
-            let mut tape = Tape::new(dev());
-            let inp = tape.leaf(&input_data);
-            let w = tape.leaf(&[w_val]);
-            let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-            let target = tape.leaf(&vec![0.0f32; 9]);
-            let loss = tape.mse_loss(out, target).unwrap();
-            tape.read(loss).unwrap()[0]
+        let v3 = |v4: f32| -> f32 {
+            let mut v5 = t506::f680(dev());
+            let v6 = v5.f681(&v1);
+            let v7 = v5.f681(&[v4]);
+            let v8 = v5.f696(v6, v7, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let v9 = v5.f681(&vec![0.0f32; 9]);
+            let v10 = v5.f695(v8, v9).unwrap();
+            v5.f682(v10).unwrap()[0]
         };
 
-        let mut tape = Tape::new(dev());
-        let inp = tape.leaf(&input_data);
-        let w = tape.leaf(&weight_data);
-        let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-        let target = tape.leaf(&vec![0.0f32; 9]);
-        let loss = tape.mse_loss(out, target).unwrap();
-        tape.backward(loss).unwrap();
-        let gw = tape.read_grad(w).unwrap().unwrap();
+        let mut v11 = t506::f680(dev());
+        let v12 = v11.f681(&v1);
+        let v13 = v11.f681(&v2);
+        let v14 = v11.f696(v12, v13, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v15 = v11.f681(&vec![0.0f32; 9]);
+        let v16 = v11.f695(v14, v15).unwrap();
+        v11.f702(v16).unwrap();
+        let v17 = v11.f683(v13).unwrap().unwrap();
 
-        let numeric = (run(weight_data[0] + eps) - run(weight_data[0] - eps)) / (2.0 * eps);
-        assert!((gw[0] - numeric).abs() < 1e-2,
-            "weight grad: analytical={}, numeric={}", gw[0], numeric);
+        let v18 = (v3(v2[0] + v0) - v3(v2[0] - v0)) / (2.0 * v0);
+        assert!((v17[0] - v18).abs() < 1e-2,
+            "weight grad: analytical={}, numeric={}", v17[0], v18);
     }
 
     #[test]
-    fn test_tape_conv2d_backward_input_grad() {
-        let eps = 1e-3f32;
-        let input_data: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
-        let weight_data = vec![0.5f32];
+    fn f696_backward_input_grad() {
+        let v0 = 1e-3f32;
+        let v1: Vec<f32> = (1..=9).map(|x| x as f32 * 0.1).collect();
+        let v2 = vec![0.5f32];
 
-        let run = |x_val: f32, idx: usize| -> f32 {
-            let mut inp_data = input_data.clone();
-            inp_data[idx] = x_val;
-            let mut tape = Tape::new(dev());
-            let inp = tape.leaf(&inp_data);
-            let w = tape.leaf(&weight_data);
-            let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-            let target = tape.leaf(&vec![0.0f32; 9]);
-            let loss = tape.mse_loss(out, target).unwrap();
-            tape.read(loss).unwrap()[0]
+        let v3 = |v4: f32, v5: usize| -> f32 {
+            let mut v6 = v1.clone();
+            v6[v5] = v4;
+            let mut v7 = t506::f680(dev());
+            let v8 = v7.f681(&v6);
+            let v9 = v7.f681(&v2);
+            let v10 = v7.f696(v8, v9, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let v11 = v7.f681(&vec![0.0f32; 9]);
+            let v12 = v7.f695(v10, v11).unwrap();
+            v7.f682(v12).unwrap()[0]
         };
 
-        let mut tape = Tape::new(dev());
-        let inp = tape.leaf(&input_data);
-        let w = tape.leaf(&weight_data);
-        let out = tape.conv2d(inp, w, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-        let target = tape.leaf(&vec![0.0f32; 9]);
-        let loss = tape.mse_loss(out, target).unwrap();
-        tape.backward(loss).unwrap();
-        let gi = tape.read_grad(inp).unwrap().unwrap();
+        let mut v13 = t506::f680(dev());
+        let v14 = v13.f681(&v1);
+        let v15 = v13.f681(&v2);
+        let v16 = v13.f696(v14, v15, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v17 = v13.f681(&vec![0.0f32; 9]);
+        let v18 = v13.f695(v16, v17).unwrap();
+        v13.f702(v18).unwrap();
+        let v19 = v13.f683(v14).unwrap().unwrap();
 
-        for i in 0..9 {
-            let numeric = (run(input_data[i] + eps, i) - run(input_data[i] - eps, i)) / (2.0 * eps);
-            assert!((gi[i] - numeric).abs() < 1e-2,
-                "input grad[{i}]: analytical={}, numeric={}", gi[i], numeric);
+        for v20 in 0..9 {
+            let v21 = (v3(v1[v20] + v0, v20) - v3(v1[v20] - v0, v20)) / (2.0 * v0);
+            assert!((v19[v20] - v21).abs() < 1e-2,
+                "input grad[{v20}]: analytical={}, numeric={}", v19[v20], v21);
         }
     }
 
     #[test]
-    fn test_tape_conv2d_backward_bias_grad() {
-        // 1x1x2x2 input, 1x1x1x1 kernel, with bias
-        // out is 2x2, grad_bias = sum of grad_out over spatial
-        let mut tape = Tape::new(dev());
-        let inp = tape.leaf(&[1.0f32, 2.0, 3.0, 4.0]);
-        let w = tape.leaf(&[1.0f32]);
-        let b = tape.leaf(&[0.0f32]);
-        let out = tape.conv2d(inp, w, Some(b), 1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
-        let target = tape.leaf(&[0.0f32; 4]);
-        let loss = tape.mse_loss(out, target).unwrap();
-        tape.backward(loss).unwrap();
+    fn f696_backward_bias_grad() {
+        let mut v0 = t506::f680(dev());
+        let v1 = v0.f681(&[1.0f32, 2.0, 3.0, 4.0]);
+        let v2 = v0.f681(&[1.0f32]);
+        let v3 = v0.f681(&[0.0f32]);
+        let v4 = v0.f696(v1, v2, Some(v3), 1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v5 = v0.f681(&[0.0f32; 4]);
+        let v6 = v0.f695(v4, v5).unwrap();
+        v0.f702(v6).unwrap();
 
-        // output = input (1x1 kernel=1, bias=0), target=0
-        // MSE grad = 2*output/4 = output/2 = [0.5, 1.0, 1.5, 2.0]
-        // grad_bias = sum = 0.5 + 1.0 + 1.5 + 2.0 = 5.0
-        let gb = tape.read_grad(b).unwrap().unwrap();
-        assert_approx(&gb, &[5.0], 1e-3);
+        let v7 = v0.f683(v3).unwrap().unwrap();
+        f544(&v7, &[5.0], 1e-3);
     }
 }

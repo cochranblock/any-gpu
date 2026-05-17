@@ -1,9 +1,9 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
 // Benchmark: CPU naive matmul vs Vulkan compute shader matmul.
 
-use any_gpu::GpuDevice;
+use any_gpu::t500;
 use rand::Rng;
 use std::time::Instant;
 
@@ -21,7 +21,7 @@ fn cpu_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
     out
 }
 
-fn bench_size(dev: &GpuDevice, size: usize) {
+fn bench_size(dev: &t500, size: usize) {
     let m = size;
     let n = size;
     let k = size;
@@ -37,21 +37,20 @@ fn bench_size(dev: &GpuDevice, size: usize) {
 
     // GPU — include upload + compute + readback
     let t0 = Instant::now();
-    let a_gpu = dev.upload(&a_data);
-    let b_gpu = dev.upload(&b_data);
+    let a_gpu = dev.f502(&a_data);
+    let b_gpu = dev.f502(&b_data);
     let c_gpu = dev
-        .matmul(&a_gpu, &b_gpu, m as u32, n as u32, k as u32)
+        .f580(&a_gpu, &b_gpu, m as u32, n as u32, k as u32)
         .unwrap();
-    let gpu_result = dev.read(&c_gpu).unwrap();
+    let gpu_result = dev.f504(&c_gpu).unwrap();
     let gpu_total = t0.elapsed();
 
     // GPU — compute only (data already on device)
     let t0 = Instant::now();
     let c_gpu2 = dev
-        .matmul(&a_gpu, &b_gpu, m as u32, n as u32, k as u32)
+        .f580(&a_gpu, &b_gpu, m as u32, n as u32, k as u32)
         .unwrap();
-    // Force sync by reading one element
-    let _ = dev.read(&c_gpu2).unwrap();
+    let _ = dev.f504(&c_gpu2).unwrap();
     let gpu_compute = t0.elapsed();
 
     // Verify correctness (spot check)
@@ -82,10 +81,10 @@ fn main() {
     println!("any-gpu benchmark");
     println!("=================\n");
 
-    let dev = GpuDevice::gpu().expect("no GPU available");
+    let dev = t500::f500().expect("no GPU available");
     println!(
         "device: {} ({})\n",
-        dev.adapter_name, dev.backend
+        dev.s502, dev.s503
     );
 
     for &size in &[64, 128, 256, 512, 1024] {

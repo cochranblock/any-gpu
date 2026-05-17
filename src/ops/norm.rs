@@ -1,14 +1,116 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
-// Group normalization (two-pass: compute stats, then normalize+affine).
+// Group / layer / RMS normalization (two-pass: compute stats, then normalize+affine).
+// f600=group_norm, f601=group_norm_backward, f602=layer_norm, f603=rms_norm.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
+// --- LayerNorm / RMSNorm shared params ---
+// Both ops treat input as a 2-D matrix [rows, cols] and normalize along cols.
+// For a transformer with shape [batch, seq, d_model], pass rows = batch*seq, cols = d_model.
+
+/// t523 = LNParams. Uniform for layer_norm / rms_norm shaders.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GNStatsParams {
+struct t523 {
+    rows: u32,
+    cols: u32,
+    eps: f32,
+    _pad: u32,
+}
+
+// LayerNorm pass 1: one thread per row, compute mean and inv_std.
+const SHADER_LN_STATS: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> stats: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = gid.x;
+    if r >= p.rows { return; }
+    let base = r * p.cols;
+    var sum: f32 = 0.0;
+    var sum_sq: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        let v = input[base + c];
+        sum += v;
+        sum_sq += v * v;
+    }
+    let mean = sum / f32(p.cols);
+    let var_ = sum_sq / f32(p.cols) - mean * mean;
+    stats[r * 2u] = mean;
+    stats[r * 2u + 1u] = 1.0 / sqrt(var_ + p.eps);
+}
+";
+
+// LayerNorm pass 2: one thread per element, apply normalize + affine.
+const SHADER_LN_NORM: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> stats: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma: array<f32>;
+@group(0) @binding(4) var<storage, read> beta: array<f32>;
+@group(0) @binding(5) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.rows * p.cols;
+    if idx >= total { return; }
+    let r = idx / p.cols;
+    let c = idx % p.cols;
+    let mean = stats[r * 2u];
+    let inv_std = stats[r * 2u + 1u];
+    out[idx] = (input[idx] - mean) * inv_std * gamma[c] + beta[c];
+}
+";
+
+// RMSNorm pass 1: one thread per row, compute inv_rms = 1/sqrt(mean(x^2) + eps).
+const SHADER_RMS_STATS: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> stats: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = gid.x;
+    if r >= p.rows { return; }
+    let base = r * p.cols;
+    var sum_sq: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        let v = input[base + c];
+        sum_sq += v * v;
+    }
+    stats[r] = 1.0 / sqrt(sum_sq / f32(p.cols) + p.eps);
+}
+";
+
+// RMSNorm pass 2: one thread per element, x * inv_rms * weight (no bias).
+const SHADER_RMS_NORM: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> stats: array<f32>;
+@group(0) @binding(3) var<storage, read> weight: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.rows * p.cols;
+    if idx >= total { return; }
+    let r = idx / p.cols;
+    let c = idx % p.cols;
+    out[idx] = input[idx] * stats[r] * weight[c];
+}
+";
+
+/// t522 = GNStatsParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t522 {
     batch: u32,
     channels: u32,
     spatial: u32,
@@ -204,245 +306,312 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-impl GpuDevice {
-    /// Group normalization: input[N,C,*spatial] with C/groups groups.
+impl t500 {
+    /// f600 = group_norm. input[N,C,*spatial] with C/groups groups.
     /// gamma[C] and beta[C] are learnable affine params.
-    pub fn group_norm(
+    pub fn f600(
         &self,
-        input: &GpuBuffer,
-        gamma: &GpuBuffer,
-        beta: &GpuBuffer,
-        batch: u32, channels: u32, spatial: u32, groups: u32,
-        eps: f32,
-    ) -> Result<GpuBuffer> {
-        ensure!(input.len == (batch * channels * spatial) as usize);
-        ensure!(gamma.len == channels as usize);
-        ensure!(beta.len == channels as usize);
-        ensure!(channels % groups == 0, "channels must be divisible by groups");
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+        p7: f32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p3 * p4 * p5) as usize);
+        ensure!(p1.s507 == p4 as usize);
+        ensure!(p2.s507 == p4 as usize);
+        ensure!(p4 % p6 == 0, "channels must be divisible by groups");
 
-        let cpg = channels / groups;
-        let params = GNStatsParams { batch, channels, spatial, groups, channels_per_group: cpg, eps, _pad: [0; 2] };
+        let v0 = p4 / p6;
+        let v1 = t522 { batch: p3, channels: p4, spatial: p5, groups: p6, channels_per_group: v0, eps: p7, _pad: [0; 2] };
 
         // Pass 1: compute per-group mean and inv_std
-        let stats = self.alloc((batch * groups * 2) as usize);
-        self.dispatch_shader(
+        let v2 = self.f503((p3 * p6 * 2) as usize);
+        self.f543(
             SHADER_GN_STATS, Some("gn_stats"),
-            &params, &[input], &stats,
-            super::dispatch_1d(batch * groups),
+            &v1, &[p0], &v2,
+            super::f540(p3 * p6),
         );
 
         // Pass 2: normalize + affine
-        let total = batch * channels * spatial;
-        let out = self.alloc(total as usize);
+        let v3 = p3 * p4 * p5;
+        let v4 = self.f503(v3 as usize);
 
         // For pass 2 we need 5 storage bindings + params. Use raw dispatch.
-        let params_buf = self.upload_uniform(&params);
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let v5 = self.f506(&v1);
+        let v6 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gn_norm"),
             source: wgpu::ShaderSource::Wgsl(SHADER_GN_NORM.into()),
         });
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let v7 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("gn_norm"),
             layout: None,
-            module: &shader,
+            module: &v6,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let v8 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &pipeline.get_bind_group_layout(0),
+            layout: &v7.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: stats.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: gamma.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: beta.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: out.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: v5.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: v2.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: p1.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: p2.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: v4.s505.as_entire_binding() },
             ],
         });
-        let (wx, wy, wz) = super::dispatch_1d(total);
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let (v9, v10, v11) = super::f540(v3);
+        let mut v12 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut v13 = v12.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("gn_norm"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wx, wy, wz);
+            v13.set_pipeline(&v7);
+            v13.set_bind_group(0, &v8, &[]);
+            v13.dispatch_workgroups(v9, v10, v11);
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.s501.submit(Some(v12.finish()));
 
-        Ok(out)
+        Ok(v4)
     }
 
-    /// Backward pass for group_norm. Returns (d_input, d_gamma, d_beta).
-    /// Recomputes stats from input internally to avoid storing them on the tape.
-    pub fn group_norm_backward(
+    /// f602 = layer_norm. input[rows, cols] normalized along cols with learnable
+    /// gamma/beta[cols]. For a transformer activation [batch, seq, d_model],
+    /// pass rows = batch*seq, cols = d_model.
+    pub fn f602(
         &self,
-        grad_out: &GpuBuffer,
-        input: &GpuBuffer,
-        gamma: &GpuBuffer,
-        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
-    ) -> Result<(GpuBuffer, GpuBuffer, GpuBuffer)> {
-        ensure!(input.len == (batch * channels * spatial) as usize);
-        ensure!(grad_out.len == (batch * channels * spatial) as usize);
-        ensure!(gamma.len == channels as usize);
-        ensure!(channels % groups == 0);
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32, p4: u32, p5: f32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p3 * p4) as usize, "layer_norm: input size mismatch");
+        ensure!(p1.s507 == p4 as usize, "layer_norm: gamma must be [cols]");
+        ensure!(p2.s507 == p4 as usize, "layer_norm: beta must be [cols]");
 
-        let cpg = channels / groups;
-        let params = GNStatsParams {
-            batch, channels, spatial, groups,
-            channels_per_group: cpg, eps, _pad: [0; 2],
+        let v0 = t523 { rows: p3, cols: p4, eps: p5, _pad: 0 };
+
+        // Pass 1: per-row mean and inv_std
+        let v1 = self.f503((p3 * 2) as usize);
+        self.f543(
+            SHADER_LN_STATS, Some("ln_stats"),
+            &v0, &[p0], &v1,
+            super::f540(p3),
+        );
+
+        // Pass 2: normalize + affine
+        let v2 = p3 * p4;
+        let v3 = self.f503(v2 as usize);
+        self.f543(
+            SHADER_LN_NORM, Some("ln_norm"),
+            &v0, &[p0, &v1, p1, p2], &v3,
+            super::f540(v2),
+        );
+        Ok(v3)
+    }
+
+    /// f603 = rms_norm. input[rows, cols] scaled by 1/sqrt(mean(x^2) + eps),
+    /// then per-col weight. Used by Llama / Mistral / Qwen / Gemma. No bias term.
+    pub fn f603(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: u32, p3: u32, p4: f32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p3) as usize, "rms_norm: input size mismatch");
+        ensure!(p1.s507 == p3 as usize, "rms_norm: weight must be [cols]");
+
+        let v0 = t523 { rows: p2, cols: p3, eps: p4, _pad: 0 };
+
+        // Pass 1: per-row inv_rms
+        let v1 = self.f503(p2 as usize);
+        self.f543(
+            SHADER_RMS_STATS, Some("rms_stats"),
+            &v0, &[p0], &v1,
+            super::f540(p2),
+        );
+
+        // Pass 2: normalize + per-col weight
+        let v2 = p2 * p3;
+        let v3 = self.f503(v2 as usize);
+        self.f543(
+            SHADER_RMS_NORM, Some("rms_norm"),
+            &v0, &[p0, &v1, p1], &v3,
+            super::f540(v2),
+        );
+        Ok(v3)
+    }
+
+    /// f601 = group_norm_backward. Backward pass for f600. Returns (d_input, d_gamma, d_beta).
+    /// Recomputes stats from input internally to avoid storing them on the tape.
+    pub fn f601(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32, p4: u32, p5: u32, p6: u32, p7: f32,
+    ) -> Result<(t501, t501, t501)> {
+        ensure!(p1.s507 == (p3 * p4 * p5) as usize);
+        ensure!(p0.s507 == (p3 * p4 * p5) as usize);
+        ensure!(p2.s507 == p4 as usize);
+        ensure!(p4 % p6 == 0);
+
+        let v0 = p4 / p6;
+        let v1 = t522 {
+            batch: p3, channels: p4, spatial: p5, groups: p6,
+            channels_per_group: v0, eps: p7, _pad: [0; 2],
         };
 
         // Pass A: recompute stats per (n, g) (reuse forward stats shader).
-        let stats = self.alloc((batch * groups * 2) as usize);
-        self.dispatch_shader(
+        let v2 = self.f503((p3 * p6 * 2) as usize);
+        self.f543(
             SHADER_GN_STATS, Some("gn_back_stats"),
-            &params, &[input], &stats,
-            super::dispatch_1d(batch * groups),
+            &v1, &[p1], &v2,
+            super::f540(p3 * p6),
         );
 
         // Pass B: compute reduction sums (s1, s2) per (n, g). 5 storage bindings → raw dispatch.
-        let sums = self.alloc((batch * groups * 2) as usize);
+        let v3 = self.f503((p3 * p6 * 2) as usize);
         {
-            let params_buf = self.upload_uniform(&params);
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let v4 = self.f506(&v1);
+            let v5 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gn_back_sums"),
                 source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_SUMS.into()),
             });
-            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let v6 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("gn_back_sums"),
                 layout: None,
-                module: &shader,
+                module: &v5,
                 entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let v7 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(0),
+                layout: &v6.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: gamma.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: stats.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: sums.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: v4.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: p0.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: p2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: v3.s505.as_entire_binding() },
                 ],
             });
-            let (wx, wy, wz) = super::dispatch_1d(batch * groups);
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let (v8, v9, v10) = super::f540(p3 * p6);
+            let mut v11 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut v12 = v11.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("gn_back_sums"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(wx, wy, wz);
+                v12.set_pipeline(&v6);
+                v12.set_bind_group(0, &v7, &[]);
+                v12.dispatch_workgroups(v8, v9, v10);
             }
-            self.queue.submit(Some(encoder.finish()));
+            self.s501.submit(Some(v11.finish()));
         }
 
         // Pass C: compute d_input per element. 6 storage bindings → raw dispatch.
-        let total = batch * channels * spatial;
-        let d_input = self.alloc(total as usize);
+        let v13 = p3 * p4 * p5;
+        let v14 = self.f503(v13 as usize);
         {
-            let params_buf = self.upload_uniform(&params);
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let v15 = self.f506(&v1);
+            let v16 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gn_back_dinput"),
                 source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_DINPUT.into()),
             });
-            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let v17 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("gn_back_dinput"),
                 layout: None,
-                module: &shader,
+                module: &v16,
                 entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let v18 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(0),
+                layout: &v17.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: gamma.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: stats.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: sums.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: d_input.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: v15.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: p0.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: p2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: v3.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: v14.s505.as_entire_binding() },
                 ],
             });
-            let (wx, wy, wz) = super::dispatch_1d(total);
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let (v19, v20, v21) = super::f540(v13);
+            let mut v22 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut v23 = v22.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("gn_back_dinput"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(wx, wy, wz);
+                v23.set_pipeline(&v17);
+                v23.set_bind_group(0, &v18, &[]);
+                v23.dispatch_workgroups(v19, v20, v21);
             }
-            self.queue.submit(Some(encoder.finish()));
+            self.s501.submit(Some(v22.finish()));
         }
 
         // Pass D: compute d_gamma and d_beta per channel. 5 storage bindings → raw dispatch.
-        let d_gamma = self.alloc(channels as usize);
-        let d_beta = self.alloc(channels as usize);
+        let v24 = self.f503(p4 as usize);
+        let v25 = self.f503(p4 as usize);
         {
-            let params_buf = self.upload_uniform(&params);
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let v26 = self.f506(&v1);
+            let v27 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gn_back_daffine"),
                 source: wgpu::ShaderSource::Wgsl(SHADER_GN_BACK_DAFFINE.into()),
             });
-            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let v28 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("gn_back_daffine"),
                 layout: None,
-                module: &shader,
+                module: &v27,
                 entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let v29 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(0),
+                layout: &v28.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: input.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: grad_out.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: stats.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: d_gamma.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: d_beta.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: v26.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: p0.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: v2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v24.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: v25.s505.as_entire_binding() },
                 ],
             });
-            let (wx, wy, wz) = super::dispatch_1d(channels);
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let (v30, v31, v32) = super::f540(p4);
+            let mut v33 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut v34 = v33.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("gn_back_daffine"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(wx, wy, wz);
+                v34.set_pipeline(&v28);
+                v34.set_bind_group(0, &v29, &[]);
+                v34.dispatch_workgroups(v30, v31, v32);
             }
-            self.queue.submit(Some(encoder.finish()));
+            self.s501.submit(Some(v33.finish()));
         }
 
-        Ok((d_input, d_gamma, d_beta))
+        Ok((v14, v24, v25))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    use crate::ops::f544;
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     // CPU reference group_norm
     fn cpu_group_norm(
@@ -480,79 +649,252 @@ mod tests {
     }
 
     #[test]
-    fn test_group_norm_per_channel() {
+    fn f600_per_channel() {
         // groups=channels: each channel is its own group
-        let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
-        let gamma = dev().upload(&[1.0, 1.0]);
-        let beta = dev().upload(&[0.0, 0.0]);
-        let result = dev().read(&dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
-        assert_approx(&result, &[-1.0, 1.0, -1.0, 1.0], 1e-3);
+        let v0 = dev().f502(&[1.0, 3.0, 2.0, 4.0]);
+        let v1 = dev().f502(&[1.0, 1.0]);
+        let v2 = dev().f502(&[0.0, 0.0]);
+        let v3 = dev().f504(&dev().f600(&v0, &v1, &v2, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
+        f544(&v3, &[-1.0, 1.0, -1.0, 1.0], 1e-3);
     }
 
     #[test]
-    fn test_group_norm_single_group() {
+    fn f600_single_group() {
         // groups=1: all channels normalized together
-        // 1 batch, 4 channels, 1 spatial -> normalize all 4 values as one group
-        let data = vec![1.0, 2.0, 3.0, 4.0];
-        let gamma = vec![1.0; 4];
-        let beta = vec![0.0; 4];
-        let expected = cpu_group_norm(&data, &gamma, &beta, 1, 4, 1, 1, 1e-5);
-        let result = dev().read(&dev().group_norm(
-            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+        let v0 = vec![1.0, 2.0, 3.0, 4.0];
+        let v1 = vec![1.0; 4];
+        let v2 = vec![0.0; 4];
+        let v3 = cpu_group_norm(&v0, &v1, &v2, 1, 4, 1, 1, 1e-5);
+        let v4 = dev().f504(&dev().f600(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
             1, 4, 1, 1, 1e-5
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v4, &v3, 1e-3);
     }
 
     #[test]
-    fn test_group_norm_with_affine() {
-        let input = dev().upload(&[1.0, 3.0, 2.0, 4.0]);
-        let gamma = dev().upload(&[2.0, 0.5]);
-        let beta = dev().upload(&[1.0, -1.0]);
-        let result = dev().read(&dev().group_norm(&input, &gamma, &beta, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
-        assert_approx(&result, &[-1.0, 3.0, -1.5, -0.5], 1e-3);
+    fn f600_with_affine() {
+        let v0 = dev().f502(&[1.0, 3.0, 2.0, 4.0]);
+        let v1 = dev().f502(&[2.0, 0.5]);
+        let v2 = dev().f502(&[1.0, -1.0]);
+        let v3 = dev().f504(&dev().f600(&v0, &v1, &v2, 1, 2, 2, 2, 1e-5).unwrap()).unwrap();
+        f544(&v3, &[-1.0, 3.0, -1.5, -0.5], 1e-3);
     }
 
     #[test]
-    fn test_group_norm_batched_vs_cpu() {
-        // batch=2, channels=4, spatial=3, groups=2
-        let data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 - 0.5).collect();
-        let gamma = vec![1.0, 2.0, 0.5, 1.5];
-        let beta = vec![0.0, 1.0, -1.0, 0.5];
-        let expected = cpu_group_norm(&data, &gamma, &beta, 2, 4, 3, 2, 1e-5);
-        let result = dev().read(&dev().group_norm(
-            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+    fn f600_batched_vs_cpu() {
+        let v0: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1 - 0.5).collect();
+        let v1 = vec![1.0, 2.0, 0.5, 1.5];
+        let v2 = vec![0.0, 1.0, -1.0, 0.5];
+        let v3 = cpu_group_norm(&v0, &v1, &v2, 2, 4, 3, 2, 1e-5);
+        let v4 = dev().f504(&dev().f600(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
             2, 4, 3, 2, 1e-5
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v4, &v3, 1e-3);
     }
 
     #[test]
-    fn test_group_norm_constant_input() {
-        // All same values -> normalized to 0 (var=0, eps prevents div by zero)
-        let data = vec![5.0; 8]; // 1 batch, 2 channels, 4 spatial, 2 groups
-        let gamma = vec![1.0, 1.0];
-        let beta = vec![0.0, 0.0];
-        let result = dev().read(&dev().group_norm(
-            &dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta),
+    fn f600_constant_input() {
+        let v0 = vec![5.0; 8];
+        let v1 = vec![1.0, 1.0];
+        let v2 = vec![0.0, 0.0];
+        let v3 = dev().f504(&dev().f600(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
             1, 2, 4, 2, 1e-5
         ).unwrap()).unwrap();
-        assert_approx(&result, &[0.0; 8], 1e-3);
+        f544(&v3, &[0.0; 8], 1e-3);
     }
 
     #[test]
-    fn test_group_norm_channels_not_divisible() {
-        let data = vec![1.0; 5]; // 5 channels, groups=2 -> not divisible
-        let gamma = vec![1.0; 5];
-        let beta = vec![0.0; 5];
-        assert!(dev().group_norm(&dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta), 1, 5, 1, 2, 1e-5).is_err());
+    fn f600_channels_not_divisible() {
+        let v0 = vec![1.0; 5];
+        let v1 = vec![1.0; 5];
+        let v2 = vec![0.0; 5];
+        assert!(dev().f600(&dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 5, 1, 2, 1e-5).is_err());
     }
 
     #[test]
-    fn test_group_norm_input_size_mismatch() {
-        let data = vec![1.0; 10]; // 10 elements but batch*channels*spatial = 1*4*4 = 16
-        let gamma = vec![1.0; 4];
-        let beta = vec![0.0; 4];
-        assert!(dev().group_norm(&dev().upload(&data), &dev().upload(&gamma), &dev().upload(&beta), 1, 4, 4, 2, 1e-5).is_err());
+    fn f600_input_size_mismatch() {
+        let v0 = vec![1.0; 10];
+        let v1 = vec![1.0; 4];
+        let v2 = vec![0.0; 4];
+        assert!(dev().f600(&dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 4, 4, 2, 1e-5).is_err());
+    }
+
+    // --- LayerNorm tests ---
+
+    fn cpu_layer_norm(input: &[f32], gamma: &[f32], beta: &[f32], rows: usize, cols: usize, eps: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; input.len()];
+        for r in 0..rows {
+            let base = r * cols;
+            let mean: f32 = input[base..base + cols].iter().sum::<f32>() / cols as f32;
+            let var: f32 = input[base..base + cols].iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / cols as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+            for c in 0..cols {
+                out[base + c] = (input[base + c] - mean) * inv_std * gamma[c] + beta[c];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f602_unit_affine() {
+        let v0 = vec![1.0f32, 3.0, 5.0, 7.0];
+        let v1 = vec![1.0, 1.0];
+        let v2 = vec![0.0, 0.0];
+        let v3 = dev().f504(&dev().f602(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            2, 2, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v3, &[-1.0, 1.0, -1.0, 1.0], 1e-3);
+    }
+
+    #[test]
+    fn f602_with_affine() {
+        let v0 = vec![1.0f32, 3.0];
+        let v1 = vec![2.0, 0.5];
+        let v2 = vec![1.0, -1.0];
+        let v3 = cpu_layer_norm(&v0, &v1, &v2, 1, 2, 1e-5);
+        let v4 = dev().f504(&dev().f602(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 2, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v4, &v3, 1e-3);
+    }
+
+    #[test]
+    fn f602_transformer_shape() {
+        let v0 = 4;
+        let v1 = 16;
+        let v2: Vec<f32> = (0..v0 * v1).map(|i| (i as f32) * 0.05 - 1.0).collect();
+        let v3: Vec<f32> = (0..v1).map(|i| 0.5 + (i as f32) * 0.1).collect();
+        let v4: Vec<f32> = (0..v1).map(|i| -0.5 + (i as f32) * 0.03).collect();
+        let v5 = cpu_layer_norm(&v2, &v3, &v4, v0, v1, 1e-5);
+        let v6 = dev().f504(&dev().f602(
+            &dev().f502(&v2), &dev().f502(&v3), &dev().f502(&v4),
+            v0 as u32, v1 as u32, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v6, &v5, 1e-3);
+    }
+
+    #[test]
+    fn f602_constant_input() {
+        let v0 = vec![7.0f32; 8];
+        let v1 = vec![1.0; 4];
+        let v2 = vec![0.0; 4];
+        let v3 = dev().f504(&dev().f602(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            2, 4, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v3, &[0.0; 8], 1e-3);
+    }
+
+    #[test]
+    fn f602_size_mismatch() {
+        let v0 = vec![1.0f32; 8];
+        let v1 = vec![1.0; 4];
+        let v2 = vec![0.0; 4];
+        assert!(dev().f602(&dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 3, 4, 1e-5).is_err());
+    }
+
+    // --- RMSNorm tests ---
+
+    fn cpu_rms_norm(input: &[f32], weight: &[f32], rows: usize, cols: usize, eps: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; input.len()];
+        for r in 0..rows {
+            let base = r * cols;
+            let mean_sq: f32 = input[base..base + cols].iter().map(|&x| x * x).sum::<f32>() / cols as f32;
+            let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+            for c in 0..cols {
+                out[base + c] = input[base + c] * inv_rms * weight[c];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f603_unit_weight() {
+        let v0 = vec![3.0f32, 4.0];
+        let v1 = vec![1.0, 1.0];
+        let v2 = cpu_rms_norm(&v0, &v1, 1, 2, 1e-5);
+        let v3 = dev().f504(&dev().f603(
+            &dev().f502(&v0), &dev().f502(&v1), 1, 2, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-3);
+    }
+
+    #[test]
+    fn f603_with_weight() {
+        let v0 = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let v1 = vec![2.0, 0.5, 1.5];
+        let v2 = cpu_rms_norm(&v0, &v1, 2, 3, 1e-5);
+        let v3 = dev().f504(&dev().f603(
+            &dev().f502(&v0), &dev().f502(&v1), 2, 3, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-3);
+    }
+
+    #[test]
+    fn f603_llama_shape() {
+        let v0 = 8;
+        let v1 = 64;
+        let v2: Vec<f32> = (0..v0 * v1).map(|i| ((i as f32) * 0.013 - 0.5).sin()).collect();
+        let v3: Vec<f32> = (0..v1).map(|i| 0.9 + (i as f32) * 0.001).collect();
+        let v4 = cpu_rms_norm(&v2, &v3, v0, v1, 1e-6);
+        let v5 = dev().f504(&dev().f603(
+            &dev().f502(&v2), &dev().f502(&v3), v0 as u32, v1 as u32, 1e-6,
+        ).unwrap()).unwrap();
+        f544(&v5, &v4, 1e-3);
+    }
+
+    #[test]
+    fn f603_zero_input() {
+        let v0 = vec![0.0f32; 6];
+        let v1 = vec![1.0; 3];
+        let v2 = dev().f504(&dev().f603(
+            &dev().f502(&v0), &dev().f502(&v1), 2, 3, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&v2, &[0.0; 6], 1e-3);
+    }
+
+    #[test]
+    fn f603_known_analytical_values() {
+        // For input [3, 4] with weight [1, 1], the RMS is sqrt((9+16)/2) = sqrt(12.5).
+        // Output: [3/sqrt(12.5), 4/sqrt(12.5)] = [0.84852814, 1.13137085].
+        // Computed at f64 precision from the math definition — independent of both
+        // our cpu_rms_norm helper and the shader (which use the same formula).
+        let v0 = vec![3.0f32, 4.0];
+        let v1 = vec![1.0f32, 1.0];
+        let v2 = dev().f504(&dev().f603(
+            &dev().f502(&v0), &dev().f502(&v1), 1, 2, 0.0,
+        ).unwrap()).unwrap();
+        f544(&v2, &[0.84852814, 1.13137085], 1e-4);
+    }
+
+    #[test]
+    fn f603_known_with_per_col_weight() {
+        // Input [1, 1, 1, 1] (rms = 1), weight [0.5, 1.0, 2.0, 4.0].
+        // Output = input * 1 * weight = weight directly.
+        let v0 = vec![1.0f32; 4];
+        let v1 = vec![0.5f32, 1.0, 2.0, 4.0];
+        let v2 = dev().f504(&dev().f603(
+            &dev().f502(&v0), &dev().f502(&v1), 1, 4, 0.0,
+        ).unwrap()).unwrap();
+        f544(&v2, &[0.5, 1.0, 2.0, 4.0], 1e-5);
+    }
+
+    #[test]
+    fn f603_size_mismatch() {
+        let v0 = vec![1.0f32; 8];
+        let v1 = vec![1.0; 4];
+        assert!(dev().f603(&dev().f502(&v0), &dev().f502(&v1), 3, 4, 1e-5).is_err());
+    }
+
+    #[test]
+    fn f603_weight_mismatch() {
+        let v0 = vec![1.0f32; 12];
+        let v1 = vec![1.0; 3];
+        assert!(dev().f603(&dev().f502(&v0), &dev().f502(&v1), 3, 4, 1e-5).is_err());
     }
 }

@@ -1,14 +1,16 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
 // Nearest-neighbor upsampling for UNet decoder path.
+// f660=upsample_nearest2d, f661=upsample_nearest2d_backward.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
+/// t526 = UpsampleParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct UpsampleParams {
+struct t526 {
     batch: u32,
     channels: u32,
     in_h: u32,
@@ -45,7 +47,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 ";
 
 // Backward: each input pixel accumulates gradients from all output pixels that map to it.
-// Assumes integer scale factors (as used in the forward pass for exact 2x, 3x upsampling).
 const SHADER_UPSAMPLE_NEAREST_BACKWARD: &str = "
 struct P { batch: u32, channels: u32, in_h: u32, in_w: u32, out_h: u32, out_w: u32, scale_h: u32, scale_w: u32, }
 @group(0) @binding(0) var<uniform> p: P;
@@ -62,7 +63,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c  = (idx / (p.in_w * p.in_h)) % p.channels;
     let n  = idx / (p.in_w * p.in_h * p.channels);
 
-    // For integer scale factors, forward maps (ih, iw) -> scale_h*scale_w output pixels.
     var sum: f32 = 0.0;
     let base = n * (p.channels * p.out_h * p.out_w) + c * (p.out_h * p.out_w);
     for (var dy: u32 = 0u; dy < p.scale_h; dy++) {
@@ -76,9 +76,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+/// t527 = UpsampleBackwardParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct UpsampleBackwardParams {
+struct t527 {
     batch: u32,
     channels: u32,
     in_h: u32,
@@ -89,57 +90,57 @@ struct UpsampleBackwardParams {
     scale_w: u32,
 }
 
-impl GpuDevice {
-    /// Nearest-neighbor 2D upsample. Input: [N,C,H,W], output: [N,C,H*scale_h,W*scale_w].
-    pub fn upsample_nearest2d(
+impl t500 {
+    /// f660 = upsample_nearest2d. Input: [N,C,H,W], output: [N,C,H*scale_h,W*scale_w].
+    pub fn f660(
         &self,
-        input: &GpuBuffer,
-        batch: u32, channels: u32, in_h: u32, in_w: u32,
-        scale_h: u32, scale_w: u32,
-    ) -> Result<GpuBuffer> {
-        ensure!(input.len == (batch * channels * in_h * in_w) as usize);
-        let out_h = in_h * scale_h;
-        let out_w = in_w * scale_w;
-        let total = batch * channels * out_h * out_w;
-        let out = self.alloc(total as usize);
-        let params = UpsampleParams { batch, channels, in_h, in_w, out_h, out_w, _pad: [0; 2] };
-        self.dispatch_shader(
+        p0: &t501,
+        p1: u32, p2: u32, p3: u32, p4: u32,
+        p5: u32, p6: u32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p1 * p2 * p3 * p4) as usize);
+        let v0 = p3 * p5;
+        let v1 = p4 * p6;
+        let v2 = p1 * p2 * v0 * v1;
+        let v3 = self.f503(v2 as usize);
+        let v4 = t526 { batch: p1, channels: p2, in_h: p3, in_w: p4, out_h: v0, out_w: v1, _pad: [0; 2] };
+        self.f543(
             SHADER_UPSAMPLE_NEAREST, Some("upsample"),
-            &params, &[input], &out,
-            super::dispatch_1d(total),
+            &v4, &[p0], &v3,
+            super::f540(v2),
         );
-        Ok(out)
+        Ok(v3)
     }
 
-    /// Backward pass for nearest-neighbor upsample. Each input pixel accumulates
-    /// gradients from the scale_h*scale_w output block that mapped to it.
-    pub fn upsample_nearest2d_backward(
+    /// f661 = upsample_nearest2d_backward. Each input pixel accumulates gradients
+    /// from the scale_h*scale_w output block that mapped to it.
+    pub fn f661(
         &self,
-        grad_out: &GpuBuffer,
-        batch: u32, channels: u32, in_h: u32, in_w: u32,
-        scale_h: u32, scale_w: u32,
-    ) -> Result<GpuBuffer> {
-        let out_h = in_h * scale_h;
-        let out_w = in_w * scale_w;
-        ensure!(grad_out.len == (batch * channels * out_h * out_w) as usize);
-        let total = batch * channels * in_h * in_w;
-        let grad_in = self.alloc(total as usize);
-        let params = UpsampleBackwardParams {
-            batch, channels, in_h, in_w, out_h, out_w, scale_h, scale_w,
+        p0: &t501,
+        p1: u32, p2: u32, p3: u32, p4: u32,
+        p5: u32, p6: u32,
+    ) -> Result<t501> {
+        let v0 = p3 * p5;
+        let v1 = p4 * p6;
+        ensure!(p0.s507 == (p1 * p2 * v0 * v1) as usize);
+        let v2 = p1 * p2 * p3 * p4;
+        let v3 = self.f503(v2 as usize);
+        let v4 = t527 {
+            batch: p1, channels: p2, in_h: p3, in_w: p4, out_h: v0, out_w: v1, scale_h: p5, scale_w: p6,
         };
-        self.dispatch_shader(
+        self.f543(
             SHADER_UPSAMPLE_NEAREST_BACKWARD, Some("upsample_back"),
-            &params, &[grad_out], &grad_in,
-            super::dispatch_1d(total),
+            &v4, &[p0], &v3,
+            super::f540(v2),
         );
-        Ok(grad_in)
+        Ok(v3)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     // CPU reference upsample
     fn cpu_upsample(input: &[f32], batch: usize, ch: usize, h: usize, w: usize, sh: usize, sw: usize) -> Vec<f32> {
@@ -159,10 +160,10 @@ mod tests {
     }
 
     #[test]
-    fn test_upsample_2x() {
-        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let result = dev().read(&dev().upsample_nearest2d(&input, 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
-        assert_eq!(result, vec![
+    fn f660_2x() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f504(&dev().f660(&v0, 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(v1, vec![
             1.0, 1.0, 2.0, 2.0,
             1.0, 1.0, 2.0, 2.0,
             3.0, 3.0, 4.0, 4.0,
@@ -171,27 +172,24 @@ mod tests {
     }
 
     #[test]
-    fn test_upsample_3x_vs_cpu() {
-        // Non-power-of-2 scale
-        let data: Vec<f32> = (1..=6).map(|x| x as f32).collect(); // 1x1x2x3
-        let expected = cpu_upsample(&data, 1, 1, 2, 3, 3, 3);
-        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&data), 1, 1, 2, 3, 3, 3).unwrap()).unwrap();
-        assert_eq!(result, expected);
+    fn f660_3x_vs_cpu() {
+        let v0: Vec<f32> = (1..=6).map(|x| x as f32).collect();
+        let v1 = cpu_upsample(&v0, 1, 1, 2, 3, 3, 3);
+        let v2 = dev().f504(&dev().f660(&dev().f502(&v0), 1, 1, 2, 3, 3, 3).unwrap()).unwrap();
+        assert_eq!(v2, v1);
     }
 
     #[test]
-    fn test_upsample_batched_multichannel_vs_cpu() {
-        // batch=2, channels=3, 2x2 spatial, scale 2x
-        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
-        let expected = cpu_upsample(&data, 2, 3, 2, 2, 2, 2);
-        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&data), 2, 3, 2, 2, 2, 2).unwrap()).unwrap();
-        assert_eq!(result, expected);
+    fn f660_batched_multichannel_vs_cpu() {
+        let v0: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let v1 = cpu_upsample(&v0, 2, 3, 2, 2, 2, 2);
+        let v2 = dev().f504(&dev().f660(&dev().f502(&v0), 2, 3, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(v2, v1);
     }
 
     #[test]
-    fn test_upsample_1x1() {
-        // 1x1 spatial -> 3x3 spatial
-        let result = dev().read(&dev().upsample_nearest2d(&dev().upload(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap()).unwrap();
-        assert_eq!(result, vec![7.0; 9]);
+    fn f660_1x1() {
+        let v0 = dev().f504(&dev().f660(&dev().f502(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap()).unwrap();
+        assert_eq!(v0, vec![7.0; 9]);
     }
 }

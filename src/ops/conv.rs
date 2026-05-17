@@ -1,16 +1,18 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
-// Matmul, batched matmul, conv2d, transpose_conv2d.
+// f580=matmul, f581=batch_matmul, f582=conv2d, f583=conv_transpose2d,
+// f584=conv2d_grad_weight, f585=conv2d_grad_bias.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
 // --- Matmul ---
 
+/// t528 = MatmulDims. Dims uniform for tiled matmul.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct MatmulDims {
+struct t528 {
     m: u32,
     n: u32,
     k: u32,
@@ -79,9 +81,10 @@ fn main(
 
 // --- Batched Matmul ---
 
+/// t529 = BatchMatmulDims. Dims uniform for batched matmul.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct BatchMatmulDims {
+struct t529 {
     batch: u32,
     m: u32,
     n: u32,
@@ -149,9 +152,10 @@ fn main(
 
 // --- Conv2d ---
 
+/// t530 = Conv2dParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Conv2dParams {
+struct t530 {
     batch: u32,
     in_c: u32,
     out_c: u32,
@@ -221,9 +225,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // --- TransposeConv2d ---
 
+/// t531 = ConvTranspose2dParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ConvTranspose2dParams {
+struct t531 {
     batch: u32,
     in_c: u32,
     out_c: u32,
@@ -303,9 +308,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // --- Conv2d gradient shaders ---
 
+/// t532 = Conv2dGradParams. Used for both grad_weight and matches forward layout.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Conv2dGradParams {
+struct t532 {
     batch: u32,
     in_c: u32,
     out_c: u32,
@@ -324,9 +330,10 @@ struct Conv2dGradParams {
     groups: u32,
 }
 
+/// t533 = Conv2dGradBiasParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Conv2dGradBiasParams {
+struct t533 {
     batch: u32,
     out_c: u32,
     out_h: u32,
@@ -411,165 +418,168 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-impl GpuDevice {
-    /// Matrix multiply: A(m,k) x B(k,n) = C(m,n). Row-major layout.
-    pub fn matmul(&self, a: &GpuBuffer, b: &GpuBuffer, m: u32, n: u32, k: u32) -> Result<GpuBuffer> {
-        ensure!(a.len == (m * k) as usize, "matmul: A has {} elems, expected {}", a.len, m * k);
-        ensure!(b.len == (k * n) as usize, "matmul: B has {} elems, expected {}", b.len, k * n);
-        let out = self.alloc((m * n) as usize);
-        let dims = MatmulDims { m, n, k, _pad: 0 };
-        self.dispatch_shader(SHADER_MATMUL, Some("matmul"), &dims, &[a, b], &out, (m.div_ceil(16), n.div_ceil(16), 1));
-        Ok(out)
+impl t500 {
+    /// f580 = matmul. A(m,k) x B(k,n) = C(m,n). Row-major layout.
+    pub fn f580(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p4) as usize, "matmul: A has {} elems, expected {}", p0.s507, p2 * p4);
+        ensure!(p1.s507 == (p4 * p3) as usize, "matmul: B has {} elems, expected {}", p1.s507, p4 * p3);
+        let v0 = self.f503((p2 * p3) as usize);
+        let v1 = t528 { m: p2, n: p3, k: p4, _pad: 0 };
+        self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(16), p3.div_ceil(16), 1));
+        Ok(v0)
     }
 
-    /// Batched matmul: A[batch,m,k] x B[batch,k,n] = C[batch,m,n].
-    pub fn batch_matmul(&self, a: &GpuBuffer, b: &GpuBuffer, batch: u32, m: u32, n: u32, k: u32) -> Result<GpuBuffer> {
-        ensure!(a.len == (batch * m * k) as usize);
-        ensure!(b.len == (batch * k * n) as usize);
-        let out = self.alloc((batch * m * n) as usize);
-        let dims = BatchMatmulDims { batch, m, n, k };
-        self.dispatch_shader(SHADER_BATCH_MATMUL, Some("batch_matmul"), &dims, &[a, b], &out, (m.div_ceil(16), n.div_ceil(16), batch));
-        Ok(out)
+    /// f581 = batch_matmul. A[batch,m,k] x B[batch,k,n] = C[batch,m,n].
+    pub fn f581(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32, p5: u32) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p3 * p5) as usize);
+        ensure!(p1.s507 == (p2 * p5 * p4) as usize);
+        let v0 = self.f503((p2 * p3 * p4) as usize);
+        let v1 = t529 { batch: p2, m: p3, n: p4, k: p5 };
+        self.f543(SHADER_BATCH_MATMUL, Some("batch_matmul"), &v1, &[p0, p1], &v0, (p3.div_ceil(16), p4.div_ceil(16), p2));
+        Ok(v0)
     }
 
-    /// Conv2d: input[N,C_in,H,W] * weight[C_out,C_in/groups,kH,kW] + bias[C_out].
+    /// f582 = conv2d. input[N,C_in,H,W] * weight[C_out,C_in/groups,kH,kW] + bias[C_out].
     /// NCHW layout. Returns output[N,C_out,out_H,out_W].
-    pub fn conv2d(
+    pub fn f582(
         &self,
-        input: &GpuBuffer,
-        weight: &GpuBuffer,
-        bias: Option<&GpuBuffer>,
-        batch: u32, in_c: u32, in_h: u32, in_w: u32,
-        out_c: u32, kh: u32, kw: u32,
-        stride: (u32, u32), padding: (u32, u32),
-        dilation: (u32, u32), groups: u32,
-    ) -> Result<GpuBuffer> {
-        let out_h = (in_h + 2 * padding.0 - dilation.0 * (kh - 1) - 1) / stride.0 + 1;
-        let out_w = (in_w + 2 * padding.1 - dilation.1 * (kw - 1) - 1) / stride.1 + 1;
-        let total = batch * out_c * out_h * out_w;
+        p0: &t501,
+        p1: &t501,
+        p2: Option<&t501>,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+        p7: u32, p8: u32, p9: u32,
+        p10: (u32, u32), p11: (u32, u32),
+        p12: (u32, u32), p13: u32,
+    ) -> Result<t501> {
+        let v0 = (p5 + 2 * p11.0 - p12.0 * (p8 - 1) - 1) / p10.0 + 1;
+        let v1 = (p6 + 2 * p11.1 - p12.1 * (p9 - 1) - 1) / p10.1 + 1;
+        let v2 = p3 * p7 * v0 * v1;
 
-        ensure!(input.len == (batch * in_c * in_h * in_w) as usize);
-        ensure!(weight.len == (out_c * (in_c / groups) * kh * kw) as usize);
+        ensure!(p0.s507 == (p3 * p4 * p5 * p6) as usize);
+        ensure!(p1.s507 == (p7 * (p4 / p13) * p8 * p9) as usize);
 
-        let zero_bias;
-        let bias_buf = match bias {
-            Some(b) => {
-                ensure!(b.len == out_c as usize);
-                b
+        let v3;
+        let v4 = match p2 {
+            Some(v5) => {
+                ensure!(v5.s507 == p7 as usize);
+                v5
             }
             None => {
-                zero_bias = self.upload(&vec![0.0f32; out_c as usize]);
-                &zero_bias
+                v3 = self.f502(&vec![0.0f32; p7 as usize]);
+                &v3
             }
         };
 
-        let out = self.alloc(total as usize);
-        let params = Conv2dParams {
-            batch, in_c, out_c, in_h, in_w, out_h, out_w,
-            kh, kw, stride_h: stride.0, stride_w: stride.1,
-            pad_h: padding.0, pad_w: padding.1,
-            dilation_h: dilation.0, dilation_w: dilation.1, groups,
+        let v6 = self.f503(v2 as usize);
+        let v7 = t530 {
+            batch: p3, in_c: p4, out_c: p7, in_h: p5, in_w: p6, out_h: v0, out_w: v1,
+            kh: p8, kw: p9, stride_h: p10.0, stride_w: p10.1,
+            pad_h: p11.0, pad_w: p11.1,
+            dilation_h: p12.0, dilation_w: p12.1, groups: p13,
         };
 
-        self.dispatch_shader(
+        self.f543(
             SHADER_CONV2D, Some("conv2d"),
-            &params, &[input, weight, bias_buf], &out,
-            super::dispatch_1d(total),
+            &v7, &[p0, p1, v4], &v6,
+            super::f540(v2),
         );
-        Ok(out)
+        Ok(v6)
     }
 
-    /// Transposed conv2d (deconvolution): input[N,C_in,H,W] -> output[N,C_out,out_H,out_W].
+    /// f583 = conv_transpose2d. input[N,C_in,H,W] -> output[N,C_out,out_H,out_W].
     /// Weight layout: [C_in, C_out/groups, kH, kW].
-    pub fn conv_transpose2d(
+    pub fn f583(
         &self,
-        input: &GpuBuffer,
-        weight: &GpuBuffer,
-        bias: Option<&GpuBuffer>,
-        batch: u32, in_c: u32, in_h: u32, in_w: u32,
-        out_c: u32, kh: u32, kw: u32,
-        stride: (u32, u32), padding: (u32, u32),
-        output_padding: (u32, u32),
-        dilation: (u32, u32), groups: u32,
-    ) -> Result<GpuBuffer> {
-        let out_h = (in_h - 1) * stride.0 - 2 * padding.0 + dilation.0 * (kh - 1) + output_padding.0 + 1;
-        let out_w = (in_w - 1) * stride.1 - 2 * padding.1 + dilation.1 * (kw - 1) + output_padding.1 + 1;
-        let total = batch * out_c * out_h * out_w;
+        p0: &t501,
+        p1: &t501,
+        p2: Option<&t501>,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+        p7: u32, p8: u32, p9: u32,
+        p10: (u32, u32), p11: (u32, u32),
+        p12: (u32, u32),
+        p13: (u32, u32), p14: u32,
+    ) -> Result<t501> {
+        let v0 = (p5 - 1) * p10.0 - 2 * p11.0 + p13.0 * (p8 - 1) + p12.0 + 1;
+        let v1 = (p6 - 1) * p10.1 - 2 * p11.1 + p13.1 * (p9 - 1) + p12.1 + 1;
+        let v2 = p3 * p7 * v0 * v1;
 
-        ensure!(input.len == (batch * in_c * in_h * in_w) as usize);
-        ensure!(weight.len == (in_c * (out_c / groups) * kh * kw) as usize);
+        ensure!(p0.s507 == (p3 * p4 * p5 * p6) as usize);
+        ensure!(p1.s507 == (p4 * (p7 / p14) * p8 * p9) as usize);
 
-        let zero_bias;
-        let bias_buf = match bias {
-            Some(b) => {
-                ensure!(b.len == out_c as usize);
-                b
+        let v3;
+        let v4 = match p2 {
+            Some(v5) => {
+                ensure!(v5.s507 == p7 as usize);
+                v5
             }
             None => {
-                zero_bias = self.upload(&vec![0.0f32; out_c as usize]);
-                &zero_bias
+                v3 = self.f502(&vec![0.0f32; p7 as usize]);
+                &v3
             }
         };
 
-        let out = self.alloc(total as usize);
-        let params = ConvTranspose2dParams {
-            batch, in_c, out_c, in_h, in_w, out_h, out_w,
-            kh, kw, stride_h: stride.0, stride_w: stride.1,
-            pad_h: padding.0, pad_w: padding.1,
-            dilation_h: dilation.0, dilation_w: dilation.1, groups,
+        let v6 = self.f503(v2 as usize);
+        let v7 = t531 {
+            batch: p3, in_c: p4, out_c: p7, in_h: p5, in_w: p6, out_h: v0, out_w: v1,
+            kh: p8, kw: p9, stride_h: p10.0, stride_w: p10.1,
+            pad_h: p11.0, pad_w: p11.1,
+            dilation_h: p13.0, dilation_w: p13.1, groups: p14,
         };
 
-        self.dispatch_shader(
+        self.f543(
             SHADER_CONV_TRANSPOSE2D, Some("conv_transpose2d"),
-            &params, &[input, weight, bias_buf], &out,
-            super::dispatch_1d(total),
+            &v7, &[p0, p1, v4], &v6,
+            super::f540(v2),
         );
-        Ok(out)
-    }
-    pub(crate) fn conv2d_grad_weight(
-        &self, input: &GpuBuffer, grad_out: &GpuBuffer,
-        batch: u32, in_c: u32, in_h: u32, in_w: u32,
-        out_c: u32, out_h: u32, out_w: u32, kh: u32, kw: u32,
-        stride_h: u32, stride_w: u32, pad_h: u32, pad_w: u32,
-        dil_h: u32, dil_w: u32, groups: u32,
-    ) -> Result<GpuBuffer> {
-        let group_in = in_c / groups;
-        let total = out_c * group_in * kh * kw;
-        let out = self.alloc(total as usize);
-        let params = Conv2dGradParams {
-            batch, in_c, out_c, in_h, in_w, out_h, out_w,
-            kh, kw, stride_h, stride_w, pad_h, pad_w,
-            dilation_h: dil_h, dilation_w: dil_w, groups,
-        };
-        self.dispatch_shader(
-            SHADER_CONV2D_GRAD_WEIGHT, Some("conv2d_grad_weight"),
-            &params, &[input, grad_out], &out,
-            super::dispatch_1d(total),
-        );
-        Ok(out)
+        Ok(v6)
     }
 
-    pub(crate) fn conv2d_grad_bias(
-        &self, grad_out: &GpuBuffer,
-        batch: u32, out_c: u32, out_h: u32, out_w: u32,
-    ) -> Result<GpuBuffer> {
-        let out = self.alloc(out_c as usize);
-        let params = Conv2dGradBiasParams { batch, out_c, out_h, out_w };
-        self.dispatch_shader(
-            SHADER_CONV2D_GRAD_BIAS, Some("conv2d_grad_bias"),
-            &params, &[grad_out], &out,
-            super::dispatch_1d(out_c),
+    /// f584 = conv2d_grad_weight. Backward gradient w.r.t. conv2d weights.
+    pub(crate) fn f584(
+        &self, p0: &t501, p1: &t501,
+        p2: u32, p3: u32, p4: u32, p5: u32,
+        p6: u32, p7: u32, p8: u32, p9: u32, p10: u32,
+        p11: u32, p12: u32, p13: u32, p14: u32,
+        p15: u32, p16: u32, p17: u32,
+    ) -> Result<t501> {
+        let v0 = p3 / p17;
+        let v1 = p6 * v0 * p9 * p10;
+        let v2 = self.f503(v1 as usize);
+        let v3 = t532 {
+            batch: p2, in_c: p3, out_c: p6, in_h: p4, in_w: p5, out_h: p7, out_w: p8,
+            kh: p9, kw: p10, stride_h: p11, stride_w: p12, pad_h: p13, pad_w: p14,
+            dilation_h: p15, dilation_w: p16, groups: p17,
+        };
+        self.f543(
+            SHADER_CONV2D_GRAD_WEIGHT, Some("conv2d_grad_weight"),
+            &v3, &[p0, p1], &v2,
+            super::f540(v1),
         );
-        Ok(out)
+        Ok(v2)
+    }
+
+    /// f585 = conv2d_grad_bias. Backward gradient w.r.t. conv2d bias.
+    pub(crate) fn f585(
+        &self, p0: &t501,
+        p1: u32, p2: u32, p3: u32, p4: u32,
+    ) -> Result<t501> {
+        let v0 = self.f503(p2 as usize);
+        let v1 = t533 { batch: p1, out_c: p2, out_h: p3, out_w: p4 };
+        self.f543(
+            SHADER_CONV2D_GRAD_BIAS, Some("conv2d_grad_bias"),
+            &v1, &[p0], &v0,
+            super::f540(p2),
+        );
+        Ok(v0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
+    use crate::ops::f544;
 
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     // CPU reference matmul for cross-validation
     fn cpu_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
@@ -630,294 +640,290 @@ mod tests {
     // --- Matmul tests ---
 
     #[test]
-    fn test_matmul_2x2() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[5.0, 6.0, 7.0, 8.0]);
-        let result = dev().read(&dev().matmul(&a, &b, 2, 2, 2).unwrap()).unwrap();
-        assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
+    fn f580_2x2() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f502(&[5.0, 6.0, 7.0, 8.0]);
+        let v2 = dev().f504(&dev().f580(&v0, &v1, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(v2, vec![19.0, 22.0, 43.0, 50.0]);
     }
 
     #[test]
-    fn test_matmul_nonsquare_vs_cpu() {
+    fn f580_nonsquare_vs_cpu() {
         // 3x4 @ 4x2 = 3x2
-        let a: Vec<f32> = (1..=12).map(|x| x as f32).collect();
-        let b: Vec<f32> = (1..=8).map(|x| x as f32 * 0.1).collect();
-        let expected = cpu_matmul(&a, &b, 3, 2, 4);
-        let result = dev().read(&dev().matmul(&dev().upload(&a), &dev().upload(&b), 3, 2, 4).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+        let v0: Vec<f32> = (1..=12).map(|x| x as f32).collect();
+        let v1: Vec<f32> = (1..=8).map(|x| x as f32 * 0.1).collect();
+        let v2 = cpu_matmul(&v0, &v1, 3, 2, 4);
+        let v3 = dev().f504(&dev().f580(&dev().f502(&v0), &dev().f502(&v1), 3, 2, 4).unwrap()).unwrap();
+        f544(&v3, &v2, 1e-4);
     }
 
     #[test]
-    fn test_matmul_1x1() {
-        let result = dev().read(&dev().matmul(&dev().upload(&[3.0]), &dev().upload(&[7.0]), 1, 1, 1).unwrap()).unwrap();
-        assert_eq!(result, vec![21.0]);
+    fn f580_1x1() {
+        let v0 = dev().f504(&dev().f580(&dev().f502(&[3.0]), &dev().f502(&[7.0]), 1, 1, 1).unwrap()).unwrap();
+        assert_eq!(v0, vec![21.0]);
     }
 
     #[test]
-    fn test_matmul_17x13_vs_cpu() {
+    fn f580_17x13_vs_cpu() {
         // Odd dims that don't align to 16x16 workgroup
-        let m = 17; let n = 13; let k = 11;
-        let a: Vec<f32> = (0..m*k).map(|i| (i as f32 * 0.01) - 0.5).collect();
-        let b: Vec<f32> = (0..k*n).map(|i| (i as f32 * 0.01) - 0.3).collect();
-        let expected = cpu_matmul(&a, &b, m, n, k);
-        let result = dev().read(&dev().matmul(
-            &dev().upload(&a), &dev().upload(&b), m as u32, n as u32, k as u32
+        let v0 = 17; let v1 = 13; let v2 = 11;
+        let v3: Vec<f32> = (0..v0*v2).map(|i| (i as f32 * 0.01) - 0.5).collect();
+        let v4: Vec<f32> = (0..v2*v1).map(|i| (i as f32 * 0.01) - 0.3).collect();
+        let v5 = cpu_matmul(&v3, &v4, v0, v1, v2);
+        let v6 = dev().f504(&dev().f580(
+            &dev().f502(&v3), &dev().f502(&v4), v0 as u32, v1 as u32, v2 as u32
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v6, &v5, 1e-3);
     }
 
     // --- Batch matmul tests ---
 
     #[test]
-    fn test_batch_matmul() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
-        let b = dev().upload(&[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0]);
-        let result = dev().read(&dev().batch_matmul(&a, &b, 2, 2, 2, 2).unwrap()).unwrap();
-        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0]);
+    fn f581_basic() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let v1 = dev().f502(&[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0]);
+        let v2 = dev().f504(&dev().f581(&v0, &v1, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(v2, vec![1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0]);
     }
 
     #[test]
-    fn test_batch_matmul_nonsquare() {
+    fn f581_nonsquare() {
         // batch=1, 2x3 @ 3x1 = 2x1
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let b = dev().upload(&[1.0, 1.0, 1.0]);
-        let result = dev().read(&dev().batch_matmul(&a, &b, 1, 2, 1, 3).unwrap()).unwrap();
-        assert_eq!(result, vec![6.0, 15.0]);
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v1 = dev().f502(&[1.0, 1.0, 1.0]);
+        let v2 = dev().f504(&dev().f581(&v0, &v1, 1, 2, 1, 3).unwrap()).unwrap();
+        assert_eq!(v2, vec![6.0, 15.0]);
     }
 
     // --- Conv2d tests ---
 
     #[test]
-    fn test_conv2d_3x3_vs_cpu() {
+    fn f582_3x3_vs_cpu() {
         // Verify GPU conv2d matches CPU reference
-        let input: Vec<f32> = (1..=16).map(|x| x as f32).collect();
-        let weight = vec![1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0];
-        let bias = vec![0.0];
-        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), 1);
-        let result = dev().read(&dev().conv2d(
-            &dev().upload(&input), &dev().upload(&weight), Some(&dev().upload(&bias)),
+        let v0: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let v1 = vec![1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0];
+        let v2 = vec![0.0];
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), 1);
+        let v4 = dev().f504(&dev().f582(
+            &dev().f502(&v0), &dev().f502(&v1), Some(&dev().f502(&v2)),
             1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-5);
+        f544(&v4, &v3, 1e-5);
     }
 
     #[test]
-    fn test_conv2d_1x1_kernel() {
+    fn f582_1x1_kernel() {
         // 1x1 conv = per-pixel channel mixing
         // 2 in channels, 3 out channels, 2x2 spatial
-        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
         // weight[out_c, in_c, 1, 1]: 3 output channels, 2 input channels
-        let weight = dev().upload(&[1.0, 0.5, 0.0, 1.0, -1.0, 2.0]);
-        let bias = dev().upload(&[0.0, 0.0, 0.0]);
-        let result = dev().read(&dev().conv2d(&input, &weight, Some(&bias),
+        let v1 = dev().f502(&[1.0, 0.5, 0.0, 1.0, -1.0, 2.0]);
+        let v2 = dev().f502(&[0.0, 0.0, 0.0]);
+        let v3 = dev().f504(&dev().f582(&v0, &v1, Some(&v2),
             1, 2, 2, 2, 3, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
         // out_c=0: 1.0*in0 + 0.5*in1
-        assert_approx(&result[0..4], &[6.0, 12.0, 18.0, 24.0], 1e-5);
+        f544(&v3[0..4], &[6.0, 12.0, 18.0, 24.0], 1e-5);
         // out_c=1: 0.0*in0 + 1.0*in1
-        assert_approx(&result[4..8], &[10.0, 20.0, 30.0, 40.0], 1e-5);
+        f544(&v3[4..8], &[10.0, 20.0, 30.0, 40.0], 1e-5);
     }
 
     #[test]
-    fn test_conv2d_padding_vs_cpu() {
-        let input: Vec<f32> = (1..=9).map(|x| x as f32).collect();
-        let weight = vec![1.0; 9];
-        let bias = vec![0.0];
-        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), 1);
-        let result = dev().read(&dev().conv2d(
-            &dev().upload(&input), &dev().upload(&weight), None,
+    fn f582_padding_vs_cpu() {
+        let v0: Vec<f32> = (1..=9).map(|x| x as f32).collect();
+        let v1 = vec![1.0; 9];
+        let v2 = vec![0.0];
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), 1);
+        let v4 = dev().f504(&dev().f582(
+            &dev().f502(&v0), &dev().f502(&v1), None,
             1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), (1,1), 1
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-5);
+        f544(&v4, &v3, 1e-5);
     }
 
     #[test]
-    fn test_conv2d_stride2() {
-        let input: Vec<f32> = (1..=16).map(|x| x as f32).collect();
-        let result = dev().read(&dev().conv2d(
-            &dev().upload(&input), &dev().upload(&[1.0]), None,
+    fn f582_stride2() {
+        let v0: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let v1 = dev().f504(&dev().f582(
+            &dev().f502(&v0), &dev().f502(&[1.0]), None,
             1, 1, 4, 4, 1, 1, 1, (2,2), (0,0), (1,1), 1
         ).unwrap()).unwrap();
-        assert_eq!(result, vec![1.0, 3.0, 9.0, 11.0]);
+        assert_eq!(v1, vec![1.0, 3.0, 9.0, 11.0]);
     }
 
     #[test]
-    fn test_conv2d_5x5_kernel_vs_cpu() {
+    fn f582_5x5_kernel_vs_cpu() {
         // 1x1x8x8 input, 1x1x5x5 kernel, padding=2 -> 8x8 output
-        let input: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
-        let weight: Vec<f32> = (0..25).map(|i| if i == 12 { 1.0 } else { 0.0 }).collect(); // center=1, rest=0 -> identity
-        let bias = vec![0.0];
-        let expected = cpu_conv2d(&input, &weight, &bias, 1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), 1);
-        let result = dev().read(&dev().conv2d(
-            &dev().upload(&input), &dev().upload(&weight), None,
+        let v0: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
+        let v1: Vec<f32> = (0..25).map(|i| if i == 12 { 1.0 } else { 0.0 }).collect();
+        let v2 = vec![0.0];
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), 1);
+        let v4 = dev().f504(&dev().f582(
+            &dev().f502(&v0), &dev().f502(&v1), None,
             1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), (1,1), 1
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-4);
+        f544(&v4, &v3, 1e-4);
     }
 
     #[test]
-    fn test_conv2d_multichannel_vs_cpu() {
+    fn f582_multichannel_vs_cpu() {
         // batch=2, in_c=3, out_c=2, 4x4, 3x3 kernel, padding=1
-        let batch = 2; let in_c = 3; let out_c = 2; let h = 4; let w = 4;
-        let input: Vec<f32> = (0..batch*in_c*h*w).map(|i| (i as f32) * 0.01 - 0.5).collect();
-        let weight: Vec<f32> = (0..out_c*in_c*3*3).map(|i| (i as f32) * 0.02 - 0.3).collect();
-        let bias = vec![0.1, -0.2];
-        let expected = cpu_conv2d(&input, &weight, &bias, batch, in_c, h, w, out_c, 3, 3, (1,1), (1,1), 1);
-        let result = dev().read(&dev().conv2d(
-            &dev().upload(&input), &dev().upload(&weight), Some(&dev().upload(&bias)),
-            batch as u32, in_c as u32, h as u32, w as u32, out_c as u32, 3, 3, (1,1), (1,1), (1,1), 1
+        let v0 = 2; let v1 = 3; let v2 = 2; let v3 = 4; let v4 = 4;
+        let v5: Vec<f32> = (0..v0*v1*v3*v4).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let v6: Vec<f32> = (0..v2*v1*3*3).map(|i| (i as f32) * 0.02 - 0.3).collect();
+        let v7 = vec![0.1, -0.2];
+        let v8 = cpu_conv2d(&v5, &v6, &v7, v0, v1, v3, v4, v2, 3, 3, (1,1), (1,1), 1);
+        let v9 = dev().f504(&dev().f582(
+            &dev().f502(&v5), &dev().f502(&v6), Some(&dev().f502(&v7)),
+            v0 as u32, v1 as u32, v3 as u32, v4 as u32, v2 as u32, 3, 3, (1,1), (1,1), (1,1), 1
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v9, &v8, 1e-3);
     }
 
     #[test]
-    fn test_conv2d_with_bias() {
+    fn f582_with_bias() {
         // Verify bias is added correctly
-        let input = dev().upload(&[0.0; 4]); // 1x1x2x2 zeros
-        let weight = dev().upload(&[0.0]); // 1x1x1x1 zero kernel
-        let bias = dev().upload(&[42.0]);
-        let result = dev().read(&dev().conv2d(&input, &weight, Some(&bias),
+        let v0 = dev().f502(&[0.0; 4]);
+        let v1 = dev().f502(&[0.0]);
+        let v2 = dev().f502(&[42.0]);
+        let v3 = dev().f504(&dev().f582(&v0, &v1, Some(&v2),
             1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
-        assert_eq!(result, vec![42.0, 42.0, 42.0, 42.0]);
+        assert_eq!(v3, vec![42.0, 42.0, 42.0, 42.0]);
     }
 
     // --- Transpose conv2d tests ---
 
     #[test]
-    fn test_conv_transpose2d_stride2() {
-        let input = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let weight = dev().upload(&[1.0]);
-        let result = dev().read(&dev().conv_transpose2d(&input, &weight, None,
+    fn f583_stride2() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f502(&[1.0]);
+        let v2 = dev().f504(&dev().f583(&v0, &v1, None,
             1, 1, 2, 2, 1, 1, 1, (2,2), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
-        assert_eq!(result.len(), 9);
-        assert_approx(&result, &[1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0], 1e-5);
+        assert_eq!(v2.len(), 9);
+        f544(&v2, &[1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0], 1e-5);
     }
 
     #[test]
-    fn test_conv_transpose2d_3x3_kernel() {
-        let input = dev().upload(&[5.0]);
-        let weight = dev().upload(&[1.0; 9]);
-        let result = dev().read(&dev().conv_transpose2d(&input, &weight, None,
+    fn f583_3x3_kernel() {
+        let v0 = dev().f502(&[5.0]);
+        let v1 = dev().f502(&[1.0; 9]);
+        let v2 = dev().f504(&dev().f583(&v0, &v1, None,
             1, 1, 1, 1, 1, 3, 3, (1,1), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
-        assert_eq!(result.len(), 9);
-        assert_approx(&result, &[5.0; 9], 1e-5);
+        assert_eq!(v2.len(), 9);
+        f544(&v2, &[5.0; 9], 1e-5);
     }
 
     // --- Error path tests ---
 
     #[test]
-    fn test_matmul_a_size_mismatch() {
-        let a = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
-        let b = dev().upload(&[1.0, 2.0, 3.0, 4.0]); // 4 elements
-        assert!(dev().matmul(&a, &b, 2, 2, 2).is_err()); // expects a=4 elements
+    fn f580_a_size_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        assert!(dev().f580(&v0, &v1, 2, 2, 2).is_err());
     }
 
     #[test]
-    fn test_matmul_b_size_mismatch() {
-        let a = dev().upload(&[1.0, 2.0, 3.0, 4.0]);
-        let b = dev().upload(&[1.0, 2.0, 3.0]); // expects 4
-        assert!(dev().matmul(&a, &b, 2, 2, 2).is_err());
+    fn f580_b_size_mismatch() {
+        let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
+        let v1 = dev().f502(&[1.0, 2.0, 3.0]);
+        assert!(dev().f580(&v0, &v1, 2, 2, 2).is_err());
     }
 
     #[test]
-    fn test_conv2d_input_size_mismatch() {
-        let input = dev().upload(&[1.0; 10]); // wrong size for 1x1x4x4=16
-        let weight = dev().upload(&[1.0; 9]);
-        assert!(dev().conv2d(&input, &weight, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    fn f582_input_size_mismatch() {
+        let v0 = dev().f502(&[1.0; 10]);
+        let v1 = dev().f502(&[1.0; 9]);
+        assert!(dev().f582(&v0, &v1, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
     }
 
     #[test]
-    fn test_conv2d_weight_size_mismatch() {
-        let input = dev().upload(&[1.0; 16]);
-        let weight = dev().upload(&[1.0; 5]); // wrong size for 1*1*3*3=9
-        assert!(dev().conv2d(&input, &weight, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    fn f582_weight_size_mismatch() {
+        let v0 = dev().f502(&[1.0; 16]);
+        let v1 = dev().f502(&[1.0; 5]);
+        assert!(dev().f582(&v0, &v1, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
     }
 
     #[test]
-    fn test_conv2d_bias_size_mismatch() {
-        let input = dev().upload(&[1.0; 16]);
-        let weight = dev().upload(&[1.0; 9]);
-        let bias = dev().upload(&[1.0, 2.0]); // expects 1 (out_c=1)
-        assert!(dev().conv2d(&input, &weight, Some(&bias), 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+    fn f582_bias_size_mismatch() {
+        let v0 = dev().f502(&[1.0; 16]);
+        let v1 = dev().f502(&[1.0; 9]);
+        let v2 = dev().f502(&[1.0, 2.0]);
+        assert!(dev().f582(&v0, &v1, Some(&v2), 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
     }
 
     // --- CPU cross-validation for batch_matmul ---
 
     #[test]
-    fn test_batch_matmul_vs_cpu() {
-        let batch = 3; let m = 4; let n = 3; let k = 5;
-        let a: Vec<f32> = (0..batch*m*k).map(|i| (i as f32) * 0.01 - 0.3).collect();
-        let b: Vec<f32> = (0..batch*k*n).map(|i| (i as f32) * 0.02 - 0.1).collect();
-        let mut expected = vec![0.0f32; batch * m * n];
-        for bat in 0..batch {
-            for row in 0..m {
-                for col in 0..n {
+    fn f581_vs_cpu() {
+        let v0 = 3; let v1 = 4; let v2 = 3; let v3 = 5;
+        let v4: Vec<f32> = (0..v0*v1*v3).map(|i| (i as f32) * 0.01 - 0.3).collect();
+        let v5: Vec<f32> = (0..v0*v3*v2).map(|i| (i as f32) * 0.02 - 0.1).collect();
+        let mut v6 = vec![0.0f32; v0 * v1 * v2];
+        for bat in 0..v0 {
+            for row in 0..v1 {
+                for col in 0..v2 {
                     let mut sum = 0.0;
-                    for i in 0..k {
-                        sum += a[bat*m*k + row*k + i] * b[bat*k*n + i*n + col];
+                    for i in 0..v3 {
+                        sum += v4[bat*v1*v3 + row*v3 + i] * v5[bat*v3*v2 + i*v2 + col];
                     }
-                    expected[bat*m*n + row*n + col] = sum;
+                    v6[bat*v1*v2 + row*v2 + col] = sum;
                 }
             }
         }
-        let result = dev().read(&dev().batch_matmul(
-            &dev().upload(&a), &dev().upload(&b), batch as u32, m as u32, n as u32, k as u32
+        let v7 = dev().f504(&dev().f581(
+            &dev().f502(&v4), &dev().f502(&v5), v0 as u32, v1 as u32, v2 as u32, v3 as u32
         ).unwrap()).unwrap();
-        assert_approx(&result, &expected, 1e-3);
+        f544(&v7, &v6, 1e-3);
     }
 
     // --- Conv2d grad weight numeric check ---
 
     #[test]
-    fn test_conv2d_grad_weight_vs_numeric() {
+    fn f584_vs_numeric() {
         // 1x1x4x4 input, 1x1x2x2 kernel, stride 1, pad 0
-        // out_h = out_w = 3
-        let input_data: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
-        let weight_data = vec![0.5f32, -0.5, 0.3, -0.3];
-        let eps = 1e-3f32;
+        let v0: Vec<f32> = (1..=16).map(|x| x as f32 * 0.1).collect();
+        let v1 = vec![0.5f32, -0.5, 0.3, -0.3];
+        let v2 = 1e-3f32;
 
         // Compute analytical grad_weight
-        let input_buf = dev().upload(&input_data);
-        let weight_buf = dev().upload(&weight_data);
-        let out = dev().conv2d(&input_buf, &weight_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap();
-        // Use grad_out = all ones to make it a simple sum
-        let grad_out_data = vec![1.0f32; 9]; // 1x1x3x3
-        let grad_out_buf = dev().upload(&grad_out_data);
-        let gw = dev().conv2d_grad_weight(&input_buf, &grad_out_buf, 1, 1, 4, 4, 1, 3, 3, 2, 2, 1, 1, 0, 0, 1, 1, 1).unwrap();
-        let gw_data = dev().read(&gw).unwrap();
+        let v3 = dev().f502(&v0);
+        let v4 = dev().f502(&v1);
+        let v5 = dev().f582(&v3, &v4, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap();
+        let v6 = vec![1.0f32; 9];
+        let v7 = dev().f502(&v6);
+        let v8 = dev().f584(&v3, &v7, 1, 1, 4, 4, 1, 3, 3, 2, 2, 1, 1, 0, 0, 1, 1, 1).unwrap();
+        let v9 = dev().f504(&v8).unwrap();
 
         // Numeric gradient check
-        for i in 0..4 {
-            let mut wp = weight_data.clone();
-            let mut wm = weight_data.clone();
-            wp[i] += eps;
-            wm[i] -= eps;
-            let wp_buf = dev().upload(&wp);
-            let wm_buf = dev().upload(&wm);
-            let outp = dev().read(&dev().conv2d(&input_buf, &wp_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
-            let outm = dev().read(&dev().conv2d(&input_buf, &wm_buf, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
-            // loss = sum(out) => numeric grad = (sum(outp)-sum(outm)) / (2*eps)
-            let numeric: f32 = (outp.iter().sum::<f32>() - outm.iter().sum::<f32>()) / (2.0 * eps);
-            assert!((gw_data[i] - numeric).abs() < 1e-2,
-                "grad_w[{i}]: analytical={}, numeric={}", gw_data[i], numeric);
+        for v10 in 0..4 {
+            let mut v11 = v1.clone();
+            let mut v12 = v1.clone();
+            v11[v10] += v2;
+            v12[v10] -= v2;
+            let v13 = dev().f502(&v11);
+            let v14 = dev().f502(&v12);
+            let v15 = dev().f504(&dev().f582(&v3, &v13, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+            let v16 = dev().f504(&dev().f582(&v3, &v14, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+            let v17: f32 = (v15.iter().sum::<f32>() - v16.iter().sum::<f32>()) / (2.0 * v2);
+            assert!((v9[v10] - v17).abs() < 1e-2,
+                "grad_w[{v10}]: analytical={}, numeric={}", v9[v10], v17);
         }
-        let _ = out;
+        let _ = v5;
     }
 
     #[test]
-    fn test_conv2d_grad_bias_basic() {
+    fn f585_basic() {
         // grad_out = [[1,2],[3,4]], batch=1, out_c=1, out_h=2, out_w=2
         // grad_bias[0] should = 1+2+3+4 = 10
-        let grad_out_data = vec![1.0f32, 2.0, 3.0, 4.0];
-        let grad_out_buf = dev().upload(&grad_out_data);
-        let gb = dev().conv2d_grad_bias(&grad_out_buf, 1, 1, 2, 2).unwrap();
-        let gb_data = dev().read(&gb).unwrap();
-        assert_approx(&gb_data, &[10.0], 1e-5);
+        let v0 = vec![1.0f32, 2.0, 3.0, 4.0];
+        let v1 = dev().f502(&v0);
+        let v2 = dev().f585(&v1, 1, 1, 2, 2).unwrap();
+        let v3 = dev().f504(&v2).unwrap();
+        f544(&v3, &[10.0], 1e-5);
 
         // 2 output channels, batch=1, out_h=2, out_w=2
-        // grad_out[0] = [1,2,3,4], grad_out[1] = [5,6,7,8]
-        let grad_out2 = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let gb2 = dev().conv2d_grad_bias(&dev().upload(&grad_out2), 1, 2, 2, 2).unwrap();
-        let gb2_data = dev().read(&gb2).unwrap();
-        assert_approx(&gb2_data, &[10.0, 26.0], 1e-5);
+        let v4 = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let v5 = dev().f585(&dev().f502(&v4), 1, 2, 2, 2).unwrap();
+        let v6 = dev().f504(&v5).unwrap();
+        f544(&v6, &[10.0, 26.0], 1e-5);
     }
 }

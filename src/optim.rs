@@ -1,14 +1,16 @@
 // Unlicense — cochranblock.org
-// Contributors: GotEmCoach, KOVA, Claude Opus 4.6
+// Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 //
 // AdamW optimizer. Single WGSL shader: weight update step.
+// t507=AdamW, t508=AdamWParams (private). f720=AdamW::new, f721=AdamW::step.
 
-use crate::device::{GpuBuffer, GpuDevice};
+use crate::device::{t500, t501};
 use anyhow::{ensure, Result};
 
+/// t508 = AdamWParams. WGSL uniform; field names map to shader struct.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct AdamWParams {
+struct t508 {
     n: u32,
     lr: f32,
     beta1: f32,
@@ -50,8 +52,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-/// AdamW optimizer state for a single parameter group.
-pub struct AdamW {
+/// t507 = AdamW. Optimizer state for a single parameter group.
+pub struct t507 {
     pub lr: f32,
     pub beta1: f32,
     pub beta2: f32,
@@ -59,13 +61,14 @@ pub struct AdamW {
     pub weight_decay: f32,
     step: u32,
     // Per-parameter state: (first moment, second moment)
-    states: Vec<(GpuBuffer, GpuBuffer)>,
+    states: Vec<(t501, t501)>,
 }
 
-impl AdamW {
-    pub fn new(lr: f32) -> Self {
+impl t507 {
+    /// f720 = AdamW::new. Default hyperparams (beta1=0.9, beta2=0.999, eps=1e-8, wd=0.01).
+    pub fn f720(p0: f32) -> Self {
         Self {
-            lr,
+            lr: p0,
             beta1: 0.9,
             beta2: 0.999,
             eps: 1e-8,
@@ -75,65 +78,65 @@ impl AdamW {
         }
     }
 
-    /// Run one optimizer step. Updates params in-place using their gradients.
-    /// `params` and `grads` must be the same length, with matching buffer sizes.
-    pub fn step(&mut self, dev: &GpuDevice, params: &mut [GpuBuffer], grads: &[GpuBuffer]) -> Result<()> {
-        ensure!(params.len() == grads.len(), "params/grads length mismatch");
+    /// f721 = AdamW::step. Run one optimizer step. Updates params in-place using
+    /// their gradients. `p1` and `p2` must be the same length, with matching buffer sizes.
+    pub fn f721(&mut self, p0: &t500, p1: &mut [t501], p2: &[t501]) -> Result<()> {
+        ensure!(p1.len() == p2.len(), "params/grads length mismatch");
 
         self.step += 1;
-        let beta1_t = self.beta1.powi(self.step as i32);
-        let beta2_t = self.beta2.powi(self.step as i32);
+        let v0 = self.beta1.powi(self.step as i32);
+        let v1 = self.beta2.powi(self.step as i32);
 
         // Lazy init state buffers
-        while self.states.len() < params.len() {
-            let n = params[self.states.len()].len;
-            let m = dev.upload(&vec![0.0f32; n]);
-            let v = dev.upload(&vec![0.0f32; n]);
-            self.states.push((m, v));
+        while self.states.len() < p1.len() {
+            let v2 = p1[self.states.len()].s507;
+            let v3 = p0.f502(&vec![0.0f32; v2]);
+            let v4 = p0.f502(&vec![0.0f32; v2]);
+            self.states.push((v3, v4));
         }
 
-        for (i, (param, grad)) in params.iter().zip(grads.iter()).enumerate() {
-            ensure!(param.len == grad.len, "param/grad size mismatch at index {i}");
-            let n = param.len as u32;
-            let (m, v) = &self.states[i];
+        for (v5, (v6, v7)) in p1.iter().zip(p2.iter()).enumerate() {
+            ensure!(v6.s507 == v7.s507, "param/grad size mismatch at index {v5}");
+            let v8 = v6.s507 as u32;
+            let (v9, v10) = &self.states[v5];
 
-            let p = AdamWParams {
-                n,
+            let v11 = t508 {
+                n: v8,
                 lr: self.lr,
                 beta1: self.beta1,
                 beta2: self.beta2,
                 eps: self.eps,
                 weight_decay: self.weight_decay,
-                beta1_t,
-                beta2_t,
+                beta1_t: v0,
+                beta2_t: v1,
             };
 
             // AdamW needs read_write on param, m, v. Use raw dispatch with cached pipeline.
-            let params_buf = dev.upload_uniform(&p);
-            let pipeline = dev.pipeline(SHADER_ADAMW, Some("adamw"));
-            let bind_group = dev.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let v12 = p0.f506(&v11);
+            let v13 = p0.f507(SHADER_ADAMW, Some("adamw"));
+            let v14 = p0.s500.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(0),
+                layout: &v13.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: param.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: grad.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: m.buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: v.buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: v12.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: v6.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: v7.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: v9.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v10.s505.as_entire_binding() },
                 ],
             });
-            let (wx, wy, wz) = crate::ops::dispatch_1d(n);
-            let mut encoder = dev.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let (v15, v16, v17) = crate::ops::f540(v8);
+            let mut v18 = p0.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut v19 = v18.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("adamw"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(wx, wy, wz);
+                v19.set_pipeline(&v13);
+                v19.set_bind_group(0, &v14, &[]);
+                v19.dispatch_workgroups(v15, v16, v17);
             }
-            dev.queue.submit(Some(encoder.finish()));
+            p0.s501.submit(Some(v18.finish()));
         }
         Ok(())
     }
@@ -142,110 +145,101 @@ impl AdamW {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::assert_approx;
+    use crate::ops::f544;
 
-    fn dev() -> &'static GpuDevice { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
 
     #[test]
-    fn test_adamw_basic() {
-        let mut param = dev().upload(&[1.0, 2.0, 3.0]);
-        let grad = dev().upload(&[0.1, 0.2, 0.3]);
+    fn f721_basic() {
+        let mut v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[0.1, 0.2, 0.3]);
 
-        let mut opt = AdamW::new(0.01);
-        opt.weight_decay = 0.0; // disable weight decay for predictable test
-        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
+        let mut v2 = t507::f720(0.01);
+        v2.weight_decay = 0.0;
+        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
 
-        // After 1 step with no weight decay:
-        // m = 0.1 * grad, v = 0.001 * grad^2
-        // m_hat = m / (1 - 0.9) = grad, v_hat = v / (1 - 0.999) = grad^2
-        // update = lr * grad / (sqrt(grad^2) + eps) ≈ lr * sign(grad)
-        // For positive grads: param -= 0.01 (approximately)
-        let result = dev().read(&param).unwrap();
-        // params should decrease since gradients are positive
-        assert!(result[0] < 1.0, "param[0] should decrease, got {}", result[0]);
-        assert!(result[1] < 2.0, "param[1] should decrease, got {}", result[1]);
-        assert!(result[2] < 3.0, "param[2] should decrease, got {}", result[2]);
+        let v3 = dev().f504(&v0).unwrap();
+        assert!(v3[0] < 1.0, "param[0] should decrease, got {}", v3[0]);
+        assert!(v3[1] < 2.0, "param[1] should decrease, got {}", v3[1]);
+        assert!(v3[2] < 3.0, "param[2] should decrease, got {}", v3[2]);
     }
 
     #[test]
-    fn test_adamw_multiple_steps() {
-        let mut param = dev().upload(&[10.0]);
-        let grad = dev().upload(&[1.0]); // constant gradient pushing param down
+    fn f721_multiple_steps() {
+        let mut v0 = dev().f502(&[10.0]);
+        let v1 = dev().f502(&[1.0]);
 
-        let mut opt = AdamW::new(0.1);
-        opt.weight_decay = 0.0;
+        let mut v2 = t507::f720(0.1);
+        v2.weight_decay = 0.0;
 
         for _ in 0..10 {
-            opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
+            v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
         }
 
-        let result = dev().read(&param).unwrap();
-        // After 10 steps with lr=0.1 and constant positive grad, param should decrease
-        assert!(result[0] < 10.0, "after 10 steps param should decrease, got {}", result[0]);
+        let v3 = dev().f504(&v0).unwrap();
+        assert!(v3[0] < 10.0, "after 10 steps param should decrease, got {}", v3[0]);
     }
 
     #[test]
-    fn test_adamw_weight_decay() {
-        let mut param = dev().upload(&[10.0]);
-        let grad = dev().upload(&[0.0]); // zero gradient, only weight decay
+    fn f721_weight_decay() {
+        let mut v0 = dev().f502(&[10.0]);
+        let v1 = dev().f502(&[0.0]);
 
-        let mut opt = AdamW::new(0.01);
-        opt.weight_decay = 0.1;
+        let mut v2 = t507::f720(0.01);
+        v2.weight_decay = 0.1;
 
-        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
+        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
 
-        let result = dev().read(&param).unwrap();
-        // With zero grad, only weight decay: param *= (1 - lr * wd) = 10 * (1 - 0.001) = 9.99
-        assert_approx(&result, &[9.99], 1e-3);
+        let v3 = dev().f504(&v0).unwrap();
+        f544(&v3, &[9.99], 1e-3);
     }
 
     #[test]
-    fn test_adamw_params_grads_length_mismatch() {
-        let mut p1 = dev().upload(&[1.0]);
-        let mut p2 = dev().upload(&[2.0]);
-        let g1 = dev().upload(&[0.1]);
-        let mut opt = AdamW::new(0.01);
-        // 2 params, 1 grad -> error
-        assert!(opt.step(dev(), &mut [p1, p2], &[g1]).is_err());
+    fn f721_params_grads_length_mismatch() {
+        let v0 = dev().f502(&[1.0]);
+        let v1 = dev().f502(&[2.0]);
+        let v2 = dev().f502(&[0.1]);
+        let mut v3 = t507::f720(0.01);
+        assert!(v3.f721(dev(), &mut [v0, v1], &[v2]).is_err());
     }
 
     #[test]
-    fn test_adamw_param_grad_size_mismatch() {
-        let mut param = dev().upload(&[1.0, 2.0, 3.0]); // 3 elements
-        let grad = dev().upload(&[0.1, 0.2]); // 2 elements
-        let mut opt = AdamW::new(0.01);
-        assert!(opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).is_err());
+    fn f721_param_grad_size_mismatch() {
+        let mut v0 = dev().f502(&[1.0, 2.0, 3.0]);
+        let v1 = dev().f502(&[0.1, 0.2]);
+        let mut v2 = t507::f720(0.01);
+        assert!(v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).is_err());
     }
 
     #[test]
-    fn test_adamw_negative_gradient() {
-        let mut param = dev().upload(&[5.0]);
-        let grad = dev().upload(&[-1.0]); // negative grad -> param increases
-        let mut opt = AdamW::new(0.01);
-        opt.weight_decay = 0.0;
-        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
-        let result = dev().read(&param).unwrap();
-        assert!(result[0] > 5.0, "negative grad should increase param, got {}", result[0]);
+    fn f721_negative_gradient() {
+        let mut v0 = dev().f502(&[5.0]);
+        let v1 = dev().f502(&[-1.0]);
+        let mut v2 = t507::f720(0.01);
+        v2.weight_decay = 0.0;
+        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        let v3 = dev().f504(&v0).unwrap();
+        assert!(v3[0] > 5.0, "negative grad should increase param, got {}", v3[0]);
     }
 
     #[test]
-    fn test_adamw_lr_zero() {
-        let mut param = dev().upload(&[10.0]);
-        let grad = dev().upload(&[100.0]);
-        let mut opt = AdamW::new(0.0); // lr=0
-        opt.weight_decay = 0.0;
-        opt.step(dev(), std::slice::from_mut(&mut param), std::slice::from_ref(&grad)).unwrap();
-        let result = dev().read(&param).unwrap();
-        assert_approx(&result, &[10.0], 1e-5); // no update
+    fn f721_lr_zero() {
+        let mut v0 = dev().f502(&[10.0]);
+        let v1 = dev().f502(&[100.0]);
+        let mut v2 = t507::f720(0.0);
+        v2.weight_decay = 0.0;
+        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        let v3 = dev().f504(&v0).unwrap();
+        f544(&v3, &[10.0], 1e-5);
     }
 
     #[test]
-    fn test_adamw_defaults() {
-        let opt = AdamW::new(0.001);
-        assert_eq!(opt.lr, 0.001);
-        assert_eq!(opt.beta1, 0.9);
-        assert_eq!(opt.beta2, 0.999);
-        assert_eq!(opt.eps, 1e-8);
-        assert_eq!(opt.weight_decay, 0.01);
+    fn f720_defaults() {
+        let v0 = t507::f720(0.001);
+        assert_eq!(v0.lr, 0.001);
+        assert_eq!(v0.beta1, 0.9);
+        assert_eq!(v0.beta2, 0.999);
+        assert_eq!(v0.eps, 1e-8);
+        assert_eq!(v0.weight_decay, 0.01);
     }
 }
