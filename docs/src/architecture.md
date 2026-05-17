@@ -1,0 +1,96 @@
+# Architecture
+
+## Module Layout
+
+```
+any-gpu/
+├── src/
+│   ├── lib.rs            — crate root, re-exports all public types
+│   ├── device.rs         — t500 GpuDevice, t501 GpuBuffer, t540 GpuBufferF16
+│   ├── tensor.rs         — t502 Tensor (shaped view over GpuBuffer)
+│   ├── autograd.rs       — t503 TensorId, t504 Op, t505 TapeEntry, t506 Tape
+│   ├── optim.rs          — t507 AdamW
+│   ├── train.rs          — t509 StepResult, f730 train_step
+│   ├── nanosign.rs       — t510 NanoSignResult, BLAKE3 model signing
+│   ├── safetensors.rs    — t538 SafetensorsModel, bf16/f16 dequant
+│   ├── pager.rs          — t539 LayerPager (pinned-RAM staging → VRAM)
+│   ├── tokenizer.rs      — t544 Tokenizer (HuggingFace tokenizers wrapper)
+│   ├── module.rs         — t545 Module trait, t546 Linear
+│   ├── lm.rs             — t547 LmConfig, t548 CausalLM
+│   ├── bin/
+│   │   └── any-gpu-serve.rs   — HTTP inference server
+│   └── ops/
+│       ├── mod.rs        — dispatch helpers (f540–f544)
+│       ├── elementwise.rs — add, sub, mul, scale, relu, sigmoid, swish, tanh, gelu + backward
+│       ├── conv.rs       — matmul (tiled), batch_matmul, conv2d, conv_transpose2d + grad
+│       ├── norm.rs       — group_norm, layer_norm, rms_norm
+│       ├── attention.rs  — softmax, sdpa, causal_sdpa, rope, fused_sdpa, split/merge/repeat heads
+│       ├── tensor_ops.rs — concat, transpose, slice, broadcast_add, sum, add_per_col
+│       ├── transformer.rs — embedding_lookup, argmax, t534 KVCache
+│       └── upsample.rs   — upsample_nearest2d (+ backward)
+└── docs/
+    ├── compression_map.md — t500+/f500+ token↔human-name lookup table
+    └── src/              — this mdBook
+```
+
+## Token-Optimized Naming
+
+All public symbols use the `tN`/`fN` tokenization scheme documented in [docs/compression_map.md](https://github.com/cochranblock/any-gpu/blob/main/docs/compression_map.md). This is a workspace-wide convention across the cochranblock ecosystem — numbers never collide across crates (any-gpu uses t500+/f500+, kova uses its own range).
+
+Key types:
+
+| Token | Human Name | Purpose |
+|-------|------------|---------|
+| t500 | GpuDevice | wgpu device + queue + pipeline cache |
+| t501 | GpuBuffer | raw GPU buffer (untyped bytes, f32 elements) |
+| t502 | Tensor | shaped view over GpuBuffer, max 6 dims on stack |
+| t503 | TensorId | index into Tape.entries |
+| t504 | Op | enum of differentiable ops for autograd |
+| t506 | Tape | flat autograd tape, reverse topo sort |
+| t507 | AdamW | optimizer state (momentum + velocity buffers per param) |
+| t534 | KVCache | append-only K/V buffers for autoregressive decoding |
+| t538 | SafetensorsModel | parsed .safetensors with weights in CPU RAM |
+| t539 | LayerPager | pinned staging buffer for streaming weights to VRAM |
+| t544 | Tokenizer | HuggingFace tokenizers wrapper |
+| t548 | CausalLM | LLaMA-compatible forward pass |
+
+Every tokenized item carries a doc comment mapping back to its human name:
+
+```rust
+/// f580 = matmul. C = A @ B where A is [m,k] and B is [k,n].
+pub fn f580(&self, a: &t501, b: &t501, m: u32, k: u32, n: u32) -> Result<t501>
+```
+
+`src/lib.rs` carries `#![allow(non_camel_case_types, non_snake_case)]` for this reason.
+
+## wgpu Backend Selection
+
+wgpu auto-selects the best backend at runtime:
+
+- Linux: Vulkan (AMD via RADV, NVIDIA, Intel)
+- macOS: Metal
+- Windows: DX12
+
+Override with `WGPU_BACKEND=vulkan` (or `metal`, `dx12`, `gl`).
+
+`t500::f500()` calls `wgpu::Instance::request_adapter(HighPerformance)` — no `enumerate_adapters()`, no GL backend probe. Both crash on RADV.
+
+## WGSL Shader Pattern
+
+Every op is a WGSL compute shader stored as a `&str` constant in its ops module. The pattern:
+
+1. Define a uniform params struct in Rust (e.g., `t511 = ElemParams { n: u32 }`)
+2. Match it exactly in WGSL (`struct Params { n: u32 }`)
+3. No `arrayLength()` — use uniform `n` instead (RADV crashes on `OpArrayLength`)
+4. Dispatch via `f540 = dispatch_1d` which handles >65535 workgroups via 2D dispatch
+5. All buffer bindings use `var<storage, read_write>` or `var<storage, read>` as appropriate
+
+## Pipeline Caching
+
+Shaders compile once per session. `t500` holds a `HashMap<u64, Arc<ComputePipeline>>` keyed by a hash of the shader source string. `f507 = pipeline()` returns the cached pipeline or compiles and inserts it. Every op calls `f507` — first call pays the compile cost (1–30ms depending on driver), subsequent calls are free.
+
+On RADV (AMD), pipeline compilation on first dispatch is ~30ms for complex shaders. The `LazyLock` shared device ensures the pipeline cache is warm across all test cases in the same process.
+
+## Inline Shape
+
+`t502 = Tensor` stores shape inline: a fixed-size `[u32; 6]` array on the stack plus `ndim: usize`. No heap allocation for shape metadata. Max 6 dimensions is sufficient for all transformer and conv ops.

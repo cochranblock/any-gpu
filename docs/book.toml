@@ -1,0 +1,19 @@
+[book]
+title = "any-gpu"
+description = "Tensor engine for every GPU. AMD, NVIDIA, Intel, Apple. Zero vendor lock-in."
+authors = ["Michael Cochran"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/cochranblock/any-gpu"
+edit-url-template = "https://github.com/cochranblock/any-gpu/edit/main/docs/src/{path}"
+site-url = "/any-gpu/"
+additional-css = ["theme/custom.css"]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1

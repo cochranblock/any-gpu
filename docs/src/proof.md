@@ -1,0 +1,39 @@
+# Proof of Artifacts
+
+See [PROOF_OF_ARTIFACTS.md](https://github.com/cochranblock/any-gpu/blob/main/PROOF_OF_ARTIFACTS.md) for the full artifact record.
+
+## Key Artifact Table (Sprint 7 complete, 2026-05-17)
+
+| Metric | Value |
+|--------|-------|
+| Tests | 256 passing (on bt — AMD RX 5700 XT, RADV/Vulkan, Mesa 25.0.7) |
+| WGSL compute shaders | 56+ (forward + backward + norm + attention + optim + head ops + fused SDPA) |
+| Lines of Rust | ~8,500+ across 15+ source files |
+| Modules | device, ops (7 submodules incl. transformer), tensor, autograd, optim, train, nanosign, safetensors, pager, tokenizer, module, lm |
+| Public GPU ops | 27 forward + 7 backward + head ops (split/merge/repeat_kv) + fused SDPA |
+| Inference types | t544 Tokenizer, t545 Module, t546 Linear, t547 LmConfig, t548 CausalLM |
+| KV cache | t534 — append-only K/V buffers for autoregressive decoding |
+| Serve binary | any-gpu-serve — HTTP server, POST /generate, GET /health |
+| Runtime dependencies | wgpu, bytemuck, anyhow, pollster, blake3, safetensors, tokenizers, serde, serde\_json, clap |
+| Pipeline caching | compile once, reuse Arc\<ComputePipeline\> via source hash |
+| Model signing | NanoSign v1 — NSIG + BLAKE3 (36 bytes per file) |
+| f16 storage | t540 GpuBufferF16 — packed u32 (2 f16/u32), unpack2x16float dequant |
+| VRAM budget | fused SDPA (f626) handles long contexts within 8 GB — no N×N alloc |
+| Hardware verified | AMD RX 5700 XT, NVIDIA RTX 3070, NVIDIA RTX 3050 Ti, Apple M4 |
+
+## Sprint History
+
+| Sprint | Deliverable | Tests |
+|--------|-------------|-------|
+| Sprint 1 | wgpu compute backend, 3 WGSL shaders, bench example | initial |
+| Sprint 2 | 15 diffusion ops, RADV fixes, 4-GPU benchmark matrix | 54 |
+| Sprint 3 | Tiled matmul, Tensor type, pipeline caching | — |
+| Sprint 4 | Autograd, AdamW, train_step, 7 backward shaders | 145 |
+| Sprint 7, step 1 | LayerNorm, RMSNorm, GELU, embedding, argmax | 174 |
+| Sprint 7, step 2 | Causal SDPA, RoPE, KV cache | 195 |
+| Sprint 7, step 3 | Safetensors loader, bf16/f16 dequant | 214 |
+| Sprint 7, step 3b | Self-licking audit, hardcoded backstops | 221 |
+| Sprint 7, step 4 | LayerPager (pinned staging → VRAM) | 228 |
+| Sprint 7, step 5 | GpuBufferF16 (packed f16, unpack2x16float) | 233 |
+| Sprint 7, step 6 | Fused SDPA (online-softmax, no N×N alloc) | 239 |
+| Sprint 7, step 7 | Tokenizer, Module, Linear, CausalLM, serve binary, head ops | **256** |

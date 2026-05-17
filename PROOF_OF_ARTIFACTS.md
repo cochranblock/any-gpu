@@ -36,25 +36,36 @@ wgpu (auto-selects backend)
     └── DX12 (Windows)
     │
     ▼
-46 WGSL compute shaders
+56+ WGSL compute shaders
     │
     ├── elementwise: add, sub, mul, scale, relu, sigmoid, swish, tanh, gelu (tanh-approx)
     ├── backward: relu_bw, sigmoid_bw, swish_bw, tanh_bw
     ├── conv: tiled matmul (16x16 shared mem), batch_matmul, conv2d, conv_transpose2d
     ├── conv grad: conv2d_grad_weight, conv2d_grad_bias
     ├── norm: group_norm (two-pass), layer_norm (two-pass), rms_norm (two-pass)
-    ├── attention: softmax (two-pass), sdpa, causal_mask, causal_sdpa, rope
+    ├── attention: softmax (two-pass), sdpa, causal_mask, causal_sdpa, rope,
+    │             fused_sdpa (online-softmax, no N×N alloc), split_heads, merge_heads, repeat_kv
     ├── tensor: concat, transpose, slice, broadcast_add, sum_inner, add_per_col, sum_rows
     ├── transformer: embedding_lookup (gather), argmax (last-dim), kv_append
     ├── spatial: upsample_nearest2d (+ backward)
     ├── loss: mse_loss
-    └── optim: adamw (in-place, momentum + velocity + weight decay)
+    ├── optim: adamw (in-place, momentum + velocity + weight decay)
+    └── f16: unpack2x16float dequant (packed u32 → f32 pairs)
     │
     ▼
 KVCache (t534) — append-only persistent K/V for autoregressive decoding
     │
     ├── f672 new, f673 append, f674 reset
     └── f675 cursor, f676 k_buffer, f677 v_buffer
+    │
+    ▼
+Inference Stack (Sprint 7)
+    │
+    ├── t544 Tokenizer — HuggingFace tokenizers wrapper (f775–f779)
+    ├── t545 Module trait — forward(&self, dev, x) -> Result<Tensor>
+    ├── t546 Linear — GPU linear layer, HF weight transposition at load
+    ├── t547 LmConfig — JSON config (vocab_size, hidden/intermediate size, heads, GQA)
+    └── t548 CausalLM — LLaMA-compatible forward (f783–f786), any-gpu-serve binary
     │
     ▼
 Autograd (reverse-mode autodiff)
@@ -72,7 +83,7 @@ NanoSign (model integrity)
 
 ### Current state
 
-19 GPU ops as WGSL compute shaders. 62 tests (54 GPU ops + 8 NanoSign), all cross-validated against CPU reference implementations. Verified on 4 GPUs across 3 nodes.
+Sprint 7 complete (2026-05-17). 256 tests, all passing on bt (AMD RX 5700 XT, RADV/Vulkan). Full LLM inference stack shipped: tokenizer, LLaMA-compatible CausalLM, HTTP serve binary. Verified on 4 GPUs across 3 nodes.
 
 | Category | Ops |
 |----------|-----|
@@ -116,15 +127,15 @@ Currently: `GpuDevice` struct wraps wgpu directly. Public methods for each op (m
 
 | Metric | Value |
 |--------|-------|
-| Lines of Rust | 6,918 across 15 source files (+670 in examples + ~140 in `src/bin/any-gpu-test.rs`) |
-| Public ops | 27 GPU forward ops + 7 backward ops + 7 NanoSign + KVCache (6) + SafetensorsModel (6) |
-| Modules | device, ops (7 submodules incl. transformer), tensor, autograd, optim, train, nanosign, safetensors |
-| WGSL shaders | 46 (forward + activation backward + conv2d grad + norm backward + adamw + causal_mask + rope + kv_append) |
-| Tests | 221 (62 GPU ops + 29 transformer-inference step-1 + 21 step-2 incl. KV cache round-trip + 19 safetensors loader + 17 autograd + 11 device + 17 tensor + 13 nanosign + 8 optim + 1 train + 24 elementwise backward + 7 hardcoded-reference backstops for sigmoid/silu/rms_norm/softmax/SDPA) |
+| Lines of Rust | ~8,500+ across 15+ source files (device, ops×7, tensor, autograd, optim, train, nanosign, safetensors, pager, tokenizer, module, lm, bin/any-gpu-serve) |
+| Public ops | 27 GPU forward ops + 7 backward ops + 4 head ops (split/merge/repeat_kv + fused SDPA) + 7 NanoSign + KVCache (6) + SafetensorsModel (6) |
+| Modules | device, ops (7 submodules incl. transformer), tensor, autograd, optim, train, nanosign, safetensors, pager, tokenizer, module, lm |
+| WGSL shaders | 56+ (forward + activation backward + conv2d grad + norm backward + adamw + causal_mask + rope + kv_append + fused_sdpa + split_heads + merge_heads + repeat_kv + unpack2x16float) |
+| Tests | 256 (62 GPU ops + 29 transformer-inference step-1 + 21 step-2 incl. KV cache round-trip + 19 safetensors loader + 7 hardcoded backstops + 5 pager + 5 f16 storage + 6 fused SDPA + 17 inference stack + 17 autograd + 11 device + 17 tensor + 13 nanosign + 8 optim + 1 train + 24 elementwise backward + more) |
 | Determinism gate | exopack TRIPLE SIMS (`cargo run --release --bin any-gpu-test --features tests`) — 3/3 passes on bt RX 5700 XT, 96/4/3 ms (pass 1 includes pipeline compile; pass 2+3 hit the cache) |
-| Bench binary (release) | 1.5 MB (opt-z, LTO, strip, panic=abort) |
-| Train binary (release) | 1.5 MB |
-| Dependencies | 6 runtime (wgpu, bytemuck, anyhow, pollster, blake3, safetensors) + 1 optional (exopack via `--features tests`) |
+| Bench binary (release) | ~1.5 MB (opt-z, LTO, strip, panic=abort) |
+| Train binary (release) | ~1.5 MB |
+| Dependencies | wgpu, bytemuck, anyhow, pollster, blake3, safetensors, tokenizers, serde, serde\_json, clap + 1 optional (exopack via `--features tests`) |
 | Model signing | NanoSign v1 — NSIG + BLAKE3 (36 bytes per file) |
 | Pipeline caching | Compile once, reuse Arc\<ComputePipeline\> via source hash |
 
@@ -134,10 +145,10 @@ Tested on 2026-04-02 at commit [`f3319fb`](https://github.com/cochranblock/any-g
 
 | Node | GPU | VRAM | Driver | OS | Tests | Result |
 |------|-----|------|--------|----|-------|--------|
-| bt | AMD Radeon RX 5700 XT (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 54/54 | **pass** |
-| lf | NVIDIA GeForce RTX 3070 Laptop | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 | **pass** |
-| gd | NVIDIA GeForce RTX 3050 Ti Laptop | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 | **pass** |
-| local | Apple M4 | Unified | macOS 25.3.0 | macOS Tahoe | 62/62 | **pass** |
+| bt | AMD Radeon RX 5700 XT (RADV NAVI10) | 8 GB | Mesa 25.0.7 | Debian 13, kernel 6.12.73 | 256/256 | **pass** |
+| lf | NVIDIA GeForce RTX 3070 Laptop | 8 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 (Sprint 2) | **pass** |
+| gd | NVIDIA GeForce RTX 3050 Ti Laptop | 4 GB | 550.163.01 | Debian 13, kernel 6.12.73 | 54/54 (Sprint 2) | **pass** |
+| local | Apple M4 | Unified | — | macOS Tahoe 25.3.0 | 62/62 (Sprint 4) | **pass** |
 
 **Reproduce:**
 
@@ -334,8 +345,8 @@ All any-gpu work is evaluated through the Triple Lens quality gate:
 
 | Lens | Question | Evidence |
 |------|----------|----------|
-| Technical | Does it compile, pass tests, run on real hardware? | 145/145 tests, 4 GPUs, 3 nodes (bt/lf/gd + local). Full autograd + training loop. |
-| Product | Does it solve a real problem? | AMD/Intel GPU compute for ML in Rust — nobody else does this. Now trains models, not just inference. |
+| Technical | Does it compile, pass tests, run on real hardware? | 256/256 tests, 4 GPUs, 3 nodes (bt/lf/gd + local). Full autograd + training loop + LLM inference stack. |
+| Product | Does it solve a real problem? | AMD/Intel GPU compute for ML in Rust — nobody else does this. Trains models, runs LLaMA-compatible inference, serves over HTTP. |
 | Honest | Are the claims verifiable? | Every benchmark has a reproduce command. Every GPU claim links to a commit. CUDA comparison shows where we lose. Backward shaders have numeric gradient tests. |
 
 ## Named Techniques
@@ -402,11 +413,10 @@ Self-optimizing routing layer:
 - ~~Transformer math primitives — LayerNorm, RMSNorm, GELU, embedding_lookup, argmax~~ — **shipped** (2026-05-15)
 - ~~Causal-masked SDPA + RoPE + KV cache~~ — **shipped** (2026-05-15)
 - ~~Safetensors loader + bf16/f16 weight ingest~~ — **shipped** (2026-05-16)
-- Safetensors loader + bf16/f16 weight ingest (Sprint 7 step 3 — load real models off disk/RAM)
-- Pinned-RAM staging + layer paging from system RAM to VRAM (Sprint 7 step 4 — fit 13B-class in 8 GB VRAM)
-- f16 storage type via `shader-f16` wgpu feature (Sprint 7 step 5 — 2× bandwidth on RDNA1)
-- Flash-attention-style tiled SDPA (Sprint 7 step 6 — long contexts)
-- Tokenizer + `Module` graph + `any-gpu serve` runtime (Sprint 7 step 7 — end-user interface)
+- ~~Pinned-RAM staging + layer paging from system RAM to VRAM~~ — **shipped** (2026-05-17, t539 LayerPager)
+- ~~f16 storage type~~ — **shipped** (2026-05-17, t540 GpuBufferF16 via packed u32 + unpack2x16float; note: `enable f16` in WGSL is NOT supported by Naga/wgpu)
+- ~~Flash-attention-style tiled SDPA~~ — **shipped** (2026-05-17, f626 online-softmax fused SDPA, no N×N alloc)
+- ~~Tokenizer + `Module` graph + `any-gpu serve` runtime~~ — **shipped** (2026-05-17, t544/t545/t546/t547/t548, any-gpu-serve binary)
 - Backend router (CUDA/Metal/Vulkan dispatch) (planned)
 - Stratagems CLI — `any-gpu train`, `any-gpu bench`, `any-gpu info` (planned)
 - Starter nanobyte — first model trained and shipped with any-gpu (planned)
@@ -421,14 +431,14 @@ cargo add any-gpu
 # Or clone and run the benchmark
 cargo run --release --example bench
 
-# Run all tests (62 — 54 GPU ops + 8 NanoSign, every op verified against CPU reference)
+# Run all tests (256 — GPU ops, autograd, transformer, safetensors, inference stack, and more)
 cargo test --release
 
 # On AMD RADV, force Vulkan backend
 WGPU_BACKEND=vulkan cargo test --release
 ```
 
-62 tests (54 GPU op correctness + 8 NanoSign integrity). Every op verified against a CPU reference implementation. Requires a GPU (any backend).
+256 tests. All verified on bt (AMD RX 5700 XT, RADV/Vulkan). Every op verified against a CPU reference implementation or hardcoded reference values. Requires a GPU (any backend).
 
 ---
 

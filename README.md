@@ -39,11 +39,33 @@ Supporting docs:
 ```bash
 cargo add any-gpu                              # Add to your project
 cargo run --release --example bench            # Benchmark all sizes
-cargo test --release                           # 62 tests (54 GPU ops + 8 NanoSign)
+cargo test --release                           # 256 tests
 WGPU_BACKEND=vulkan cargo test --release       # Force Vulkan on AMD
 ```
 
 Full hardware matrix, benchmarks, and reproduce commands in [PROOF_OF_ARTIFACTS.md](PROOF_OF_ARTIFACTS.md).
+
+---
+
+## Inference Stack (Sprint 7)
+
+any-gpu can run LLaMA-compatible models from safetensors weights:
+
+```bash
+cargo run --release --bin any-gpu-serve -- \
+  --model /path/to/model.safetensors \
+  --config /path/to/config.json \
+  --tokenizer /path/to/tokenizer.json
+```
+
+- `t544 = Tokenizer` — HuggingFace tokenizers wrapper
+- `t548 = CausalLM` — LLaMA-compatible forward (embedding → attention → MLP → LM head)
+- `f626` — fused online-softmax SDPA (no N×N allocation — fits long contexts in 8 GB VRAM)
+- `f629` — repeat_kv for GQA (Grouped Query Attention)
+- `t539 = LayerPager` — streams model weights from RAM to VRAM one layer at a time
+- `POST /generate`, `GET /health`
+
+Supports LLaMA 2, LLaMA 3, Mistral, Qwen2 weight format. Safetensors only — no GGUF, no PyTorch .bin.
 
 ---
 

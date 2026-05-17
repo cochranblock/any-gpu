@@ -1,0 +1,87 @@
+# Quick Start
+
+## Add to Your Project
+
+```toml
+[dependencies]
+any-gpu = "0.1"
+```
+
+Or:
+
+```bash
+cargo add any-gpu
+```
+
+## First Compute: Matmul
+
+Public symbols are tokenized per [docs/compression_map.md](https://github.com/cochranblock/any-gpu/blob/main/docs/compression_map.md). `t500=GpuDevice`, `f500=gpu`, `f502=upload`, `f504=read`, `f580=matmul`.
+
+```rust
+use any_gpu::t500;
+
+let dev = t500::f500()?;
+
+let a = dev.f502(&[1.0, 2.0, 3.0, 4.0]);
+let b = dev.f502(&[5.0, 6.0, 7.0, 8.0]);
+let c = dev.f580(&a, &b, 2, 2, 2)?;
+
+let result = dev.f504(&c)?;
+// result = [19.0, 22.0, 43.0, 50.0]
+```
+
+`f500` blocks until a GPU adapter is ready. `f502` uploads a `&[f32]` to GPU memory. `f580` dispatches the matmul WGSL shader. `f504` reads back to CPU.
+
+## Run the Tests
+
+```bash
+cargo test --release
+```
+
+256 tests. All verified on bt (AMD RX 5700 XT, RADV/Vulkan).
+
+On AMD, force Vulkan to avoid driver auto-selection:
+
+```bash
+WGPU_BACKEND=vulkan cargo test --release
+```
+
+Do not use a separate `OnceLock` per test — all tests share a single `TEST_DEV` via `LazyLock`. Creating concurrent `wgpu::Instance`s on RADV segfaults (see [Hardware](hardware.md)).
+
+## Run the Benchmark
+
+```bash
+cargo run --release --example bench
+```
+
+Runs matmul at 64x64 through 1024x1024, reports GPU compute time and GFLOPS. Full numbers in [Benchmarks](benchmarks.md).
+
+## Run the Serve Binary
+
+```bash
+cargo run --release --bin any-gpu-serve -- \
+  --model /path/to/model.safetensors \
+  --config /path/to/config.json \
+  --tokenizer /path/to/tokenizer.json
+```
+
+Starts an HTTP server. POST to `/generate` with a JSON body:
+
+```json
+{"prompt": "The answer is", "max_new_tokens": 50}
+```
+
+GET `/health` returns `{"status":"ok"}`.
+
+The model must be in safetensors format. LLaMA-compatible weight naming. See [Inference](inference.md) for config format and GQA support.
+
+## Token Map Note
+
+All public identifiers in any-gpu use the `tN`/`fN` tokenization scheme from `docs/compression_map.md`. Human names are in the doc comments:
+
+```rust
+/// f580 = matmul. C = A @ B where A is [m,k] and B is [k,n].
+pub fn f580(&self, a: &t501, b: &t501, m: u32, k: u32, n: u32) -> Result<t501>
+```
+
+The compression map is the authoritative lookup. It maps every token to its human name, module, and purpose.
