@@ -52,6 +52,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t536 | RopeParams | ops/attention (private, Sprint 7 step 2) |
 | t537 | KVAppendParams | ops/transformer (private, Sprint 7 step 2) |
 | t538 | SafetensorsModel | safetensors (Sprint 7 step 3) |
+| t539 | LayerPager | pager (Sprint 7 step 4) |
 
 ## Functions (fN)
 
@@ -245,6 +246,14 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f766 | bf16_to_f32 (free fn) |
 | f767 | f16_to_f32 (free fn) |
 
+### pager (f768–f779) — Sprint 7 step 4
+
+| Token | Human name |
+|-------|------------|
+| f768 | LayerPager::new |
+| f769 | LayerPager::upload (f32 slice → VRAM via staging) |
+| f770 | LayerPager::page_layer (named tensors from SafetensorsModel → VRAM map) |
+
 ## Struct fields (sN)
 
 | Token | Human name | Owner type |
@@ -268,6 +277,8 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | s516 | head_dim | t534 |
 | s517 | tensors | t538 (HashMap<String, Vec<f32>>) |
 | s518 | shapes | t538 (HashMap<String, Vec<u32>>) |
+| s519 | staging | t539 (LayerPager staging buffer: MAP_WRITE \| COPY_SRC) |
+| s520 | cap | t539 (staging capacity in bytes) |
 
 (Internal shader-uniform field names like `n`, `rows`, `cols`, `eps` stay as-is — they map directly to WGSL uniform struct fields and renaming would desync Rust/WGSL.)
 

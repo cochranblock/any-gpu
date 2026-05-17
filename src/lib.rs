@@ -20,11 +20,14 @@ pub mod nanosign;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod safetensors;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod pager;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod optim;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod train;
 
 pub use device::{t500, t501};
 pub use ops::transformer::t534;
+pub use pager::{t539, DEFAULT_STAGE_BYTES};
 pub use safetensors::t538;
 pub use tensor::t502;

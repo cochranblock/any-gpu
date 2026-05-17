@@ -376,8 +376,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     #[test]
     fn f507_cache_grows_then_stabilizes() {
-        // Cache starts with some entries from prior tests. Calling the same shader
-        // N times must not grow the cache past the first insertion.
+        // Same source string must return the same Arc on every call — proves the
+        // pipeline is cached and not recompiled. Arc::ptr_eq is robust to parallel
+        // tests adding other shaders to the shared cache concurrently.
         const SRC: &str = "
 struct P { n: u32, _p0: u32, _p1: u32, _p2: u32, }
 @group(0) @binding(0) var<uniform> p: P;
@@ -388,15 +389,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= p.n { return; }
     out[gid.x] = a[gid.x] * 3.0;
 }";
-        // Warm the cache for this shader.
-        dev().f507(SRC, None);
-        let v0 = dev().f508();
-        // Call 9 more times — cache must not grow.
-        for _ in 0..9 {
-            dev().f507(SRC, None);
-        }
-        assert_eq!(dev().f508(), v0,
-            "repeated calls with same shader must not grow the cache");
+        let v0 = dev().f507(SRC, None);
+        let v1 = dev().f507(SRC, None);
+        assert!(Arc::ptr_eq(&v0, &v1),
+            "same shader source must return the same cached Arc<ComputePipeline>");
     }
 
     #[test]
