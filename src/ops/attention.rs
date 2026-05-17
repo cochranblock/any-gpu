@@ -172,6 +172,90 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// --- Fused causal SDPA — online softmax, no N×N allocation (Sprint 7 step 6) ---
+//
+// One thread per (batch_head × q_row). Iterates over kv positions sequentially,
+// applying online softmax in a single pass. Uses the output buffer as the
+// accumulator (zero-initialised at thread start, normalised at thread end).
+// Peak extra memory: O(batch_heads × q_seq × head_dim) — no N×N scores matrix.
+// Causal mask is implicit: loop breaks when j > abs_qi_pos.
+
+/// t541 = FusedSdpaParams (private).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t541 {
+    batch_heads: u32,
+    q_seq:       u32,
+    kv_seq:      u32,
+    head_dim:    u32,
+    scale:       f32,
+    _pad:        [u32; 3],
+}
+
+const SHADER_FUSED_SDPA: &str = "
+struct P {
+    batch_heads: u32, q_seq: u32, kv_seq: u32, head_dim: u32,
+    scale: f32, _p0: u32, _p1: u32, _p2: u32,
+}
+@group(0) @binding(0) var<uniform>             p:   P;
+@group(0) @binding(1) var<storage, read>       q:   array<f32>;
+@group(0) @binding(2) var<storage, read>       k:   array<f32>;
+@group(0) @binding(3) var<storage, read>       v:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bq = gid.x + gid.y * 65535u * 256u;
+    if bq >= p.batch_heads * p.q_seq { return; }
+
+    let bh  = bq / p.q_seq;
+    let qi  = bq % p.q_seq;
+    // absolute kv position for causal mask: qi + (kv_seq - q_seq)
+    let abs_pos = qi + p.kv_seq - p.q_seq;
+
+    let q_base  = bh * p.q_seq  * p.head_dim + qi * p.head_dim;
+    let out_base = q_base;
+    let kv_base  = bh * p.kv_seq * p.head_dim;
+
+    // Zero-initialise accumulator (this thread owns out[out_base..out_base+head_dim]).
+    for (var d: u32 = 0u; d < p.head_dim; d++) {
+        out[out_base + d] = 0.0;
+    }
+
+    var m: f32 = -1.0e30;
+    var l: f32 = 0.0;
+
+    for (var j: u32 = 0u; j <= abs_pos; j++) {
+        // Dot product Q[qi] · K[j]
+        var score: f32 = 0.0;
+        let k_row = kv_base + j * p.head_dim;
+        for (var d: u32 = 0u; d < p.head_dim; d++) {
+            score += q[q_base + d] * k[k_row + d];
+        }
+        score *= p.scale;   // pre-multiplied 1/sqrt(head_dim)
+
+        // Online softmax update
+        let m_new = max(m, score);
+        let alpha = exp(m - m_new);      // correction for old accumulator
+        let beta  = exp(score - m_new);  // weight for this kv position
+
+        let v_row = kv_base + j * p.head_dim;
+        for (var d: u32 = 0u; d < p.head_dim; d++) {
+            out[out_base + d] = out[out_base + d] * alpha + beta * v[v_row + d];
+        }
+        l = alpha * l + beta;
+        m = m_new;
+    }
+
+    // Normalise: out /= l  (l==0 only if all kv positions were masked, which cannot
+    // happen with a valid causal mask since j=0..=abs_pos always includes j=0).
+    let inv_l = 1.0 / l;
+    for (var d: u32 = 0u; d < p.head_dim; d++) {
+        out[out_base + d] *= inv_l;
+    }
+}
+";
+
 // --- MSE Loss ---
 
 const SHADER_MSE_SUM: &str = "
@@ -345,6 +429,38 @@ impl t500 {
             super::f540(v0),
         );
         Ok(v1)
+    }
+
+    /// f626 = scaled_dot_product_attention_fused. Online-softmax causal SDPA.
+    /// Identical semantics to f623 but never allocates an N×N scores matrix.
+    /// Safe for long contexts: peak extra memory is O(batch_heads × q_seq × head_dim).
+    /// Q: [batch_heads, q_seq, head_dim]. K,V: [batch_heads, kv_seq, head_dim].
+    /// Requires kv_seq >= q_seq (same as f623). Returns [batch_heads, q_seq, head_dim].
+    pub fn f626(
+        &self,
+        p0: &t501, p1: &t501, p2: &t501,
+        p3: u32, p4: u32, p5: u32, p6: u32,
+    ) -> Result<t501> {
+        ensure!(p5 >= p4, "fused SDPA: kv_seq ({}) must be >= q_seq ({})", p5, p4);
+        ensure!(p0.s507 == (p3 * p4 * p6) as usize, "fused SDPA: Q size mismatch");
+        ensure!(p1.s507 == (p3 * p5 * p6) as usize, "fused SDPA: K size mismatch");
+        ensure!(p2.s507 == (p3 * p5 * p6) as usize, "fused SDPA: V size mismatch");
+
+        let v0 = self.f503((p3 * p4 * p6) as usize); // output [bh, q_seq, head_dim]
+        let v1 = t541 {
+            batch_heads: p3,
+            q_seq: p4,
+            kv_seq: p5,
+            head_dim: p6,
+            scale: 1.0 / (p6 as f32).sqrt(),
+            _pad: [0; 3],
+        };
+        self.f543(
+            SHADER_FUSED_SDPA, Some("fused_sdpa"),
+            &v1, &[p0, p1, p2], &v0,
+            super::f540(p3 * p4),
+        );
+        Ok(v0)
     }
 
     /// f622 = mse_loss. mean((pred - target)^2). Returns a 1-element buffer.
@@ -764,5 +880,97 @@ mod tests {
     fn f625_zero_base_errors() {
         let v0 = vec![1.0f32; 4];
         assert!(dev().f625(&dev().f502(&v0), 1, 1, 4, 0, 0.0).is_err());
+    }
+
+    // --- f626 = fused causal SDPA (online softmax, no N×N alloc) ---
+
+    // f626 must agree with f623 on a standard prefill (q_seq == kv_seq).
+    #[test]
+    fn f626_prefill_matches_f623() {
+        let v0: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
+        let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 3, 3, 4,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 3, 3, 4,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626 decode step: q_seq=1, kv_seq=4. Must match f623.
+    #[test]
+    fn f626_decode_matches_f623() {
+        let v0 = vec![0.1f32, -0.2, 0.3, -0.4];
+        let v1: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let v2: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.7).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 1, 4, 4,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 1, 4, 4,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626: first output row must attend only to V[0] (causal mask eliminates all j>0).
+    #[test]
+    fn f626_first_row_is_v0() {
+        let v_data: Vec<f32> = (0..16).map(|i| if i < 4 { 100.0 } else { i as f32 }).collect();
+        let q_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
+        let k_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&q_data), &dev().f502(&k_data), &dev().f502(&v_data),
+            1, 4, 4, 4,
+        ).unwrap()).unwrap();
+        f544(&got[..4], &v_data[..4], 1e-3);
+    }
+
+    // f626: multiple heads — each head must produce the same result as f623.
+    #[test]
+    fn f626_multi_head_matches_f623() {
+        let bh = 2u32; let seq = 3u32; let dk = 4u32;
+        let n = (bh * seq * dk) as usize;
+        let v0: Vec<f32> = (0..n).map(|i| (i as f32) * 0.07 - 0.5).collect();
+        let v1: Vec<f32> = (0..n).map(|i| (i as f32) * 0.03 + 0.2).collect();
+        let v2: Vec<f32> = (0..n).map(|i| (i as f32) * 0.11 - 0.3).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626: partial decode (q_seq=2, kv_seq=5) must match f623.
+    #[test]
+    fn f626_partial_decode_matches_f623() {
+        let v0: Vec<f32> = (0..8).map(|i| (i as f32) * 0.07).collect();
+        let v1: Vec<f32> = (0..20).map(|i| (i as f32) * 0.04 - 0.2).collect();
+        let v2: Vec<f32> = (0..20).map(|i| (i as f32) * 0.11).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 2, 5, 4,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
+            1, 2, 5, 4,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626: kv_seq < q_seq must error (same constraint as f623).
+    #[test]
+    fn f626_kv_smaller_than_q_errors() {
+        let v0 = dev().f502(&vec![0.0f32; 12]);
+        assert!(dev().f626(&v0, &v0, &v0, 1, 3, 2, 4).is_err());
     }
 }

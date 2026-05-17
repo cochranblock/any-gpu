@@ -54,6 +54,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t538 | SafetensorsModel | safetensors (Sprint 7 step 3) |
 | t539 | LayerPager | pager (Sprint 7 step 4) |
 | t540 | GpuBufferF16 | device (Sprint 7 step 5) |
+| t541 | FusedSdpaParams | ops/attention (private, Sprint 7 step 6) |
 
 ## Functions (fN)
 
@@ -146,6 +147,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f623 | scaled_dot_product_attention_causal (Sprint 7 step 2) |
 | f624 | apply_causal_mask (Sprint 7 step 2) |
 | f625 | rope — rotary position embeddings (Sprint 7 step 2) |
+| f626 | scaled_dot_product_attention_fused — online-softmax causal SDPA, no N×N alloc (Sprint 7 step 6) |
 
 ### ops/tensor_ops (f640–f659)
 
