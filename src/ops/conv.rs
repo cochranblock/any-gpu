@@ -19,63 +19,87 @@ struct t528 {
     _pad: u32,
 }
 
-// Tiled matmul: 16x16 tiles in workgroup shared memory.
-// Each tile of A and B is loaded from global memory once per tile iteration,
-// not once per output element. Reduces global memory reads by ~16x.
+// Tiled matmul: 32x32 tiles, 2x2 register blocking.
+// Each 16x16 workgroup (256 threads) covers a 32x32 output block.
+// Each thread computes a 2x2 subblock — 4 outputs, 4 register accumulators.
+// Global memory reads cut 4x vs 16x16/1x1. LDS usage: 8KB/workgroup (fits 8 per RDNA CU).
 const SHADER_MATMUL: &str = "
-const TILE: u32 = 16u;
+const TILE: u32 = 32u;
 struct Dims { m: u32, n: u32, k: u32, _pad: u32, }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
-var<workgroup> tile_a: array<f32, 256>;  // TILE * TILE
-var<workgroup> tile_b: array<f32, 256>;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
 
 @compute @workgroup_size(16, 16)
 fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
-    let row = gid.x;
-    let col = gid.y;
     let lr = lid.x;
     let lc = lid.y;
+    let tid = lr * 16u + lc;
 
-    var sum: f32 = 0.0;
+    let row0 = wg.x * TILE + lr * 2u;
+    let row1 = row0 + 1u;
+    let col0 = wg.y * TILE + lc * 2u;
+    let col1 = col0 + 1u;
+
+    var acc00: f32 = 0.0;
+    var acc01: f32 = 0.0;
+    var acc10: f32 = 0.0;
+    var acc11: f32 = 0.0;
+
     let num_tiles = (dims.k + TILE - 1u) / TILE;
 
     for (var t: u32 = 0u; t < num_tiles; t++) {
-        // Load tile of A: row from global row, col from tile offset
-        let a_col = t * TILE + lc;
-        if row < dims.m && a_col < dims.k {
-            tile_a[lr * TILE + lc] = a[row * dims.k + a_col];
-        } else {
-            tile_a[lr * TILE + lc] = 0.0;
-        }
+        // 256 threads load 1024 elements each for tile_a and tile_b (4 per thread).
+        for (var i: u32 = 0u; i < 4u; i++) {
+            let elem = tid + i * 256u;
+            let tr = elem / TILE;
+            let tc = elem % TILE;
 
-        // Load tile of B: row from tile offset, col from global col
-        let b_row = t * TILE + lr;
-        if b_row < dims.k && col < dims.n {
-            tile_b[lr * TILE + lc] = b[b_row * dims.n + col];
-        } else {
-            tile_b[lr * TILE + lc] = 0.0;
+            let ga_r = wg.x * TILE + tr;
+            let ga_c = t * TILE + tc;
+            if ga_r < dims.m && ga_c < dims.k {
+                tile_a[elem] = a[ga_r * dims.k + ga_c];
+            } else {
+                tile_a[elem] = 0.0;
+            }
+
+            let gb_r = t * TILE + tr;
+            let gb_c = wg.y * TILE + tc;
+            if gb_r < dims.k && gb_c < dims.n {
+                tile_b[elem] = b[gb_r * dims.n + gb_c];
+            } else {
+                tile_b[elem] = 0.0;
+            }
         }
 
         workgroupBarrier();
 
-        // Accumulate dot product from shared memory
+        // 2x2 register block — a0/a1 each reused for two b values.
         for (var i: u32 = 0u; i < TILE; i++) {
-            sum += tile_a[lr * TILE + i] * tile_b[i * TILE + lc];
+            let a0 = tile_a[(lr * 2u     ) * TILE + i];
+            let a1 = tile_a[(lr * 2u + 1u) * TILE + i];
+            let b0 = tile_b[i * TILE + lc * 2u     ];
+            let b1 = tile_b[i * TILE + lc * 2u + 1u];
+            acc00 = fma(a0, b0, acc00);
+            acc01 = fma(a0, b1, acc01);
+            acc10 = fma(a1, b0, acc10);
+            acc11 = fma(a1, b1, acc11);
         }
 
         workgroupBarrier();
     }
 
-    if row < dims.m && col < dims.n {
-        out[row * dims.n + col] = sum;
-    }
+    if row0 < dims.m && col0 < dims.n { out[row0 * dims.n + col0] = acc00; }
+    if row0 < dims.m && col1 < dims.n { out[row0 * dims.n + col1] = acc01; }
+    if row1 < dims.m && col0 < dims.n { out[row1 * dims.n + col0] = acc10; }
+    if row1 < dims.m && col1 < dims.n { out[row1 * dims.n + col1] = acc11; }
 }
 ";
 
@@ -425,7 +449,7 @@ impl t500 {
         ensure!(p1.s507 == (p4 * p3) as usize, "matmul: B has {} elems, expected {}", p1.s507, p4 * p3);
         let v0 = self.f503((p2 * p3) as usize);
         let v1 = t528 { m: p2, n: p3, k: p4, _pad: 0 };
-        self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(16), p3.div_ceil(16), 1));
+        self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(32), p3.div_ceil(32), 1));
         Ok(v0)
     }
 
