@@ -19,6 +19,10 @@ blake3 = "1"
 futures-channel = "0.3"
 half = { version = "2", features = ["bytemuck"] }
 safetensors = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+clap = { version = "4", features = ["derive"] }
 exopack = { version = "0.2", optional = true, features = ["triple_sims"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -51,6 +55,10 @@ tests = ["dep:exopack"]
 name = "any-gpu-test"
 path = "src/bin/any-gpu-test.rs"
 required-features = ["tests"]
+
+[[bin]]
+name = "any-gpu-serve"
+path = "src/bin/serve.rs"
 
 [[example]]
 name = "candle_bench"

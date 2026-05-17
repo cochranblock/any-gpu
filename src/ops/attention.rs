@@ -62,6 +62,89 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// --- Head split / merge / repeat_kv (Sprint 7 step 7) ---
+//
+// Attention projections output [seq, n_heads*head_dim]; SDPA expects [n_heads, seq, head_dim].
+// split_heads (f627) and merge_heads (f628) transpose between the two layouts.
+// repeat_kv (f629) expands [n_kv_heads, kv_seq, head_dim] → [n_heads, kv_seq, head_dim]
+// for Grouped Query Attention (GQA) where n_kv_heads < n_heads.
+
+/// t542 = HeadParams (private).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t542 {
+    n_heads:  u32,
+    seq_len:  u32,
+    head_dim: u32,
+    _pad:     u32,
+}
+
+/// t543 = RepeatKvParams (private).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t543 {
+    n_kv_heads: u32,
+    n_rep:      u32,   // = n_heads / n_kv_heads
+    kv_seq:     u32,
+    head_dim:   u32,
+}
+
+// f627: out[bh*(seq*hd) + s*hd + d] = src[s*(n_heads*hd) + bh*hd + d]
+const SHADER_SPLIT_HEADS: &str = "
+struct P { n_heads: u32, seq_len: u32, head_dim: u32, _p0: u32, }
+@group(0) @binding(0) var<uniform>             p:   P;
+@group(0) @binding(1) var<storage, read>       src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.n_heads * p.seq_len * p.head_dim;
+    if idx >= total { return; }
+    let bh = idx / (p.seq_len * p.head_dim);
+    let s  = (idx / p.head_dim) % p.seq_len;
+    let d  = idx % p.head_dim;
+    let src_idx = s * (p.n_heads * p.head_dim) + bh * p.head_dim + d;
+    dst[idx] = src[src_idx];
+}
+";
+
+// f628: dst[s*(n_heads*hd) + bh*hd + d] = src[bh*(seq*hd) + s*hd + d]
+const SHADER_MERGE_HEADS: &str = "
+struct P { n_heads: u32, seq_len: u32, head_dim: u32, _p0: u32, }
+@group(0) @binding(0) var<uniform>             p:   P;
+@group(0) @binding(1) var<storage, read>       src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.n_heads * p.seq_len * p.head_dim;
+    if idx >= total { return; }
+    let bh = idx / (p.seq_len * p.head_dim);
+    let s  = (idx / p.head_dim) % p.seq_len;
+    let d  = idx % p.head_dim;
+    let dst_idx = s * (p.n_heads * p.head_dim) + bh * p.head_dim + d;
+    dst[dst_idx] = src[idx];
+}
+";
+
+// f629: out[out_head*(kv_seq*hd) + s*hd + d] = src[(out_head/n_rep)*(kv_seq*hd) + s*hd + d]
+const SHADER_REPEAT_KV: &str = "
+struct P { n_kv_heads: u32, n_rep: u32, kv_seq: u32, head_dim: u32, }
+@group(0) @binding(0) var<uniform>             p:   P;
+@group(0) @binding(1) var<storage, read>       src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.n_kv_heads * p.n_rep * p.kv_seq * p.head_dim;
+    if idx >= total { return; }
+    let out_head = idx / (p.kv_seq * p.head_dim);
+    let kv_head  = out_head / p.n_rep;
+    let tail     = idx % (p.kv_seq * p.head_dim);
+    dst[idx] = src[kv_head * p.kv_seq * p.head_dim + tail];
+}
+";
+
 // --- MSE Loss ---
 
 /// t513 = ReduceParams. Single-uint uniform for reductions like mse_loss.
@@ -429,6 +512,40 @@ impl t500 {
             super::f540(v0),
         );
         Ok(v1)
+    }
+
+    /// f627 = split_heads. [seq, n_heads*head_dim] → [n_heads, seq, head_dim].
+    /// Prepares Q/K/V output of linear projection for multi-head attention.
+    pub fn f627(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p1 * p3) as usize, "split_heads: size mismatch");
+        let v0 = self.f503(p0.s507);
+        let v1 = t542 { n_heads: p1, seq_len: p2, head_dim: p3, _pad: 0 };
+        self.f543(SHADER_SPLIT_HEADS, Some("split_heads"), &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        Ok(v0)
+    }
+
+    /// f628 = merge_heads. [n_heads, seq, head_dim] → [seq, n_heads*head_dim].
+    /// Collapses attention output back to the projection input shape.
+    pub fn f628(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<t501> {
+        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "merge_heads: size mismatch");
+        let v0 = self.f503(p0.s507);
+        let v1 = t542 { n_heads: p1, seq_len: p2, head_dim: p3, _pad: 0 };
+        self.f543(SHADER_MERGE_HEADS, Some("merge_heads"), &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        Ok(v0)
+    }
+
+    /// f629 = repeat_kv. [n_kv_heads, kv_seq, head_dim] → [n_heads, kv_seq, head_dim].
+    /// Expands GQA key/value heads to match the full query head count.
+    /// When n_rep = 1 (MHA), this is a zero-copy clone.
+    pub fn f629(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32) -> Result<t501> {
+        ensure!(p2 > 0 && p1 % p2 == 0, "repeat_kv: n_heads ({}) must be divisible by n_kv_heads ({})", p1, p2);
+        ensure!(p0.s507 == (p2 * p3 * p4) as usize, "repeat_kv: size mismatch");
+        let v_rep = p1 / p2;
+        let v_out = (p1 * p3 * p4) as usize;
+        let v0 = self.f503(v_out);
+        let v1 = t543 { n_kv_heads: p2, n_rep: v_rep, kv_seq: p3, head_dim: p4 };
+        self.f543(SHADER_REPEAT_KV, Some("repeat_kv"), &v1, &[p0], &v0, super::f540((p1 * p3 * p4) as u32));
+        Ok(v0)
     }
 
     /// f626 = scaled_dot_product_attention_fused. Online-softmax causal SDPA.
@@ -972,5 +1089,58 @@ mod tests {
     fn f626_kv_smaller_than_q_errors() {
         let v0 = dev().f502(&vec![0.0f32; 12]);
         assert!(dev().f626(&v0, &v0, &v0, 1, 3, 2, 4).is_err());
+    }
+
+    // --- f627 / f628 = split_heads / merge_heads ---
+
+    // split_heads then merge_heads must be the identity.
+    #[test]
+    fn f627_f628_roundtrip() {
+        let n_heads = 2u32; let seq = 3u32; let hd = 4u32;
+        let v0: Vec<f32> = (0..(seq * n_heads * hd)).map(|i| i as f32).collect(); // [seq, n*hd]
+        let split = dev().f627(&dev().f502(&v0), n_heads, seq, hd).unwrap();
+        let merged = dev().f628(&split, n_heads, seq, hd).unwrap();
+        let got = dev().f504(&merged).unwrap();
+        f544(&got, &v0, 1e-6);
+    }
+
+    // split_heads: element (s=1, bh=0, d=2) should come from position s*(n*hd)+bh*hd+d.
+    #[test]
+    fn f627_known_index() {
+        // n_heads=2, seq=2, head_dim=3. Input [seq, n*hd] = [2, 6].
+        // Row 0: [0,1,2,3,4,5]. Row 1: [10,11,12,13,14,15].
+        // split output layout [n_heads, seq, head_dim]:
+        //   head 0: [input[0,0..3], input[1,0..3]] = [[0,1,2],[10,11,12]]
+        //   head 1: [input[0,3..6], input[1,3..6]] = [[3,4,5],[13,14,15]]
+        let v0 = vec![0.0f32,1.,2.,3.,4.,5., 10.,11.,12.,13.,14.,15.];
+        let split = dev().f627(&dev().f502(&v0), 2, 2, 3).unwrap();
+        let got = dev().f504(&split).unwrap();
+        // [head0_seq0, head0_seq1, head1_seq0, head1_seq1] each of len 3
+        assert_eq!(got[0..3], [0.0,1.,2.]);     // head 0, seq 0
+        assert_eq!(got[3..6], [10.,11.,12.]);    // head 0, seq 1
+        assert_eq!(got[6..9], [3.,4.,5.]);       // head 1, seq 0
+        assert_eq!(got[9..12], [13.,14.,15.]);   // head 1, seq 1
+    }
+
+    // --- f629 = repeat_kv ---
+
+    // repeat_kv with n_rep=1 (MHA) must be a copy.
+    #[test]
+    fn f629_rep1_is_copy() {
+        let v0: Vec<f32> = (0..12).map(|i| i as f32).collect(); // [2 kv_heads, 2 seq, 3 hd]
+        let out = dev().f629(&dev().f502(&v0), 2, 2, 2, 3).unwrap(); // n_heads=n_kv_heads=2
+        let got = dev().f504(&out).unwrap();
+        f544(&got, &v0, 1e-6);
+    }
+
+    // repeat_kv with n_rep=2: [1 kv_head, 2 seq, 2 hd] → [2 heads, 2 seq, 2 hd].
+    #[test]
+    fn f629_rep2_known() {
+        let v0 = vec![1.0f32, 2., 3., 4.]; // [1, 2, 2]
+        let out = dev().f629(&dev().f502(&v0), 2, 1, 2, 2).unwrap(); // n_heads=2, n_kv=1
+        let got = dev().f504(&out).unwrap();
+        // Both head 0 and head 1 should be copies of the single kv head
+        f544(&got[..4], &v0, 1e-6);
+        f544(&got[4..], &v0, 1e-6);
     }
 }

@@ -55,6 +55,13 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t539 | LayerPager | pager (Sprint 7 step 4) |
 | t540 | GpuBufferF16 | device (Sprint 7 step 5) |
 | t541 | FusedSdpaParams | ops/attention (private, Sprint 7 step 6) |
+| t542 | HeadParams | ops/attention (private, Sprint 7 step 7) |
+| t543 | RepeatKvParams | ops/attention (private, Sprint 7 step 7) |
+| t544 | Tokenizer | tokenizer (Sprint 7 step 7) |
+| t545 | Module | module (trait, Sprint 7 step 7) |
+| t546 | Linear | module (Sprint 7 step 7) |
+| t547 | LmConfig | lm (Sprint 7 step 7) |
+| t548 | CausalLM | lm (Sprint 7 step 7) |
 
 ## Functions (fN)
 
@@ -148,6 +155,9 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f624 | apply_causal_mask (Sprint 7 step 2) |
 | f625 | rope — rotary position embeddings (Sprint 7 step 2) |
 | f626 | scaled_dot_product_attention_fused — online-softmax causal SDPA, no N×N alloc (Sprint 7 step 6) |
+| f627 | split_heads — [seq, n*hd] → [n, seq, hd] (Sprint 7 step 7) |
+| f628 | merge_heads — [n, seq, hd] → [seq, n*hd] (Sprint 7 step 7) |
+| f629 | repeat_kv — GQA key/value expansion [n_kv, kv_seq, hd] → [n, kv_seq, hd] (Sprint 7 step 7) |
 
 ### ops/tensor_ops (f640–f659)
 
@@ -249,7 +259,35 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f766 | bf16_to_f32 (free fn) |
 | f767 | f16_to_f32 (free fn) |
 
-### pager (f768–f779) — Sprint 7 step 4
+### tokenizer (f775–f779) — Sprint 7 step 7
+
+| Token | Human name |
+|-------|------------|
+| f775 | Tokenizer::load (from_file) |
+| f775b | Tokenizer::from_bytes |
+| f776 | Tokenizer::encode |
+| f777 | Tokenizer::decode |
+| f778 | Tokenizer::vocab_size |
+| f779 | Tokenizer::eos_id |
+
+### module (f780–f789) — Sprint 7 step 7
+
+| Token | Human name |
+|-------|------------|
+| f780 | Linear::from_weights (pre-transposed weight) |
+| f781 | Linear::from_f32 (HF [out,in] → transpose → [in,out]) |
+
+### lm (f782–f786) — Sprint 7 step 7
+
+| Token | Human name |
+|-------|------------|
+| f782 | LmConfig::from_json |
+| f783 | CausalLM::load |
+| f784 | CausalLM::prefill |
+| f785 | CausalLM::decode_one |
+| f786 | CausalLM::generate |
+
+### pager (f768–f774) — Sprint 7 step 4
 
 | Token | Human name |
 |-------|------------|
