@@ -805,6 +805,240 @@ mod tests {
         f544(&v4, &v3, 1e-3);
     }
 
+    // CPU reference for group_norm_backward — returns (d_input, d_gamma, d_beta).
+    fn cpu_group_norm_backward(
+        grad_out: &[f32], input: &[f32], gamma: &[f32],
+        batch: usize, channels: usize, spatial: usize, groups: usize, eps: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let cpg = channels / groups;
+        let count = (cpg * spatial) as f32;
+        let n_elem = batch * channels * spatial;
+        let mut d_input = vec![0.0f32; n_elem];
+        let mut d_gamma = vec![0.0f32; channels];
+        let mut d_beta  = vec![0.0f32; channels];
+
+        for n in 0..batch {
+            for g in 0..groups {
+                // Recompute stats for this (n, g) group.
+                let mut sum = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                for c in 0..cpg {
+                    let ch = g * cpg + c;
+                    for s in 0..spatial {
+                        let v = input[n * channels * spatial + ch * spatial + s];
+                        sum += v;
+                        sum_sq += v * v;
+                    }
+                }
+                let mean = sum / count;
+                let var = sum_sq / count - mean * mean;
+                let inv_std = 1.0 / (var + eps).sqrt();
+
+                // Compute s1 = sum(dx_hat), s2 = sum(dx_hat * x_hat) over the group.
+                let mut s1 = 0.0f32;
+                let mut s2 = 0.0f32;
+                for c in 0..cpg {
+                    let ch = g * cpg + c;
+                    for s in 0..spatial {
+                        let idx = n * channels * spatial + ch * spatial + s;
+                        let dx_hat = grad_out[idx] * gamma[ch];
+                        let x_hat  = (input[idx] - mean) * inv_std;
+                        s1 += dx_hat;
+                        s2 += dx_hat * x_hat;
+                    }
+                }
+
+                // d_input per element.
+                for c in 0..cpg {
+                    let ch = g * cpg + c;
+                    for s in 0..spatial {
+                        let idx = n * channels * spatial + ch * spatial + s;
+                        let dx_hat = grad_out[idx] * gamma[ch];
+                        let x_hat  = (input[idx] - mean) * inv_std;
+                        d_input[idx] = inv_std * (dx_hat - (s1 + x_hat * s2) / count);
+                    }
+                }
+            }
+        }
+
+        // d_gamma and d_beta: reduce over batch and spatial.
+        for n in 0..batch {
+            for g in 0..groups {
+                // Need stats again for x_hat.
+                let mut sum = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                let c_range = (g * cpg)..((g + 1) * cpg);
+                for ch in c_range.clone() {
+                    for s in 0..spatial {
+                        let v = input[n * channels * spatial + ch * spatial + s];
+                        sum += v;
+                        sum_sq += v * v;
+                    }
+                }
+                let mean = sum / count;
+                let var = sum_sq / count - mean * mean;
+                let inv_std = 1.0 / (var + eps).sqrt();
+                for ch in c_range {
+                    for s in 0..spatial {
+                        let idx = n * channels * spatial + ch * spatial + s;
+                        let x_hat = (input[idx] - mean) * inv_std;
+                        d_gamma[ch] += grad_out[idx] * x_hat;
+                        d_beta[ch]  += grad_out[idx];
+                    }
+                }
+            }
+        }
+
+        (d_input, d_gamma, d_beta)
+    }
+
+    #[test]
+    fn f601_dinput_vs_numeric() {
+        // Numeric gradient check for d_input using finite differences.
+        // batch=1, channels=2, spatial=4, groups=1, eps=1e-5
+        let batch: u32 = 1;
+        let channels: u32 = 2;
+        let spatial: u32 = 4;
+        let groups: u32 = 1;
+        let eps = 1e-5f32;
+        let h = 1e-3f32;  // finite-difference step
+
+        let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let gamma_data: Vec<f32> = vec![1.0, 1.0];
+        let beta_data: Vec<f32>  = vec![0.0, 0.0];
+
+        // Compute forward pass to get output, then derive grad_out = 2*output/n (MSE vs zeros).
+        let v0 = dev().f502(&input_data);
+        let v1 = dev().f502(&gamma_data);
+        let v2 = dev().f502(&beta_data);
+        let v3 = dev().f504(&dev().f600(&v0, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+        let n = v3.len() as f32;
+        let grad_out_data: Vec<f32> = v3.iter().map(|&x| 2.0 * x / n).collect();
+
+        // GPU backward.
+        let v4 = dev().f502(&grad_out_data);
+        let v5 = dev().f502(&gamma_data);
+        let (v6, _, _) = dev().f601(&v4, &v0, &v5, batch, channels, spatial, groups, eps).unwrap();
+        let v7 = dev().f504(&v6).unwrap();
+
+        // Numeric gradient: perturb each input element by +/-h and recompute loss.
+        let n_elem = input_data.len();
+        let mut numeric_grad = vec![0.0f32; n_elem];
+        for i in 0..n_elem {
+            let mut inp_plus  = input_data.clone();
+            let mut inp_minus = input_data.clone();
+            inp_plus[i]  += h;
+            inp_minus[i] -= h;
+
+            let vp = dev().f502(&inp_plus);
+            let out_plus = dev().f504(&dev().f600(&vp, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+            let loss_plus: f32 = out_plus.iter().map(|&x| x * x).sum::<f32>() / n;
+
+            let vm = dev().f502(&inp_minus);
+            let out_minus = dev().f504(&dev().f600(&vm, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+            let loss_minus: f32 = out_minus.iter().map(|&x| x * x).sum::<f32>() / n;
+
+            numeric_grad[i] = (loss_plus - loss_minus) / (2.0 * h);
+        }
+
+        f544(&v7, &numeric_grad, 1e-2);
+    }
+
+    #[test]
+    fn f601_dgamma_dbeta_known() {
+        // Test d_gamma and d_beta with grad_out = all-ones.
+        // batch=1, channels=2, spatial=2, groups=1
+        // input = [1.0, -1.0, 1.0, -1.0]
+        // Each channel: [1, -1] within the single group.
+        // With grad_out = all-ones:
+        //   d_beta[c] = sum of grad_out for channel c over (batch, spatial) = 1*2 = 2.0 each.
+        //   d_gamma[c] = sum of (grad_out * x_hat) for channel c.
+        let batch: u32 = 1;
+        let channels: u32 = 2;
+        let spatial: u32 = 2;
+        let groups: u32 = 1;
+        let eps = 1e-5f32;
+
+        let input_data: Vec<f32> = vec![1.0, -1.0, 1.0, -1.0];
+        let gamma_data: Vec<f32> = vec![1.0, 1.0];
+        let grad_out_data: Vec<f32> = vec![1.0; 4];
+
+        // CPU reference.
+        let (cpu_din, cpu_dg, cpu_db) = cpu_group_norm_backward(
+            &grad_out_data, &input_data, &gamma_data,
+            batch as usize, channels as usize, spatial as usize, groups as usize, eps,
+        );
+
+        // GPU backward.
+        let v0 = dev().f502(&grad_out_data);
+        let v1 = dev().f502(&input_data);
+        let v2 = dev().f502(&gamma_data);
+        let (v3, v4, v5) = dev().f601(&v0, &v1, &v2, batch, channels, spatial, groups, eps).unwrap();
+        let gpu_din = dev().f504(&v3).unwrap();
+        let gpu_dg  = dev().f504(&v4).unwrap();
+        let gpu_db  = dev().f504(&v5).unwrap();
+
+        f544(&gpu_din, &cpu_din, 1e-4);
+        f544(&gpu_dg,  &cpu_dg,  1e-4);
+        // d_beta[c] = spatial * batch = 2 for each channel.
+        f544(&gpu_db,  &[2.0, 2.0], 1e-4);
+        // CPU should agree with the known value too.
+        assert!((cpu_db[0] - 2.0).abs() < 1e-4 && (cpu_db[1] - 2.0).abs() < 1e-4,
+            "cpu_db: {cpu_db:?}");
+    }
+
+    #[test]
+    fn f601_groups2() {
+        // Numeric gradient check with groups=2 (1 channel per group).
+        // batch=1, channels=2, spatial=3, groups=2, eps=1e-5
+        let batch: u32 = 1;
+        let channels: u32 = 2;
+        let spatial: u32 = 3;
+        let groups: u32 = 2;
+        let eps = 1e-5f32;
+        let h = 1e-3f32;
+
+        let input_data: Vec<f32> = vec![0.5, -0.5, 1.5,  -1.0, 2.0, 0.0];
+        let gamma_data: Vec<f32> = vec![1.0, 2.0];
+        let beta_data: Vec<f32>  = vec![0.0, 0.0];
+
+        // Forward for grad_out derivation (MSE vs zeros).
+        let v0 = dev().f502(&input_data);
+        let v1 = dev().f502(&gamma_data);
+        let v2 = dev().f502(&beta_data);
+        let v3 = dev().f504(&dev().f600(&v0, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+        let n = v3.len() as f32;
+        let grad_out_data: Vec<f32> = v3.iter().map(|&x| 2.0 * x / n).collect();
+
+        // GPU backward.
+        let v4 = dev().f502(&grad_out_data);
+        let v5 = dev().f502(&gamma_data);
+        let (v6, _, _) = dev().f601(&v4, &v0, &v5, batch, channels, spatial, groups, eps).unwrap();
+        let v7 = dev().f504(&v6).unwrap();
+
+        // Numeric gradient.
+        let n_elem = input_data.len();
+        let mut numeric_grad = vec![0.0f32; n_elem];
+        for i in 0..n_elem {
+            let mut inp_plus  = input_data.clone();
+            let mut inp_minus = input_data.clone();
+            inp_plus[i]  += h;
+            inp_minus[i] -= h;
+
+            let vp = dev().f502(&inp_plus);
+            let out_plus = dev().f504(&dev().f600(&vp, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+            let loss_plus: f32 = out_plus.iter().map(|&x| x * x).sum::<f32>() / n;
+
+            let vm = dev().f502(&inp_minus);
+            let out_minus = dev().f504(&dev().f600(&vm, &v1, &v2, batch, channels, spatial, groups, eps).unwrap()).unwrap();
+            let loss_minus: f32 = out_minus.iter().map(|&x| x * x).sum::<f32>() / n;
+
+            numeric_grad[i] = (loss_plus - loss_minus) / (2.0 * h);
+        }
+
+        f544(&v7, &numeric_grad, 1e-2);
+    }
+
     #[test]
     fn f600_constant_input() {
         let v0 = vec![5.0; 8];

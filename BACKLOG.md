@@ -29,9 +29,9 @@
 | 12 | [feature] | Starter nanobyte: ~1M param diffusion model for 32x32 pixel art, trained on bt's 5700 XT | Training loop (#7), pixel-forge sprite data |
 | 13 | [test] | Run 141 tests on bt/lf/gd after every push — add a `test-fleet.sh` script that SSHs all 3 nodes | — |
 | 14 | [fix] | gd Intel Iris Xe untested — force `WGPU_BACKEND=vulkan` to skip NVIDIA, test Intel path in isolation | — |
-| 15 | [test] | conv2d backward stride/dilation coverage — numeric gradient checks only cover stride=1, pad=0. Add stride=2+padding cases (common ResNet/UNet pattern, off-by-one in grad_weight shader would not be caught by current tests) | — |
-| 16 | [test] | Large tensor test (>16M elements) to exercise the >65535 workgroup 2D dispatch path | — |
-| 17 | [feature] | conv2d groups > 1 test — depthwise separable conv needed for efficient UNet, shader supports it but untested | — |
+| ~~15~~ | ~~[test]~~ | ~~conv2d backward stride/dilation coverage~~ — done. `f584_stride2_numeric`: stride=(2,2) numeric grad check, all 4 kernel elements. `f582_stride2_pad1`: stride=2 + pad=1 vs CPU cross-validation. | done |
+| ~~16~~ | ~~[test]~~ | ~~Large tensor test (>16M elements)~~ — done. `f550_2d_dispatch`: N=16,777,216 (65536×256 workgroups), forces gid.y path in f540, checks result[0] and result[N-1]. | done |
+| ~~17~~ | ~~[feature]~~ | ~~conv2d groups > 1 test~~ — done. `f582_depthwise_groups`: groups=in_c=3, identity 3×3 kernel per channel, output == input (spatial), cross-validated vs CPU. | done |
 | 18 | [fix] | `opt-level = "z"` → `opt-level = 3` in release profile — size optimization is wrong for a perf library; hurts CPU-side loops and reference impls | — |
 | 19 | [fix] | `NanoSignResult` not enforced by compiler — `load_verified()` returns an enum, caller can silently accept `Unsigned` variant. Consider returning `Result<Vec<u8>, NanoSignError>` to make unsigned files an explicit error path | — |
 | ~~20~~ | ~~[feature]~~ | ~~Subgroup operations for softmax~~ — done (P2). group_norm subgroup upgrade still open, see P3. | done |

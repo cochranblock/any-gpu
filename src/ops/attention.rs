@@ -1076,6 +1076,83 @@ mod tests {
         f544(&result_a, result_b, 1e-4);
     }
 
+    // CPU reference RoPE: for each (bh, s, pair_idx): angle = (start_pos + s) / base^(2*pair_idx/head_dim).
+    // Rotation: [x0*cos - x1*sin, x0*sin + x1*cos].
+    fn cpu_rope(input: &[f32], batch_heads: usize, seq_len: usize, head_dim: usize, start_pos: usize, base: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch_heads * seq_len * head_dim];
+        for bh in 0..batch_heads {
+            for s in 0..seq_len {
+                for pair_idx in 0..(head_dim / 2) {
+                    let exponent = -2.0 * pair_idx as f32 / head_dim as f32;
+                    let inv_freq = base.powf(exponent);
+                    let angle = (start_pos + s) as f32 * inv_freq;
+                    let cos_a = angle.cos();
+                    let sin_a = angle.sin();
+                    let base_idx = bh * seq_len * head_dim + s * head_dim + pair_idx * 2;
+                    let x0 = input[base_idx];
+                    let x1 = input[base_idx + 1];
+                    out[base_idx]     = x0 * cos_a - x1 * sin_a;
+                    out[base_idx + 1] = x0 * sin_a + x1 * cos_a;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f625_multi_position_vs_cpu() {
+        // seq_len=4, head_dim=4, batch_heads=2, start_pos=0, theta=10000.
+        // Exercises the full multi-position, multi-head RoPE path against a CPU reference.
+        let batch_heads = 2usize; let seq_len = 4usize; let head_dim = 4usize;
+        let start_pos = 0u32; let base = 10000.0f32;
+
+        let input: Vec<f32> = (0..batch_heads * seq_len * head_dim)
+            .map(|i| (i as f32) * 0.1 - 1.5)
+            .collect();
+
+        let cpu_out = cpu_rope(&input, batch_heads, seq_len, head_dim, start_pos as usize, base);
+
+        let gpu_out = dev().f504(&dev().f625(
+            &dev().f502(&input),
+            batch_heads as u32, seq_len as u32, head_dim as u32, start_pos, base,
+        ).unwrap()).unwrap();
+
+        f544(&gpu_out, &cpu_out, 1e-4);
+    }
+
+    #[test]
+    fn f625_start_pos_continuity() {
+        // Verify that RoPE on tokens [0..4] with start_pos=0 produces the same rotations
+        // as RoPE on tokens [2..4] with start_pos=2 (the subsequence must match).
+        // This tests that the start_pos offset is correctly applied per-sequence-position.
+        let batch_heads = 1usize; let seq_len_full = 4usize; let head_dim = 4usize;
+        let base = 10000.0f32;
+
+        let input_full: Vec<f32> = (0..batch_heads * seq_len_full * head_dim)
+            .map(|i| (i as f32) * 0.13 - 0.5)
+            .collect();
+
+        // Full sequence: tokens [0..4], start_pos=0.
+        let full_out = dev().f504(&dev().f625(
+            &dev().f502(&input_full),
+            batch_heads as u32, seq_len_full as u32, head_dim as u32, 0, base,
+        ).unwrap()).unwrap();
+
+        // Subsequence: tokens [2..4] extracted from the same input, start_pos=2.
+        let sub_seq_len = 2usize;
+        let sub_start = sub_seq_len * head_dim; // offset of seq position 2 in the flat input
+        let input_sub: Vec<f32> = input_full[sub_start..sub_start + sub_seq_len * head_dim].to_vec();
+
+        let sub_out = dev().f504(&dev().f625(
+            &dev().f502(&input_sub),
+            batch_heads as u32, sub_seq_len as u32, head_dim as u32, 2, base,
+        ).unwrap()).unwrap();
+
+        // The last two sequence positions from the full run must equal the subsequence output.
+        let full_tail = &full_out[sub_start..sub_start + sub_seq_len * head_dim];
+        f544(&sub_out, full_tail, 1e-4);
+    }
+
     #[test]
     fn f625_odd_head_dim_errors() {
         let v0 = vec![1.0f32; 5];

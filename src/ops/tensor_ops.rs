@@ -484,4 +484,90 @@ mod tests {
         let v2 = dev().f504(&dev().f645(&dev().f502(&v0), &v1, 2, 4).unwrap()).unwrap();
         assert_eq!(v2, v0);
     }
+
+    // --- f643 = slice_per_block ---
+
+    #[test]
+    fn f643_known_values() {
+        // src shape: [2, 5] = [[0,1,2,3,4],[5,6,7,8,9]]
+        // outer=2, combined=5, slice_size=2, offset=1 → extract cols [1..3] of each row.
+        // expected: [[1,2],[6,7]] = [1,2,6,7]
+        let v0 = dev().f502(&[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        let v1 = dev().f504(&dev().f643(&v0, 2, 2, 1, 5).unwrap()).unwrap();
+        assert_eq!(v1, vec![1.0, 2.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn f643_zero_offset() {
+        // offset=0, slice_size == combined: identity copy.
+        // src = [[1,2,3],[4,5,6]], outer=2, combined=3, slice_size=3, offset=0.
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v1 = dev().f504(&dev().f643(&v0, 2, 3, 0, 3).unwrap()).unwrap();
+        assert_eq!(v1, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn f643_last_chunk() {
+        // src shape: [3, 6] — extract last 2 cols (offset=4, slice_size=2).
+        // rows: [0..5],[6..11],[12..17]
+        // expected: [4,5, 10,11, 16,17]
+        let v0: Vec<f32> = (0..18).map(|i| i as f32).collect();
+        let v1 = dev().f504(&dev().f643(&dev().f502(&v0), 3, 2, 4, 6).unwrap()).unwrap();
+        assert_eq!(v1, vec![4.0, 5.0, 10.0, 11.0, 16.0, 17.0]);
+    }
+
+    // --- f644 = sum_inner ---
+
+    #[test]
+    fn f644_known_sums() {
+        // src shape: [2, 4] = [[1,2,3,4],[5,6,7,8]]
+        // dst[0] = 10, dst[1] = 26
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let v1 = dev().f504(&dev().f644(&v0, 2, 4).unwrap()).unwrap();
+        assert_eq!(v1, vec![10.0, 26.0]);
+    }
+
+    #[test]
+    fn f644_single_outer() {
+        // outer=1, inner=5: single row sum = 1+2+3+4+5 = 15
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0]);
+        let v1 = dev().f504(&dev().f644(&v0, 1, 5).unwrap()).unwrap();
+        assert_eq!(v1, vec![15.0]);
+    }
+
+    // --- f646 = sum_rows ---
+
+    #[test]
+    fn f646_known_sums() {
+        // src shape: [3, 2] = [[1,2],[3,4],[5,6]]
+        // dst[0] = 1+3+5 = 9, dst[1] = 2+4+6 = 12
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v1 = dev().f504(&dev().f646(&v0, 3, 2).unwrap()).unwrap();
+        assert_eq!(v1, vec![9.0, 12.0]);
+    }
+
+    #[test]
+    fn f646_single_row() {
+        // rows=1, cols=3: sum over 1 row = identity copy of that row.
+        let v0 = dev().f502(&[7.0f32, 8.0, 9.0]);
+        let v1 = dev().f504(&dev().f646(&v0, 1, 3).unwrap()).unwrap();
+        assert_eq!(v1, vec![7.0, 8.0, 9.0]);
+    }
+
+    // --- f550 large-tensor 2D dispatch ---
+
+    #[test]
+    fn f550_2d_dispatch() {
+        // N = 65536 * 256 = 16_777_216 — forces gid.y path in f540 (n/256 > 65535).
+        // Allocates ~192 MB GPU (two inputs + one output), downloads 64 MB.
+        let n = 65536usize * 256;
+        let a = vec![1.0f32; n];
+        let b = vec![2.0f32; n];
+        let v0 = dev().f502(&a);
+        let v1 = dev().f502(&b);
+        let v2 = dev().f504(&dev().f550(&v0, &v1).unwrap()).unwrap();
+        assert_eq!(v2.len(), n);
+        assert_eq!(v2[0], 3.0);
+        assert_eq!(v2[n - 1], 3.0);
+    }
 }
