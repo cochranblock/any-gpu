@@ -24,7 +24,9 @@ wgpu picks the backend — Vulkan on Linux, Metal on macOS, DX12 on Windows. You
 
 ## Documentation
 
-This README is the entry point. The actual docs live in two source-of-truth files at the root of the repo:
+**[cochranblock.github.io/any-gpu](https://cochranblock.github.io/any-gpu/)** — full mdBook docs (architecture, ops, benchmarks, inference, hardware matrix, provenance).
+
+Source-of-truth files at the repo root:
 
 - **[PROOF_OF_ARTIFACTS.md](PROOF_OF_ARTIFACTS.md)** — what exists today, status, source-linked. Architecture, op catalog, build output, hardware verification across 4 GPUs, full benchmark matrices (any-gpu vs CUDA vs MPS), NanoSign signing, Triple Lens evaluation, roadmap. If you want to know what this project *does*, read this.
 - **[TIMELINE_OF_INVENTION.md](TIMELINE_OF_INVENTION.md)** — dated, commit-level record of what was built, when, and why. If you want to know how this project *got built*, read this.

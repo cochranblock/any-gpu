@@ -8,6 +8,8 @@ edition = "2024"
 description = "Tensor engine for every GPU. AMD, NVIDIA, Intel, Apple. One codebase, zero vendor lock-in. wgpu under the hood."
 license = "Unlicense"
 repository = "https://github.com/cochranblock/any-gpu"
+documentation = "https://cochranblock.github.io/any-gpu/"
+homepage = "https://cochranblock.org/products"
 keywords = ["gpu", "wgpu", "tensor", "ml", "compute"]
 categories = ["science", "graphics"]
 
