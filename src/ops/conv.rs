@@ -19,6 +19,24 @@ struct t528 {
     _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t528g1 {
+    n: u32,
+    k: u32,
+    k_chunk: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t528g2 {
+    n: u32,
+    p: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
 // Single-wavefront 4x4 register-blocked tiled matmul.
 // @workgroup_size(64) = exactly one wave64 on RDNA1/RDNA2.
 // workgroupBarrier inside a single wavefront is a wavefront-local fence
@@ -26,6 +44,62 @@ struct t528 {
 // vs the previous 4-wavefront (16x16) workgroup.
 // Thread layout within the workgroup: tr = t/8 (0..8), tc = t%8 (0..8).
 // Each thread owns a 4x4 output subblock → 64 threads × 16 outputs = 1024 = 32x32.
+// Two-pass GEMV: A(1,k) × B(k,n) = C(1,n).
+//
+// The naive 1-thread-per-output approach gives only N/64 = 64 waves for N=4096,
+// which is ~2% of RDNA1's 2880-wave capacity — not enough to hide DRAM latency.
+//
+// Fix: split K into K_CHUNK-element chunks (P = ceil(K/K_CHUNK) splits).
+// Pass 1 dispatches (ceil(N/64), P) workgroups = ~1024–7000 waves depending on shape.
+// Each workgroup: 64 threads × K_CHUNK K-steps, writes partial[p, n].
+// Pass 2: reduce P partial sums per output element → final y[n].
+//
+// Access pattern: all 64 threads in a wave claim consecutive n values.
+// At each k step: w[k*N + n_base..n_base+63] = 256 B contiguous = one DRAM burst.
+// x[k] is scalar broadcast; 16 KB total, L2-resident throughout.
+
+const K_CHUNK: u32 = 256;  // K-elements per workgroup
+
+// Pass 1: partial dot products. Writes partial[p * N + n].
+const SHADER_GEMV_P1: &str = "
+struct Dims { n: u32, k: u32, k_chunk: u32, _pad: u32, }
+@group(0) @binding(0) var<uniform>             dims: Dims;
+@group(0) @binding(1) var<storage, read>       x:    array<f32>;
+@group(0) @binding(2) var<storage, read>       w:    array<f32>;
+@group(0) @binding(3) var<storage, read_write> part: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+    let n   = wg.x * 64u + lane;
+    let k0  = wg.y * dims.k_chunk;
+    let k1  = min(k0 + dims.k_chunk, dims.k);
+    var acc: f32 = 0.0;
+    if n < dims.n {
+        for (var k: u32 = k0; k < k1; k++) {
+            acc += x[k] * w[k * dims.n + n];
+        }
+    }
+    if n < dims.n { part[wg.y * dims.n + n] = acc; }
+}
+";
+
+// Pass 2: reduce P partial sums → final output.
+const SHADER_GEMV_P2: &str = "
+struct Dims { n: u32, p: u32, _pad0: u32, _pad1: u32, }
+@group(0) @binding(0) var<uniform>             dims: Dims;
+@group(0) @binding(1) var<storage, read>       part: array<f32>;
+@group(0) @binding(2) var<storage, read_write> y:    array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x + gid.y * 65535u * 256u;
+    if n >= dims.n { return; }
+    var s: f32 = 0.0;
+    for (var p: u32 = 0u; p < dims.p; p++) { s += part[p * dims.n + n]; }
+    y[n] = s;
+}
+";
+
 // LDS: 2 × 32x32 × 4B = 8 KB/workgroup (fits 8 per RDNA1 CU at 64 KB LDS).
 // Tile load: 64 threads × 16 elements = 1024 elements per A-tile and B-tile.
 const SHADER_MATMUL: &str = "
@@ -526,12 +600,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 impl t500 {
     /// f580 = matmul. A(m,k) x B(k,n) = C(m,n). Row-major layout.
+    /// Dispatches SHADER_GEMV when m==1 (decode): one thread per output element,
+    /// 64-wide coalesced B reads across the wave, x stays in L2 as scalar broadcast.
     pub fn f580(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
         ensure!(p0.s507 == (p2 * p4) as usize, "matmul: A has {} elems, expected {}", p0.s507, p2 * p4);
         ensure!(p1.s507 == (p4 * p3) as usize, "matmul: B has {} elems, expected {}", p1.s507, p4 * p3);
         let v0 = self.f503((p2 * p3) as usize);
-        let v1 = t528 { m: p2, n: p3, k: p4, _pad: 0 };
-        self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(32), p3.div_ceil(32), 1));
+        if p2 == 1 {
+            let p_splits = p4.div_ceil(K_CHUNK);
+            let v_part = self.f503((p_splits * p3) as usize);
+            let v1 = t528g1 { n: p3, k: p4, k_chunk: K_CHUNK, _pad: 0 };
+            self.f543(SHADER_GEMV_P1, Some("gemv_p1"), &v1, &[p0, p1], &v_part, (p3.div_ceil(64), p_splits, 1));
+            let v2 = t528g2 { n: p3, p: p_splits, _pad0: 0, _pad1: 0 };
+            self.f543(SHADER_GEMV_P2, Some("gemv_p2"), &v2, &[&v_part], &v0, super::f540(p3));
+        } else {
+            let v1 = t528 { m: p2, n: p3, k: p4, _pad: 0 };
+            self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(32), p3.div_ceil(32), 1));
+        }
         Ok(v0)
     }
 
@@ -767,6 +852,42 @@ mod tests {
     fn f580_1x1() {
         let v0 = dev().f504(&dev().f580(&dev().f502(&[3.0]), &dev().f502(&[7.0]), 1, 1, 1).unwrap()).unwrap();
         assert_eq!(v0, vec![21.0]);
+    }
+
+    // f580 GEMV path (m=1): 1×k @ k×n = 1×n. Cross-validated vs CPU matmul.
+    #[test]
+    fn f580_gemv_small_vs_cpu() {
+        let x: Vec<f32> = (0..8).map(|i| (i as f32) * 0.1 + 0.05).collect();
+        let w: Vec<f32> = (0..48).map(|i| (i as f32) * 0.07 - 0.3).collect();
+        let ref_ = cpu_matmul(&x, &w, 1, 6, 8);
+        let got = dev().f504(&dev().f580(&dev().f502(&x), &dev().f502(&w), 1, 6, 8).unwrap()).unwrap();
+        f544(&got, &ref_, 1e-4);
+    }
+
+    // f580 GEMV path: square [1×64 @ 64×64].
+    #[test]
+    fn f580_gemv_square_vs_cpu() {
+        let k = 64usize; let n = 64usize;
+        let x: Vec<f32> = (0..k).map(|i| (i as f32) * 0.01 - 0.3).collect();
+        let w: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.005 - 0.15).collect();
+        let ref_ = cpu_matmul(&x, &w, 1, n, k);
+        let got = dev().f504(&dev().f580(
+            &dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32
+        ).unwrap()).unwrap();
+        f544(&got, &ref_, 1e-3);
+    }
+
+    // f580 GEMV path: non-square [1×128 @ 128×64].
+    #[test]
+    fn f580_gemv_nonsquare_vs_cpu() {
+        let k = 128usize; let n = 64usize;
+        let x: Vec<f32> = (0..k).map(|i| (i as f32) * 0.007 - 0.4).collect();
+        let w: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.003 + 0.01).collect();
+        let ref_ = cpu_matmul(&x, &w, 1, n, k);
+        let got = dev().f504(&dev().f580(
+            &dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32
+        ).unwrap()).unwrap();
+        f544(&got, &ref_, 1e-3);
     }
 
     #[test]
