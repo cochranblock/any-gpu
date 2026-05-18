@@ -192,4 +192,54 @@ mod tests {
         let v0 = dev().f504(&dev().f660(&dev().f502(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap()).unwrap();
         assert_eq!(v0, vec![7.0; 9]);
     }
+
+    // --- f661 = upsample_nearest_backward ---
+    // CPU reference: accumulate grad contributions from each output pixel into input pixel.
+    fn cpu_upsample_backward(grad: &[f32], batch: usize, ch: usize, in_h: usize, in_w: usize, sh: usize, sw: usize) -> Vec<f32> {
+        let oh = in_h * sh; let ow = in_w * sw;
+        let mut out = vec![0.0f32; batch * ch * in_h * in_w];
+        for n in 0..batch {
+            for c in 0..ch {
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let iy = oy / sh; let ix = ox / sw;
+                        out[n*ch*in_h*in_w + c*in_h*in_w + iy*in_w + ix] +=
+                            grad[n*ch*oh*ow + c*oh*ow + oy*ow + ox];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f661_2x_known() {
+        // 1ch 2×2 input, 2× upsample → 4×4 grad_out, grad_in should sum 4 contributions per cell.
+        // grad_out = all 1s → each in pixel gets 4.
+        let grad = vec![1.0f32; 16]; // [1,1,4,4]
+        let got = dev().f504(&dev().f661(&dev().f502(&grad), 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
+        assert_eq!(got, vec![4.0, 4.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn f661_vs_cpu() {
+        // 2 batch, 2 ch, 2×3 input, scale 2×2 → 4×6 grad_out.
+        let batch=2; let ch=2; let h=2; let w=3; let sh=2; let sw=2;
+        let oh=h*sh; let ow=w*sw;
+        let grad: Vec<f32> = (0..batch*ch*oh*ow).map(|i| i as f32 * 0.1).collect();
+        let expected = cpu_upsample_backward(&grad, batch, ch, h, w, sh, sw);
+        let got = dev().f504(&dev().f661(
+            &dev().f502(&grad), batch as u32, ch as u32, h as u32, w as u32, sh as u32, sw as u32,
+        ).unwrap()).unwrap();
+        for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+            assert!((g - e).abs() < 1e-4, "index {i}: got {g}, want {e}");
+        }
+    }
+
+    #[test]
+    fn f661_size_mismatch() {
+        // grad_out size must equal batch*ch*in_h*scale_h*in_w*scale_w
+        let grad = dev().f502(&[1.0f32; 7]); // wrong size
+        assert!(dev().f661(&grad, 1, 1, 2, 2, 2, 2).is_err());
+    }
 }

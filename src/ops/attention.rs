@@ -788,6 +788,29 @@ mod tests {
     }
 
     #[test]
+    fn f621_multi_batch() {
+        // 3 batch_heads, seq=2, dk=2. Each head is independent.
+        // Use zero Q/K → uniform attention → output row = mean(V rows).
+        let bh = 3u32; let seq = 2u32; let dk = 2u32;
+        let q = vec![0.0f32; (bh * seq * dk) as usize];
+        let k = q.clone();
+        let v: Vec<f32> = (0..(bh * seq * dk) as usize).map(|i| i as f32).collect();
+        let got = dev().f504(&dev().f621(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v), bh, seq, dk,
+        ).unwrap()).unwrap();
+        // For each head h: V rows are [h*4, h*4+1, h*4+2, h*4+3].
+        // Mean per col: col0 = (h*4 + h*4+2)/2, col1 = (h*4+1 + h*4+3)/2.
+        for h in 0..bh as usize {
+            let base_v = h * (seq * dk) as usize;
+            let mean0 = (v[base_v] + v[base_v + 2]) / 2.0;
+            let mean1 = (v[base_v + 1] + v[base_v + 3]) / 2.0;
+            let base_o = h * (seq * dk) as usize;
+            f544(&got[base_o..base_o + 2], &[mean0, mean1], 1e-4);
+            f544(&got[base_o + 2..base_o + 4], &[mean0, mean1], 1e-4);
+        }
+    }
+
+    #[test]
     fn f622_basic() {
         let v0 = dev().f502(&[1.0, 2.0, 3.0]);
         let v1 = dev().f502(&[1.5, 2.5, 3.5]);
@@ -1186,6 +1209,26 @@ mod tests {
         assert_eq!(got[3..6], [10.,11.,12.]);    // head 0, seq 1
         assert_eq!(got[6..9], [3.,4.,5.]);       // head 1, seq 0
         assert_eq!(got[9..12], [13.,14.,15.]);   // head 1, seq 1
+    }
+
+    // --- f628 = merge_heads dedicated tests ---
+
+    #[test]
+    fn f628_known_index() {
+        // Inverse of f627_known_index: input is [n_heads, seq, head_dim], output is [seq, n*hd].
+        // n_heads=2, seq=2, head_dim=3.
+        // head 0: seq0=[0,1,2], seq1=[10,11,12]. head 1: seq0=[3,4,5], seq1=[13,14,15].
+        let v0 = vec![0.0f32,1.,2., 10.,11.,12., 3.,4.,5., 13.,14.,15.]; // [2,2,3]
+        let got = dev().f504(&dev().f628(&dev().f502(&v0), 2, 2, 3).unwrap()).unwrap();
+        // Output [seq, n*hd] = [2, 6]: row0=[0,1,2,3,4,5], row1=[10,11,12,13,14,15]
+        assert_eq!(got[0..6],  [0.0, 1., 2., 3., 4., 5.]);
+        assert_eq!(got[6..12], [10., 11., 12., 13., 14., 15.]);
+    }
+
+    #[test]
+    fn f628_size_mismatch() {
+        let v0 = dev().f502(&[1.0f32; 11]); // 11 ≠ 2*3*2=12
+        assert!(dev().f628(&v0, 2, 3, 2).is_err());
     }
 
     // --- f629 = repeat_kv ---

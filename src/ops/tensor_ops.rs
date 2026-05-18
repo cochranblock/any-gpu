@@ -429,4 +429,59 @@ mod tests {
         let v3 = dev().f504(&v2).unwrap();
         assert_eq!(v3, v0);
     }
+
+    // --- f642 = broadcast_add: out[r, c] = a[r, c] + b[r] ---
+
+    #[test]
+    fn f642_known_values() {
+        // a = [[1,2,3],[4,5,6]], b = [10, 20] (per-row bias).
+        // out[0,*] += 10, out[1,*] += 20.
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v1 = dev().f502(&[10.0f32, 20.0]);
+        let v2 = dev().f504(&dev().f642(&v0, &v1, 2, 3).unwrap()).unwrap();
+        assert_eq!(v2, vec![11.0, 12.0, 13.0, 24.0, 25.0, 26.0]);
+    }
+
+    #[test]
+    fn f642_single_row() {
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0]);
+        let v1 = dev().f502(&[5.0f32]);
+        let v2 = dev().f504(&dev().f642(&v0, &v1, 1, 3).unwrap()).unwrap();
+        assert_eq!(v2, vec![6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn f642_size_mismatch() {
+        let v0 = dev().f502(&[1.0f32; 6]);
+        let v1 = dev().f502(&[1.0f32; 3]);
+        assert!(dev().f642(&v0, &v1, 2, 3).is_err());
+    }
+
+    // --- f645 = add_per_col: out[r, c] = a[r, c] + b[c] (linear bias) ---
+
+    #[test]
+    fn f645_known_values() {
+        // a = [[1,2,3],[4,5,6]], b = [10,20,30] (per-col bias).
+        // out[*,0] += 10, out[*,1] += 20, out[*,2] += 30.
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v1 = dev().f502(&[10.0f32, 20.0, 30.0]);
+        let v2 = dev().f504(&dev().f645(&v0, &v1, 2, 3).unwrap()).unwrap();
+        assert_eq!(v2, vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+    }
+
+    #[test]
+    fn f645_single_col() {
+        let v0 = dev().f502(&[1.0f32, 2.0, 3.0]);
+        let v1 = dev().f502(&[100.0f32]);
+        let v2 = dev().f504(&dev().f645(&v0, &v1, 3, 1).unwrap()).unwrap();
+        assert_eq!(v2, vec![101.0, 102.0, 103.0]);
+    }
+
+    #[test]
+    fn f645_zero_bias() {
+        let v0: Vec<f32> = (1..=8).map(|x| x as f32).collect();
+        let v1 = dev().f502(&[0.0f32; 4]);
+        let v2 = dev().f504(&dev().f645(&dev().f502(&v0), &v1, 2, 4).unwrap()).unwrap();
+        assert_eq!(v2, v0);
+    }
 }

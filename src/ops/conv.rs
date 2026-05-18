@@ -782,6 +782,19 @@ mod tests {
         f544(&v6, &v5, 1e-3);
     }
 
+    #[test]
+    fn f580_tile_boundary() {
+        // 33×33×33: crosses the 32-element tile boundary on all three dims.
+        let v0 = 33; let v1 = 33; let v2 = 33;
+        let v3: Vec<f32> = (0..v0*v2).map(|i| (i as f32) * 0.005 - 0.5).collect();
+        let v4: Vec<f32> = (0..v2*v1).map(|i| (i as f32) * 0.007 - 0.3).collect();
+        let v5 = cpu_matmul(&v3, &v4, v0, v1, v2);
+        let v6 = dev().f504(&dev().f580(
+            &dev().f502(&v3), &dev().f502(&v4), v0 as u32, v1 as u32, v2 as u32
+        ).unwrap()).unwrap();
+        f544(&v6, &v5, 1e-2);
+    }
+
     // --- Batch matmul tests ---
 
     #[test]
