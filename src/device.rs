@@ -77,6 +77,7 @@ pub struct t500 {
 }
 
 /// t501 = GpuBuffer. GPU-resident f32 buffer with element-count metadata.
+#[derive(Clone)]
 pub struct t501 {
     /// s505 = buffer. The underlying wgpu storage buffer.
     pub(crate) s505: wgpu::Buffer,
@@ -88,6 +89,7 @@ pub struct t501 {
 
 /// t540 = GpuBufferF16. GPU-resident f16 buffer; element size is 2 bytes.
 /// Requires device.s521 (SHADER_F16) to use in shaders. Expand to f32 via f772.
+#[derive(Clone)]
 pub struct t540 {
     /// s522 = buf. The underlying wgpu storage buffer (f16 bits packed as raw bytes).
     pub(crate) s522: wgpu::Buffer,

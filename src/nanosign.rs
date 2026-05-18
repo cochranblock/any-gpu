@@ -12,6 +12,7 @@ const MAGIC: &[u8; 4] = b"NSIG";
 const SIG_LEN: usize = 4 + 32; // magic + BLAKE3 hash
 
 /// t510 = NanoSignResult. Variant names stay descriptive (Verified/Failed/Unsigned).
+#[must_use]
 #[derive(Debug, PartialEq)]
 pub enum t510 {
     Verified(blake3::Hash),

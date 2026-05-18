@@ -110,6 +110,72 @@ impl t502 {
     pub fn f530(&self, p0: usize) -> u32 {
         self.s509[p0]
     }
+
+    /// f531 = Tensor::matmul. A[m,k] × B[k,n] = C[m,n]. Both inputs must be 2D.
+    pub fn f531(&self, p0: &t500, p1: &t502) -> Result<t502> {
+        ensure!(self.f524() == 2, "matmul: self must be 2D, got {}D", self.f524());
+        ensure!(p1.f524() == 2, "matmul: other must be 2D, got {}D", p1.f524());
+        let v0 = self.f530(0);  // m
+        let v1 = self.f530(1);  // k
+        let v2 = p1.f530(1);    // n
+        ensure!(v1 == p1.f530(0), "matmul: inner dims must match: {}×{} vs {}×{}", v0, v1, p1.f530(0), v2);
+        let v3 = p0.f580(&self.s508, &p1.s508, v0, v2, v1)?;
+        t502::f521(v3, &[v0, v2])
+    }
+
+    /// f532 = Tensor::relu. Element-wise relu. Output has the same shape as input.
+    pub fn f532(&self, p0: &t500) -> Result<t502> {
+        let v0 = p0.f554(&self.s508)?;
+        t502::f521(v0, self.f523())
+    }
+
+    /// f533 = Tensor::softmax. Softmax along the last dimension. Input must be 2D [rows, cols].
+    pub fn f533(&self, p0: &t500) -> Result<t502> {
+        ensure!(self.f524() == 2, "softmax: input must be 2D [rows, cols], got {}D", self.f524());
+        let v0 = p0.f620(&self.s508, self.f530(0), self.f530(1))?;
+        t502::f521(v0, self.f523())
+    }
+
+    /// f534 = Tensor::mse_loss. mean((self − target)²). Returns a scalar tensor with shape [1].
+    pub fn f534(&self, p0: &t500, p1: &t502) -> Result<t502> {
+        ensure!(self.f525() == p1.f525(),
+            "mse_loss: size mismatch: {} vs {}", self.f525(), p1.f525());
+        let v0 = p0.f622(&self.s508, &p1.s508)?;
+        t502::f521(v0, &[1])
+    }
+
+    /// f535 = Tensor::conv2d. 2D convolution. `self` must be 4D [N,C,H,W].
+    /// `p1` kernel must be 4D [out_c, in_c/groups, kH, kW].
+    /// `p2` bias must be 1D [out_c] or None.
+    pub fn f535(
+        &self,
+        p0: &t500,
+        p1: &t502,
+        p2: Option<&t502>,
+        p3: (u32, u32),
+        p4: (u32, u32),
+        p5: (u32, u32),
+        p6: u32,
+    ) -> Result<t502> {
+        ensure!(self.f524() == 4, "conv2d: input must be 4D [N,C,H,W], got {}D", self.f524());
+        ensure!(p1.f524() == 4, "conv2d: kernel must be 4D [out_c,in_c/g,kH,kW], got {}D", p1.f524());
+        let v0 = self.f530(0);  // N (batch)
+        let v1 = self.f530(1);  // in_c
+        let v2 = self.f530(2);  // in_h
+        let v3 = self.f530(3);  // in_w
+        let v4 = p1.f530(0);   // out_c
+        let v5 = p1.f530(2);   // kH
+        let v6 = p1.f530(3);   // kW
+        let v7 = p2.map(|v8| &v8.s508);
+        let v9 = p0.f582(
+            &self.s508, &p1.s508, v7,
+            v0, v1, v2, v3, v4, v5, v6,
+            p3, p4, p5, p6,
+        )?;
+        let v10 = (v2 + 2 * p4.0 - p5.0 * (v5 - 1) - 1) / p3.0 + 1;
+        let v11 = (v3 + 2 * p4.1 - p5.1 * (v6 - 1) - 1) / p3.1 + 1;
+        t502::f521(v9, &[v0, v4, v10, v11])
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +310,77 @@ mod tests {
         assert_eq!(v0.f525(), 91);
         let v1 = v0.f526(dev()).unwrap();
         assert!(v1.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn f531_matmul_2x3_3x2() {
+        // A = [[1,2,3],[4,5,6]] (2×3), B = [[1,0],[0,1],[1,1]] (3×2)
+        // C[0] = [1+0+3, 0+2+3] = [4, 5]
+        // C[1] = [4+0+6, 0+5+6] = [10, 11]
+        let v0 = t502::f520(dev(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let v1 = t502::f520(dev(), &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]).unwrap();
+        let v2 = v0.f531(dev(), &v1).unwrap();
+        assert_eq!(v2.f523(), &[2, 2]);
+        let v3 = v2.f526(dev()).unwrap();
+        crate::ops::f544(&v3, &[4.0, 5.0, 10.0, 11.0], 1e-5);
+    }
+
+    #[test]
+    fn f531_matmul_shape_error() {
+        let v0 = t502::f520(dev(), &[1.0; 6], &[2, 3]).unwrap();
+        let v1 = t502::f520(dev(), &[1.0; 6], &[2, 3]).unwrap();
+        assert!(v0.f531(dev(), &v1).is_err()); // inner dim mismatch
+    }
+
+    #[test]
+    fn f532_relu_basic() {
+        let v0 = t502::f520(dev(), &[-1.0, 0.0, 1.0, 2.0], &[2, 2]).unwrap();
+        let v1 = v0.f532(dev()).unwrap();
+        assert_eq!(v1.f523(), &[2, 2]);
+        let v2 = v1.f526(dev()).unwrap();
+        crate::ops::f544(&v2, &[0.0, 0.0, 1.0, 2.0], 1e-6);
+    }
+
+    #[test]
+    fn f533_softmax_rows() {
+        let v0 = t502::f520(dev(), &[1.0, 2.0, 0.0, 0.0], &[2, 2]).unwrap();
+        let v1 = v0.f533(dev()).unwrap();
+        assert_eq!(v1.f523(), &[2, 2]);
+        let v2 = v1.f526(dev()).unwrap();
+        // Row 0: softmax([1,2]) ≈ [0.269, 0.731]
+        assert!((v2[0] + v2[1] - 1.0).abs() < 1e-5);
+        // Row 1: softmax([0,0]) = [0.5, 0.5]
+        crate::ops::f544(&v2[2..4], &[0.5, 0.5], 1e-5);
+    }
+
+    #[test]
+    fn f534_mse_loss() {
+        let v0 = t502::f520(dev(), &[1.0, 2.0, 3.0], &[3]).unwrap();
+        let v1 = t502::f520(dev(), &[1.0, 2.0, 3.0], &[3]).unwrap();
+        let v2 = v0.f534(dev(), &v1).unwrap();
+        assert_eq!(v2.f523(), &[1]);
+        let v3 = v2.f526(dev()).unwrap();
+        crate::ops::f544(&v3, &[0.0], 1e-6);
+    }
+
+    #[test]
+    fn f534_mse_nonzero() {
+        let v0 = t502::f520(dev(), &[0.0, 0.0], &[2]).unwrap();
+        let v1 = t502::f520(dev(), &[2.0, 2.0], &[2]).unwrap();
+        let v2 = v0.f534(dev(), &v1).unwrap();
+        // MSE = mean((0-2)^2, (0-2)^2) = 4.0
+        let v3 = v2.f526(dev()).unwrap();
+        crate::ops::f544(&v3, &[4.0], 1e-5);
+    }
+
+    #[test]
+    fn f535_conv2d_identity() {
+        // 1x1x3x3 input, 1x1x1x1 identity kernel (value=1), no bias, stride=1, pad=0
+        let v0 = t502::f520(dev(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[1, 1, 3, 3]).unwrap();
+        let v1 = t502::f520(dev(), &[1.0], &[1, 1, 1, 1]).unwrap();
+        let v2 = v0.f535(dev(), &v1, None, (1, 1), (0, 0), (1, 1), 1).unwrap();
+        assert_eq!(v2.f523(), &[1, 1, 3, 3]);
+        let v3 = v2.f526(dev()).unwrap();
+        crate::ops::f544(&v3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 1e-5);
     }
 }

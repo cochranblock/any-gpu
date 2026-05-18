@@ -95,6 +95,25 @@ impl<'d> t506<'d> {
         v1
     }
 
+    /// f681r = Tape::leaf_resident. Inject a pre-existing GPU buffer as a leaf without
+    /// uploading from CPU. The handle is cloned (cheap Arc refcount bump), so the caller's
+    /// original buffer and the tape share the same GPU allocation. After the optimizer
+    /// updates the caller's buffer in-place the change is already reflected — no readback.
+    pub fn f681r(&mut self, p0: &t501) -> t503 {
+        let v0 = t503(self.bufs.len() as u32);
+        self.bufs.push(p0.clone());
+        self.grads.push(None);
+        self.entries.push(t505 { op: t504::Leaf, output: v0 });
+        v0
+    }
+
+    /// f684r = Tape::grad_buf. Return a reference to the gradient buffer for a tensor
+    /// without reading to CPU. Used by f734 (train_step_gpu) to pass grads directly to
+    /// the optimizer without a CPU round-trip.
+    pub fn f684r(&self, p0: t503) -> Option<&t501> {
+        self.grads[p0.0 as usize].as_ref()
+    }
+
     /// f682 = Tape::read. Read tensor data back to CPU.
     pub fn f682(&self, p0: t503) -> Result<Vec<f32>> {
         self.dev.f504(&self.bufs[p0.0 as usize])
