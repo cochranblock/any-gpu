@@ -18,6 +18,51 @@ Each entry follows this format:
 
 ## Entries
 
+### 2026-05-18 — P7: Two-Pass GEMV for M=1 Decode
+
+**What:** For the single-token decode step (M=1), matrix-vector multiply was using the general GEMM shader. New two-pass GEMV shader (`93321779`): pass 1 — each thread accumulates a partial dot product over a stripe of the K dimension into a local VGPR accumulator; pass 2 — one thread per output row reduces the per-thread partials via a small LDS reduction. Result: decode-path matmul avoids the 32×32 tile machinery entirely, removing unnecessary LDS traffic and thread-idle time for the M=1 case. Part of the ongoing RDNA1 decode-path perf sprint.
+**Commit:** [`93321779`](https://github.com/cochranblock/any-gpu/commit/93321779)
+**Verified:** 292/292 pass on bt (AMD RX 5700 XT, RADV NAVI10, Mesa 25.0.7).
+**AI Role:** AI wrote the two-pass GEMV shader and dispatch wiring. Human directed the decode-path focus and the two-pass accumulation design.
+
+### 2026-05-18 — P6: Wave64 Fused SDPA for Decode
+
+**What:** For the decode (M=1) attention step, the existing fused SDPA shader (`f626`) used one workgroup per output token. New P6 variant (`69c1ed02`): one wavefront of 64 threads per Q row, each thread handles a slice of the K/V sequence and does its dot products with `subgroupAdd` — no LDS needed. Eliminates the inter-thread-group barrier overhead for single-row attention. Combined with the P5 VGPR accumulator, the full decode path now avoids both LDS allocation and multi-kernel submission for the attention block. Backlog updated to mark P5a/P5b/P6 done and P7 queued (`5fc1894a`, `f3fb023b`).
+**Commits:** [`69c1ed02`](https://github.com/cochranblock/any-gpu/commit/69c1ed02), [`f3fb023b`](https://github.com/cochranblock/any-gpu/commit/f3fb023b)
+**Verified:** 292/292 pass on bt.
+**AI Role:** AI wrote the wave64 SDPA variant. Human directed the single-wavefront decode optimization and the subgroupAdd dot-product design.
+
+### 2026-05-18 — P5: SDPA VGPR Accumulator + LayerNorm 2-Barrier Fuse + ops_bench
+
+**What:** Two perf improvements and a benchmark harness (`0c204d86`):
+
+**SDPA VGPR accumulator:** The online-softmax fused SDPA shader (`f626`) previously maintained running max/sum in workgroup LDS. Changed to VGPR-resident accumulation per thread — eliminates the LDS read/write on each K tile step, replacing it with register arithmetic. Significant reduction in LDS bandwidth pressure for long-context decode.
+
+**LayerNorm 2-barrier fuse:** LayerNorm dispatch previously used N barriers across the two-pass (mean then variance) reduction. Fused to 2 barriers total by computing mean and partial variance in the same first pass, then doing a single second-pass correction. Eliminates N-2 barrier synchronizations per layer.
+
+**ops_bench:** New benchmark binary measuring end-to-end dispatch time for key ops at representative sizes (512², 1024², attention sequence lengths). Wired to the BACKLOG P5b item (bench reference, `#26`).
+**Commit:** [`0c204d86`](https://github.com/cochranblock/any-gpu/commit/0c204d86)
+**Verified:** 292/292 pass on bt.
+**AI Role:** AI wrote the VGPR accumulator variant, barrier-fused LayerNorm, and ops_bench binary. Human directed the VGPR-over-LDS strategy and the 2-barrier target.
+
+### 2026-05-17 — Full Op Coverage: 256→292 Tests
+
+**What:** Two coverage rounds closed the gap between "every public op compiles" and "every public op has at least one dedicated test":
+
+**Round 1 (262→275, `edb09113`):** Added tests for `f628` (merge_heads), `f642`, `f645`, `f661`, `f580` tiled matmul, `f621` multi-batch SDPA.
+
+**Round 2 (275→292, `1fe65f76`):** Added tests for `f643`, `f644`, `f646`, 2D dispatch, depthwise conv, `f584` stride-2 conv, `f583` multichannel, `f601` backward pass, `f625` multi-position RoPE. Every public and `pub(crate)` op now has at least one dedicated test.
+**Commits:** [`edb09113`](https://github.com/cochranblock/any-gpu/commit/edb09113), [`1fe65f76`](https://github.com/cochranblock/any-gpu/commit/1fe65f76)
+**Verified:** 292/292 pass on bt (AMD RX 5700 XT, RADV NAVI10, Mesa 25.0.7).
+**AI Role:** AI wrote all new tests. Human directed the "no op without a test" discipline and identified which ops were missing coverage.
+
+### 2026-05-17 — P4: batch_matmul 4×4/wave64 Register Blocking
+
+**What:** Applied the same 4×4 register blocking and wave64 workgroup design from the P1 GEMM matmul to the batched variant (`f641` / `batch_matmul`). Replaces the previous 2×2-blocked batch GEMM with `@workgroup_size(64)` = one wave64 per tile, 16 FMAs per thread per k-step, 32×32 LDS tiles. Test count 260→262 (two new batch-shape tests). This completes the register-blocking series for both unbatched and batched GEMM on RDNA1.
+**Commit:** [`8ea2b50a`](https://github.com/cochranblock/any-gpu/commit/8ea2b50a)
+**Verified:** 262/262 pass on bt.
+**AI Role:** AI ported the wave64 4×4 design to the batch variant. Human directed "same optimization for batch_matmul."
+
 ### 2026-05-17 — Matmul 4×4/wave64 + subgroup-fused softmax
 
 **What:** Two GPU performance optimizations that required understanding RDNA1 microarchitecture, not just shader mechanics.
