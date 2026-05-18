@@ -52,6 +52,10 @@ candle-bench = ["candle-core"]
 tests = ["dep:exopack"]
 
 [[bin]]
+name = "any-gpu"
+path = "src/bin/any-gpu.rs"
+
+[[bin]]
 name = "any-gpu-test"
 path = "src/bin/any-gpu-test.rs"
 required-features = ["tests"]
