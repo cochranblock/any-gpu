@@ -21,6 +21,61 @@ struct t523 {
     _pad: u32,
 }
 
+// LayerNorm fused: one workgroup per row, subgroupAdd for sum and sum_sq, single pass.
+// Requires s509 (SUBGROUP feature). Gate: f602 checks self.s509 at dispatch time.
+const SHADER_LN_NORM_FUSED: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       input: array<f32>;
+@group(0) @binding(2) var<storage, read>       gamma: array<f32>;
+@group(0) @binding(3) var<storage, read>       beta:  array<f32>;
+@group(0) @binding(4) var<storage, read_write> out:   array<f32>;
+
+var<workgroup> wg_scratch: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id)           wg:      vec3<u32>,
+    @builtin(local_invocation_index) t:       u32,
+    @builtin(subgroup_id)            sg_id:   u32,
+    @builtin(subgroup_invocation_id) sg_lane: u32,
+) {
+    let row = wg.x + wg.y * 65535u;
+    if row >= p.rows { return; }
+    let base = row * p.cols;
+
+    var local_sum: f32 = 0.0;
+    var local_sq:  f32 = 0.0;
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        let v = input[base + c];
+        local_sum += v;
+        local_sq  += v * v;
+    }
+
+    let sg_sum = subgroupAdd(local_sum);
+    if sg_lane == 0u { wg_scratch[sg_id] = sg_sum; }
+    workgroupBarrier();
+    var global_sum: f32 = select(0.0, wg_scratch[t], t < 4u);
+    global_sum = subgroupAdd(global_sum);
+    if t == 0u { wg_scratch[4] = global_sum / f32(p.cols); }
+    workgroupBarrier();
+    let mean = wg_scratch[4];
+
+    let sg_sq = subgroupAdd(local_sq);
+    if sg_lane == 0u { wg_scratch[sg_id] = sg_sq; }
+    workgroupBarrier();
+    var global_sq: f32 = select(0.0, wg_scratch[t], t < 4u);
+    global_sq = subgroupAdd(global_sq);
+    if t == 0u { wg_scratch[5] = 1.0 / sqrt(global_sq / f32(p.cols) - mean * mean + p.eps); }
+    workgroupBarrier();
+    let inv_std = wg_scratch[5];
+
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        out[base + c] = (input[base + c] - mean) * inv_std * gamma[c] + beta[c];
+    }
+}
+";
+
 // LayerNorm pass 1: one thread per row, compute mean and inv_std.
 const SHADER_LN_STATS: &str = "
 struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
@@ -65,6 +120,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mean = stats[r * 2u];
     let inv_std = stats[r * 2u + 1u];
     out[idx] = (input[idx] - mean) * inv_std * gamma[c] + beta[c];
+}
+";
+
+// RMSNorm fused: one workgroup per row, subgroupAdd for sum_sq, single pass.
+// Requires s509 (SUBGROUP feature). Gate: f603 checks self.s509 at dispatch time.
+const SHADER_RMS_NORM_FUSED: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       input:  array<f32>;
+@group(0) @binding(2) var<storage, read>       weight: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out:    array<f32>;
+
+var<workgroup> wg_scratch: array<f32, 8>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id)           wg:      vec3<u32>,
+    @builtin(local_invocation_index) t:       u32,
+    @builtin(subgroup_id)            sg_id:   u32,
+    @builtin(subgroup_invocation_id) sg_lane: u32,
+) {
+    let row = wg.x + wg.y * 65535u;
+    if row >= p.rows { return; }
+    let base = row * p.cols;
+
+    var local_sq: f32 = 0.0;
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        let v = input[base + c];
+        local_sq += v * v;
+    }
+    let sg_sq = subgroupAdd(local_sq);
+    if sg_lane == 0u { wg_scratch[sg_id] = sg_sq; }
+    workgroupBarrier();
+    var global_sq: f32 = select(0.0, wg_scratch[t], t < 4u);
+    global_sq = subgroupAdd(global_sq);
+    if t == 0u { wg_scratch[4] = 1.0 / sqrt(global_sq / f32(p.cols) + p.eps); }
+    workgroupBarrier();
+    let inv_rms = wg_scratch[4];
+
+    for (var c: u32 = t; c < p.cols; c += 256u) {
+        out[base + c] = input[base + c] * inv_rms * weight[c];
+    }
 }
 ";
 
@@ -395,7 +492,14 @@ impl t500 {
 
         let v0 = t523 { rows: p3, cols: p4, eps: p5, _pad: 0 };
 
-        // Pass 1: per-row mean and inv_std
+        if self.s509 {
+            let v1 = self.f503((p3 * p4) as usize);
+            let (vx, vy) = if p3 <= 65535 { (p3, 1) } else { (65535, p3.div_ceil(65535)) };
+            self.f543(SHADER_LN_NORM_FUSED, Some("ln_norm_fused"), &v0, &[p0, p1, p2], &v1, (vx, vy, 1));
+            return Ok(v1);
+        }
+
+        // Two-pass fallback: per-row mean and inv_std
         let v1 = self.f503((p3 * 2) as usize);
         self.f543(
             SHADER_LN_STATS, Some("ln_stats"),
@@ -427,7 +531,14 @@ impl t500 {
 
         let v0 = t523 { rows: p2, cols: p3, eps: p4, _pad: 0 };
 
-        // Pass 1: per-row inv_rms
+        if self.s509 {
+            let v1 = self.f503((p2 * p3) as usize);
+            let (vx, vy) = if p2 <= 65535 { (p2, 1) } else { (65535, p2.div_ceil(65535)) };
+            self.f543(SHADER_RMS_NORM_FUSED, Some("rms_norm_fused"), &v0, &[p0, p1], &v1, (vx, vy, 1));
+            return Ok(v1);
+        }
+
+        // Two-pass fallback: per-row inv_rms
         let v1 = self.f503(p2 as usize);
         self.f543(
             SHADER_RMS_STATS, Some("rms_stats"),
@@ -896,5 +1007,69 @@ mod tests {
         let v0 = vec![1.0f32; 12];
         let v1 = vec![1.0; 3];
         assert!(dev().f603(&dev().f502(&v0), &dev().f502(&v1), 3, 4, 1e-5).is_err());
+    }
+
+    // --- fused-path stride coverage (cols > 256 forces multiple iterations per thread) ---
+
+    #[test]
+    fn f603_fused_stride_cols512() {
+        // cols=512: each of 256 threads iterates twice (c, c+256). Cross-validates CPU.
+        let v0 = 4usize;
+        let v1 = 512usize;
+        let inp: Vec<f32> = (0..v0 * v1).map(|i| ((i as f32) * 0.007 - 1.0).cos()).collect();
+        let w: Vec<f32> = (0..v1).map(|i| 0.5 + (i as f32) * 0.001).collect();
+        let expected = cpu_rms_norm(&inp, &w, v0, v1, 1e-6);
+        let got = dev().f504(&dev().f603(
+            &dev().f502(&inp), &dev().f502(&w), v0 as u32, v1 as u32, 1e-6,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 1e-3);
+    }
+
+    #[test]
+    fn f602_fused_stride_cols512() {
+        // cols=512: stride loop for both sum and sum_sq reductions. Cross-validates CPU.
+        let v0 = 4usize;
+        let v1 = 512usize;
+        let inp: Vec<f32> = (0..v0 * v1).map(|i| ((i as f32) * 0.007 - 1.0).sin()).collect();
+        let gamma: Vec<f32> = (0..v1).map(|i| 0.8 + (i as f32) * 0.0005).collect();
+        let beta: Vec<f32> = (0..v1).map(|i| -0.1 + (i as f32) * 0.0002).collect();
+        let expected = cpu_layer_norm(&inp, &gamma, &beta, v0, v1, 1e-6);
+        let got = dev().f504(&dev().f602(
+            &dev().f502(&inp), &dev().f502(&gamma), &dev().f502(&beta),
+            v0 as u32, v1 as u32, 1e-6,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 1e-3);
+    }
+
+    #[test]
+    fn f603_fused_many_rows() {
+        // Many rows (128) with moderate cols (64): exercises workgroup dispatch.
+        let rows = 128usize;
+        let cols = 64usize;
+        let inp: Vec<f32> = (0..rows * cols).map(|i| ((i as f32) * 0.031 - 2.0).tanh()).collect();
+        let w: Vec<f32> = (0..cols).map(|i| 1.0 + (i as f32) * 0.01).collect();
+        let expected = cpu_rms_norm(&inp, &w, rows, cols, 1e-5);
+        let got = dev().f504(&dev().f603(
+            &dev().f502(&inp), &dev().f502(&w), rows as u32, cols as u32, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 1e-3);
+    }
+
+    #[test]
+    fn f602_fused_many_rows() {
+        // Many rows (128) with moderate cols (64): exercises workgroup dispatch.
+        // Tolerance 2e-3: GPU uses E[x²]-E[x]² variance formula (more cancellation error
+        // vs CPU's Σ(x-μ)²/n when input is not zero-centered).
+        let rows = 128usize;
+        let cols = 64usize;
+        let inp: Vec<f32> = (0..rows * cols).map(|i| ((i as f32) * 0.031 - 2.0).tanh()).collect();
+        let gamma: Vec<f32> = vec![1.0f32; cols];
+        let beta: Vec<f32> = vec![0.0f32; cols];
+        let expected = cpu_layer_norm(&inp, &gamma, &beta, rows, cols, 1e-5);
+        let got = dev().f504(&dev().f602(
+            &dev().f502(&inp), &dev().f502(&gamma), &dev().f502(&beta),
+            rows as u32, cols as u32, 1e-5,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 2e-3);
     }
 }
