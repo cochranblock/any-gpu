@@ -335,6 +335,75 @@ struct t541 {
 // Sized for the largest head_dim in common use (LLaMA: 128). The compiler
 // allocates exactly this many VGPRs per lane (~148 total with loop vars);
 // fits in the 256-VGPR budget without spilling on RDNA1.
+// Wave64 fused SDPA: one wave64 (64 threads) per q_row.
+// Each lane owns stride-64 elements of head_dim:
+//   lane d owns elements {d, d+64, d+128, d+192} up to head_dim.
+// QK dot product parallelized across all 64 lanes; subgroupAdd gives
+// the full score simultaneously on all lanes (requires wave64 = one subgroup
+// per workgroup, i.e. RDNA/RADV with s509==true).
+// Accumulator is 2-4 scalars per lane (VGPRs), not 128 — ~10x lower VGPR pressure.
+// Gate: f626 dispatches this path when s509 && head_dim ≤ 256 && head_dim % 64 == 0.
+const SHADER_FUSED_SDPA_W64: &str = "
+struct P {
+    batch_heads: u32, q_seq: u32, kv_seq: u32, head_dim: u32,
+    scale: f32, _p0: u32, _p1: u32, _p2: u32,
+}
+@group(0) @binding(0) var<uniform>             p:   P;
+@group(0) @binding(1) var<storage, read>       q:   array<f32>;
+@group(0) @binding(2) var<storage, read>       k:   array<f32>;
+@group(0) @binding(3) var<storage, read>       v:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+var<private> lane_acc: array<f32, 4>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id)           wg:   vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+) {
+    let bq = wg.x + wg.y * 65535u;
+    if bq >= p.batch_heads * p.q_seq { return; }
+
+    let bh       = bq / p.q_seq;
+    let qi       = bq % p.q_seq;
+    let abs_pos  = qi + p.kv_seq - p.q_seq;
+    let q_base   = bh * p.q_seq  * p.head_dim + qi * p.head_dim;
+    let kv_base  = bh * p.kv_seq * p.head_dim;
+    let dpl      = p.head_dim / 64u;
+
+    for (var s: u32 = 0u; s < dpl; s++) { lane_acc[s] = 0.0; }
+    var m: f32 = -1.0e30;
+    var l: f32 = 0.0;
+
+    for (var j: u32 = 0u; j <= abs_pos; j++) {
+        let k_row = kv_base + j * p.head_dim;
+        var partial: f32 = 0.0;
+        for (var s: u32 = 0u; s < dpl; s++) {
+            let d = lane + s * 64u;
+            partial += q[q_base + d] * k[k_row + d];
+        }
+        let score = subgroupAdd(partial) * p.scale;
+
+        let m_new = max(m, score);
+        let alpha = exp(m - m_new);
+        let beta  = exp(score - m_new);
+
+        let v_row = kv_base + j * p.head_dim;
+        for (var s: u32 = 0u; s < dpl; s++) {
+            let d = lane + s * 64u;
+            lane_acc[s] = lane_acc[s] * alpha + beta * v[v_row + d];
+        }
+        l = alpha * l + beta;
+        m = m_new;
+    }
+
+    let inv_l = 1.0 / l;
+    for (var s: u32 = 0u; s < dpl; s++) {
+        out[q_base + lane + s * 64u] = lane_acc[s] * inv_l;
+    }
+}
+";
+
 // Previous version wrote `out[...]` on every KV step (read-modify-write to VRAM
 // each iteration), which dominated runtime for long contexts.
 const SHADER_FUSED_SDPA: &str = "
@@ -640,11 +709,16 @@ impl t500 {
             scale: 1.0 / (p6 as f32).sqrt(),
             _pad: [0; 3],
         };
-        self.f543(
-            SHADER_FUSED_SDPA, Some("fused_sdpa"),
-            &v1, &[p0, p1, p2], &v0,
-            super::f540(p3 * p4),
-        );
+        // Wave64 path: one 64-thread workgroup per q_row; subgroupAdd parallelises
+        // the head_dim dot product. Requires wave64 (s509 == true on RDNA/RADV).
+        // Falls back to single-thread-per-q-row for non-wave64 or odd head_dim.
+        if self.s509 && p6 % 64 == 0 && p6 <= 256 {
+            let total = p3 * p4;
+            let (vx, vy) = if total <= 65535 { (total, 1) } else { (65535, total.div_ceil(65535)) };
+            self.f543(SHADER_FUSED_SDPA_W64, Some("fused_sdpa_w64"), &v1, &[p0, p1, p2], &v0, (vx, vy, 1));
+        } else {
+            self.f543(SHADER_FUSED_SDPA, Some("fused_sdpa"), &v1, &[p0, p1, p2], &v0, super::f540(p3 * p4));
+        }
         Ok(v0)
     }
 
@@ -1257,6 +1331,63 @@ mod tests {
     fn f626_kv_smaller_than_q_errors() {
         let v0 = dev().f502(&vec![0.0f32; 12]);
         assert!(dev().f626(&v0, &v0, &v0, 1, 3, 2, 4).is_err());
+    }
+
+    // f626 wave64 path: head_dim=64, prefill — exercises dpl=1, single-element-per-lane.
+    #[test]
+    fn f626_w64_hd64_matches_f623() {
+        let bh = 2u32; let seq = 4u32; let dk = 64u32;
+        let n = (bh * seq * dk) as usize;
+        let nkv = (bh * seq * dk) as usize;
+        let q: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let k: Vec<f32> = (0..nkv).map(|i| (i as f32) * 0.007 + 0.1).collect();
+        let v: Vec<f32> = (0..nkv).map(|i| (i as f32) * 0.013 - 0.3).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626 wave64 path: head_dim=128, decode (q_seq=1, kv_seq=16).
+    #[test]
+    fn f626_w64_hd128_decode_matches_f623() {
+        let bh = 4u32; let kv = 16u32; let dk = 128u32;
+        let q: Vec<f32> = (0..(bh * 1 * dk) as usize).map(|i| (i as f32) * 0.005 - 0.3).collect();
+        let k: Vec<f32> = (0..(bh * kv * dk) as usize).map(|i| (i as f32) * 0.003 + 0.1).collect();
+        let v: Vec<f32> = (0..(bh * kv * dk) as usize).map(|i| (i as f32) * 0.007 - 0.2).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, 1, kv, dk,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, 1, kv, dk,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
+    }
+
+    // f626 wave64 path: head_dim=128, large prefill — 32 heads, 64 queries, 64 KV.
+    #[test]
+    fn f626_w64_hd128_prefill_matches_f623() {
+        let bh = 32u32; let seq = 64u32; let dk = 128u32;
+        let n = (bh * seq * dk) as usize;
+        let q: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 0.5).collect();
+        let k: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0008 + 0.05).collect();
+        let v: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0012 - 0.1).collect();
+        let ref_out = dev().f504(&dev().f623(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        let got = dev().f504(&dev().f626(
+            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
+            bh, seq, seq, dk,
+        ).unwrap()).unwrap();
+        f544(&got, &ref_out, 1e-3);
     }
 
     // --- f627 / f628 = split_heads / merge_heads ---
