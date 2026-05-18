@@ -148,60 +148,110 @@ struct t529 {
 }
 
 const SHADER_BATCH_MATMUL: &str = "
-const TILE: u32 = 16u;
+const TILE: u32 = 32u;
 struct Dims { batch: u32, m: u32, n: u32, k: u32, }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
-var<workgroup> tile_a: array<f32, 256>;
-var<workgroup> tile_b: array<f32, 256>;
+var<workgroup> tile_a: array<f32, 1024>;
+var<workgroup> tile_b: array<f32, 1024>;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(64)
 fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id)           wg: vec3<u32>,
+    @builtin(local_invocation_index) t:  u32,
 ) {
-    let row = gid.x;
-    let col = gid.y;
-    let bat = gid.z;
+    let bat = wg.z;
     if bat >= dims.batch { return; }
-    let lr = lid.x;
-    let lc = lid.y;
+    let tr   = t / 8u;
+    let tc   = t % 8u;
+    let row0 = wg.x * TILE + tr * 4u;
+    let col0 = wg.y * TILE + tc * 4u;
     let a_off = bat * dims.m * dims.k;
     let b_off = bat * dims.k * dims.n;
     let o_off = bat * dims.m * dims.n;
 
-    var sum: f32 = 0.0;
+    var acc0:  f32 = 0.0; var acc1:  f32 = 0.0; var acc2:  f32 = 0.0; var acc3:  f32 = 0.0;
+    var acc4:  f32 = 0.0; var acc5:  f32 = 0.0; var acc6:  f32 = 0.0; var acc7:  f32 = 0.0;
+    var acc8:  f32 = 0.0; var acc9:  f32 = 0.0; var acc10: f32 = 0.0; var acc11: f32 = 0.0;
+    var acc12: f32 = 0.0; var acc13: f32 = 0.0; var acc14: f32 = 0.0; var acc15: f32 = 0.0;
+
     let num_tiles = (dims.k + TILE - 1u) / TILE;
 
-    for (var t: u32 = 0u; t < num_tiles; t++) {
-        let a_col = t * TILE + lc;
-        if row < dims.m && a_col < dims.k {
-            tile_a[lr * TILE + lc] = a[a_off + row * dims.k + a_col];
-        } else {
-            tile_a[lr * TILE + lc] = 0.0;
-        }
+    for (var tile: u32 = 0u; tile < num_tiles; tile++) {
+        for (var i: u32 = 0u; i < 16u; i++) {
+            let e  = t + i * 64u;
+            let er = e / TILE;
+            let ec = e % TILE;
 
-        let b_row = t * TILE + lr;
-        if b_row < dims.k && col < dims.n {
-            tile_b[lr * TILE + lc] = b[b_off + b_row * dims.n + col];
-        } else {
-            tile_b[lr * TILE + lc] = 0.0;
+            let ga_r = wg.x * TILE + er;
+            let ga_c = tile * TILE + ec;
+            if ga_r < dims.m && ga_c < dims.k {
+                tile_a[e] = a[a_off + ga_r * dims.k + ga_c];
+            } else {
+                tile_a[e] = 0.0;
+            }
+
+            let gb_r = tile * TILE + er;
+            let gb_c = wg.y * TILE + ec;
+            if gb_r < dims.k && gb_c < dims.n {
+                tile_b[e] = b[b_off + gb_r * dims.n + gb_c];
+            } else {
+                tile_b[e] = 0.0;
+            }
         }
 
         workgroupBarrier();
 
-        for (var i: u32 = 0u; i < TILE; i++) {
-            sum += tile_a[lr * TILE + i] * tile_b[i * TILE + lc];
+        for (var k: u32 = 0u; k < TILE; k++) {
+            let a0 = tile_a[(tr * 4u     ) * TILE + k];
+            let a1 = tile_a[(tr * 4u + 1u) * TILE + k];
+            let a2 = tile_a[(tr * 4u + 2u) * TILE + k];
+            let a3 = tile_a[(tr * 4u + 3u) * TILE + k];
+            let b0 = tile_b[k * TILE + tc * 4u     ];
+            let b1 = tile_b[k * TILE + tc * 4u + 1u];
+            let b2 = tile_b[k * TILE + tc * 4u + 2u];
+            let b3 = tile_b[k * TILE + tc * 4u + 3u];
+            acc0  = fma(a0, b0, acc0);  acc1  = fma(a0, b1, acc1);
+            acc2  = fma(a0, b2, acc2);  acc3  = fma(a0, b3, acc3);
+            acc4  = fma(a1, b0, acc4);  acc5  = fma(a1, b1, acc5);
+            acc6  = fma(a1, b2, acc6);  acc7  = fma(a1, b3, acc7);
+            acc8  = fma(a2, b0, acc8);  acc9  = fma(a2, b1, acc9);
+            acc10 = fma(a2, b2, acc10); acc11 = fma(a2, b3, acc11);
+            acc12 = fma(a3, b0, acc12); acc13 = fma(a3, b1, acc13);
+            acc14 = fma(a3, b2, acc14); acc15 = fma(a3, b3, acc15);
         }
 
         workgroupBarrier();
     }
 
-    if row < dims.m && col < dims.n {
-        out[o_off + row * dims.n + col] = sum;
+    let r0 = row0; let r1 = row0 + 1u; let r2 = row0 + 2u; let r3 = row0 + 3u;
+    let c0 = col0; let c1 = col0 + 1u; let c2 = col0 + 2u; let c3 = col0 + 3u;
+    if r0 < dims.m {
+        if c0 < dims.n { out[o_off + r0 * dims.n + c0] = acc0;  }
+        if c1 < dims.n { out[o_off + r0 * dims.n + c1] = acc1;  }
+        if c2 < dims.n { out[o_off + r0 * dims.n + c2] = acc2;  }
+        if c3 < dims.n { out[o_off + r0 * dims.n + c3] = acc3;  }
+    }
+    if r1 < dims.m {
+        if c0 < dims.n { out[o_off + r1 * dims.n + c0] = acc4;  }
+        if c1 < dims.n { out[o_off + r1 * dims.n + c1] = acc5;  }
+        if c2 < dims.n { out[o_off + r1 * dims.n + c2] = acc6;  }
+        if c3 < dims.n { out[o_off + r1 * dims.n + c3] = acc7;  }
+    }
+    if r2 < dims.m {
+        if c0 < dims.n { out[o_off + r2 * dims.n + c0] = acc8;  }
+        if c1 < dims.n { out[o_off + r2 * dims.n + c1] = acc9;  }
+        if c2 < dims.n { out[o_off + r2 * dims.n + c2] = acc10; }
+        if c3 < dims.n { out[o_off + r2 * dims.n + c3] = acc11; }
+    }
+    if r3 < dims.m {
+        if c0 < dims.n { out[o_off + r3 * dims.n + c0] = acc12; }
+        if c1 < dims.n { out[o_off + r3 * dims.n + c1] = acc13; }
+        if c2 < dims.n { out[o_off + r3 * dims.n + c2] = acc14; }
+        if c3 < dims.n { out[o_off + r3 * dims.n + c3] = acc15; }
     }
 }
 ";
@@ -491,7 +541,7 @@ impl t500 {
         ensure!(p1.s507 == (p2 * p5 * p4) as usize);
         let v0 = self.f503((p2 * p3 * p4) as usize);
         let v1 = t529 { batch: p2, m: p3, n: p4, k: p5 };
-        self.f543(SHADER_BATCH_MATMUL, Some("batch_matmul"), &v1, &[p0, p1], &v0, (p3.div_ceil(16), p4.div_ceil(16), p2));
+        self.f543(SHADER_BATCH_MATMUL, Some("batch_matmul"), &v1, &[p0, p1], &v0, (p3.div_ceil(32), p4.div_ceil(32), p2));
         Ok(v0)
     }
 
@@ -929,6 +979,48 @@ mod tests {
             &dev().f502(&v4), &dev().f502(&v5), v0 as u32, v1 as u32, v2 as u32, v3 as u32
         ).unwrap()).unwrap();
         f544(&v7, &v6, 1e-3);
+    }
+
+    #[test]
+    fn f581_tile_boundary() {
+        // m=33, n=33, k=33: each dim crosses a 32-element tile boundary.
+        let bat = 2usize; let m = 33usize; let n = 33usize; let k = 33usize;
+        let a: Vec<f32> = (0..bat*m*k).map(|i| (i as f32) * 0.01 - 1.0).collect();
+        let b: Vec<f32> = (0..bat*k*n).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let mut expected = vec![0.0f32; bat * m * n];
+        for bt in 0..bat {
+            for r in 0..m {
+                for c in 0..n {
+                    let mut s = 0.0f32;
+                    for ki in 0..k { s += a[bt*m*k + r*k + ki] * b[bt*k*n + ki*n + c]; }
+                    expected[bt*m*n + r*n + c] = s;
+                }
+            }
+        }
+        let got = dev().f504(&dev().f581(
+            &dev().f502(&a), &dev().f502(&b),
+            bat as u32, m as u32, n as u32, k as u32,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 1e-2);
+    }
+
+    #[test]
+    fn f581_square_64() {
+        // 64×64 matrices, single batch: exactly 2 tiles on each axis.
+        let m = 64usize; let n = 64usize; let k = 64usize;
+        let a: Vec<f32> = (0..m*k).map(|i| ((i as f32) * 0.005 - 0.5).sin()).collect();
+        let b: Vec<f32> = (0..k*n).map(|i| ((i as f32) * 0.007 - 0.3).cos()).collect();
+        let mut expected = vec![0.0f32; m * n];
+        for r in 0..m {
+            for c in 0..n {
+                let s: f32 = (0..k).map(|ki| a[r*k + ki] * b[ki*n + c]).sum();
+                expected[r*n + c] = s;
+            }
+        }
+        let got = dev().f504(&dev().f581(
+            &dev().f502(&a), &dev().f502(&b), 1, m as u32, n as u32, k as u32,
+        ).unwrap()).unwrap();
+        f544(&got, &expected, 1e-2);
     }
 
     // --- Conv2d grad weight numeric check ---
