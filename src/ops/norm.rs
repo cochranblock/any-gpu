@@ -23,6 +23,12 @@ struct t523 {
 
 // LayerNorm fused: one workgroup per row, subgroupAdd for sum and sum_sq, single pass.
 // Requires s509 (SUBGROUP feature). Gate: f602 checks self.s509 at dispatch time.
+// LayerNorm fused: one workgroup per row, 2 barriers (not 4).
+// Both sum and sum_sq are reduced in the same barrier sequence:
+//   wg_scratch[0..3] = per-subgroup partial sums
+//   wg_scratch[4..7] = per-subgroup partial sum_sq
+// Cross-subgroup reduce reads both sets simultaneously, thread-0 writes
+// mean → wg_scratch[0] and inv_std → wg_scratch[1] before the final barrier.
 const SHADER_LN_NORM_FUSED: &str = "
 struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
 @group(0) @binding(0) var<uniform> p: P;
@@ -52,23 +58,32 @@ fn main(
         local_sq  += v * v;
     }
 
+    // Intra-subgroup reduction for both accumulators simultaneously.
     let sg_sum = subgroupAdd(local_sum);
-    if sg_lane == 0u { wg_scratch[sg_id] = sg_sum; }
+    let sg_sq  = subgroupAdd(local_sq);
+    if sg_lane == 0u {
+        wg_scratch[sg_id]      = sg_sum;   // [0..3]
+        wg_scratch[sg_id + 4u] = sg_sq;    // [4..7]
+    }
     workgroupBarrier();
-    var global_sum: f32 = select(0.0, wg_scratch[t], t < 4u);
-    global_sum = subgroupAdd(global_sum);
-    if t == 0u { wg_scratch[4] = global_sum / f32(p.cols); }
-    workgroupBarrier();
-    let mean = wg_scratch[4];
 
-    let sg_sq = subgroupAdd(local_sq);
-    if sg_lane == 0u { wg_scratch[sg_id] = sg_sq; }
+    // Cross-subgroup reduce: first 4 threads hold one partial each.
+    var g_sum: f32 = 0.0;
+    var g_sq:  f32 = 0.0;
+    if t < 4u {
+        g_sum = wg_scratch[t];
+        g_sq  = wg_scratch[t + 4u];
+    }
+    g_sum = subgroupAdd(g_sum);
+    g_sq  = subgroupAdd(g_sq);
+    if t == 0u {
+        let mean = g_sum / f32(p.cols);
+        wg_scratch[0] = mean;
+        wg_scratch[1] = 1.0 / sqrt(g_sq / f32(p.cols) - mean * mean + p.eps);
+    }
     workgroupBarrier();
-    var global_sq: f32 = select(0.0, wg_scratch[t], t < 4u);
-    global_sq = subgroupAdd(global_sq);
-    if t == 0u { wg_scratch[5] = 1.0 / sqrt(global_sq / f32(p.cols) - mean * mean + p.eps); }
-    workgroupBarrier();
-    let inv_std = wg_scratch[5];
+    let mean    = wg_scratch[0];
+    let inv_std = wg_scratch[1];
 
     for (var c: u32 = t; c < p.cols; c += 256u) {
         out[base + c] = (input[base + c] - mean) * inv_std * gamma[c] + beta[c];

@@ -331,6 +331,12 @@ struct t541 {
     _pad:        [u32; 3],
 }
 
+// Private per-invocation accumulator — lives in VGPRs, not VRAM.
+// Sized for the largest head_dim in common use (LLaMA: 128). The compiler
+// allocates exactly this many VGPRs per lane (~148 total with loop vars);
+// fits in the 256-VGPR budget without spilling on RDNA1.
+// Previous version wrote `out[...]` on every KV step (read-modify-write to VRAM
+// each iteration), which dominated runtime for long contexts.
 const SHADER_FUSED_SDPA: &str = "
 struct P {
     batch_heads: u32, q_seq: u32, kv_seq: u32, head_dim: u32,
@@ -342,55 +348,51 @@ struct P {
 @group(0) @binding(3) var<storage, read>       v:   array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 
+var<private> acc_p: array<f32, 128>;
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bq = gid.x + gid.y * 65535u * 256u;
     if bq >= p.batch_heads * p.q_seq { return; }
 
-    let bh  = bq / p.q_seq;
-    let qi  = bq % p.q_seq;
-    // absolute kv position for causal mask: qi + (kv_seq - q_seq)
+    let bh      = bq / p.q_seq;
+    let qi      = bq % p.q_seq;
     let abs_pos = qi + p.kv_seq - p.q_seq;
 
     let q_base  = bh * p.q_seq  * p.head_dim + qi * p.head_dim;
-    let out_base = q_base;
-    let kv_base  = bh * p.kv_seq * p.head_dim;
+    let kv_base = bh * p.kv_seq * p.head_dim;
 
-    // Zero-initialise accumulator (this thread owns out[out_base..out_base+head_dim]).
     for (var d: u32 = 0u; d < p.head_dim; d++) {
-        out[out_base + d] = 0.0;
+        acc_p[d] = 0.0;
     }
 
     var m: f32 = -1.0e30;
     var l: f32 = 0.0;
 
     for (var j: u32 = 0u; j <= abs_pos; j++) {
-        // Dot product Q[qi] · K[j]
         var score: f32 = 0.0;
         let k_row = kv_base + j * p.head_dim;
         for (var d: u32 = 0u; d < p.head_dim; d++) {
             score += q[q_base + d] * k[k_row + d];
         }
-        score *= p.scale;   // pre-multiplied 1/sqrt(head_dim)
+        score *= p.scale;
 
-        // Online softmax update
         let m_new = max(m, score);
-        let alpha = exp(m - m_new);      // correction for old accumulator
-        let beta  = exp(score - m_new);  // weight for this kv position
+        let alpha = exp(m - m_new);
+        let beta  = exp(score - m_new);
 
         let v_row = kv_base + j * p.head_dim;
         for (var d: u32 = 0u; d < p.head_dim; d++) {
-            out[out_base + d] = out[out_base + d] * alpha + beta * v[v_row + d];
+            acc_p[d] = acc_p[d] * alpha + beta * v[v_row + d];
         }
         l = alpha * l + beta;
         m = m_new;
     }
 
-    // Normalise: out /= l  (l==0 only if all kv positions were masked, which cannot
-    // happen with a valid causal mask since j=0..=abs_pos always includes j=0).
-    let inv_l = 1.0 / l;
+    let inv_l    = 1.0 / l;
+    let out_base = bh * p.q_seq * p.head_dim + qi * p.head_dim;
     for (var d: u32 = 0u; d < p.head_dim; d++) {
-        out[out_base + d] *= inv_l;
+        out[out_base + d] = acc_p[d] * inv_l;
     }
 }
 ";
