@@ -1,5 +1,8 @@
 /* Cochran Block brand theme — kova palette (overrides coal) */
 
+/* Hard baseline — prevents any white flash before theme class is applied */
+html, body { background: #050508; color: #e2e8f0; }
+
 .coal {
     --bg: #050508;
     --fg: #e2e8f0;
