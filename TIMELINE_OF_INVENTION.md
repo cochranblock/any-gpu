@@ -18,6 +18,23 @@ Each entry follows this format:
 
 ## Entries
 
+### 2026-05-19 — Sampler Suite, Transformer Backward Shaders, top_k Perf Fix
+
+**What:** Three distinct deliverables shipped in one sprint.
+
+**Nanobyte DDPM diffusion model (`01fc203`):** `examples/nanobyte.rs` — NanoUNet-class DDPM with 3-level encoder/decoder (`CHANNELS=[32,64,64]`, `TIME_DIM=64`, 2 ResBlocks per level, ~1.09M params). GPU-resident via `f734`. Trained on pixel-forge 32×32 RGBA sprites. CLI flags for data, steps, batch, lr, save/resume. PNG sample output. ~2 steps/s on RX 5700 XT.
+
+**A3 Sampler suite (`ee6603a`):** `src/ops/sampler.rs` — four autoregressive sampling ops completing the LLM decode path. `f787 top_k_mask`: per-row top-k gate (k ≤ 128). `f788 top_p_mask`: nucleus cutoff via descending sort + cumsum. `f789 sample_multinomial`: PCG32 inverse-CDF — deterministic by (seed, step, row), TRIPLE SIMS safe. `f790 rep_penalty`: HF convention (pos ÷ penalty, neg × penalty). Temperature via `f553(logits, 1/temp)` upstream. 14 new tests, 309→323.
+
+**B1–B6 Transformer backward shaders (`ee6603a`):** Completed autograd coverage for the full transformer. `f791 layer_norm_backward` (3-pass). `f792 rms_norm_backward` (3-pass). `f793 embedding_backward` (f32 CAS scatter-add via `atomicCompareExchangeWeak` on bitcast u32). `f794 softmax_backward` (dot=Σ(grad·p) per row, then p·(grad−dot)). `f796 rope_backward` (conjugate rotation: negate sin — RoPE is orthogonal). Six new `t504 Op` variants + tape wrappers `f712–f717` + dispatch in `f702`. SDPA backward handled by composing through existing matmul + softmax backward on tape. 8 new tests with finite-difference validation, 323→331.
+
+**P8 top_k_mask 26.6× (`32e5c05`):** Old shader: 255 of 256 threads idle while thread 0 did a serial O(V×k) = 32000×50 = 1.6M-op heap scan. New shader: WG=64 (one wave64). Phase 1 — 64 threads stride-64 scan, each maintains a private min-heap of k values in registers (128 VGPRs). Phase 2 — write 64×128=8192 candidates to 32KB LDS, thread 0 merges. Phase 3 — 64 threads apply mask. b=1 v=32k k=50: 106ms → 4.0ms. Full decode pipeline: 113ms → 11.8ms.
+
+**B7 embedding_backward (`32e5c05`):** `f793` called `clear_buffer(vocab×d_model)` on a freshly allocated buffer — a redundant 512MB GPU write on every backward pass. Root cause: wgpu guarantees zero-init on `create_buffer` per the WebGPU spec. One-line fix removed it. ops_bench corrected to vocab=512 (8MB readback vs 512MB) so PCIe transfer no longer dominates the measured time.
+**Commits:** [`01fc203`](https://github.com/cochranblock/any-gpu/commit/01fc203), [`ee6603a`](https://github.com/cochranblock/any-gpu/commit/ee6603a), [`56255b9`](https://github.com/cochranblock/any-gpu/commit/56255b9), [`32e5c05`](https://github.com/cochranblock/any-gpu/commit/32e5c05)
+**Verified:** TRIPLE SIMS 3/3 PASS on bt (AMD RX 5700 XT, RADV NAVI10). 331/331 tests pass.
+**AI Role:** AI wrote all shaders, Rust wrappers, Op variants, backward dispatch, and benchmark functions. Human directed the sampler pipeline design (PCG for determinism, HF rep-penalty convention), the backward scope (which ops need dedicated backward vs composing through primitives), and the perf investigation cadence (benchmark first, fix what the numbers reveal).
+
 ### 2026-05-18 — P7: Two-Pass GEMV for M=1 Decode
 
 **What:** For the single-token decode step (M=1), matrix-vector multiply was using the general GEMM shader. New two-pass GEMV shader (`93321779`): pass 1 — each thread accumulates a partial dot product over a stripe of the K dimension into a local VGPR accumulator; pass 2 — one thread per output row reduces the per-thread partials via a small LDS reduction. Result: decode-path matmul avoids the 32×32 tile machinery entirely, removing unnecessary LDS traffic and thread-idle time for the M=1 case. Part of the ongoing RDNA1 decode-path perf sprint.
