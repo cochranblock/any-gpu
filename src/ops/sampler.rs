@@ -23,20 +23,26 @@ struct t560 {
     _pad: u32,
 }
 
-// One workgroup per batch row, 256 threads.
-// Thread 0 does a serial scan to find the k-th largest threshold (O(vocab * k), k ≤ 128).
-// All 256 threads then apply the mask in a stride-256 pass.
-// Ties keep all tied values (so the output may pass slightly more than k tokens — correct
-// for sampling purposes, avoids edge cases where all top-k are equal).
+// One wave64 (64 threads) per batch row — three phases:
+//   P1: all 64 threads scan vocab stride-64, each keeping a private min-heap of
+//       up to kk=min(k,128) values in registers (128 VGPRs, within RDNA1 budget).
+//   P2: each thread writes its kk candidates to LDS (64×128 = 8192 f32 = 32 KB);
+//       thread 0 merges all 8192 LDS entries to find the global threshold.
+//   P3: all 64 threads apply the threshold mask stride-64.
+//
+// Old design: thread 0 serial O(vocab×k) = 32000×50 = 1.6M ops.
+// New design: 64× parallel phase-1 + thread-0 merge of 8192 LDS candidates.
 const SHADER_TOP_K_MASK: &str = "
 struct P { batch: u32, vocab: u32, k: u32, _pad: u32, }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read>       logits: array<f32>;
 @group(0) @binding(2) var<storage, read_write> out:    array<f32>;
 
+// 64 threads × 128 slots × 4 bytes = 32 KB LDS (RDNA1 per-CU limit; 2 WGs/CU occupancy).
+var<workgroup> wg_cands:     array<f32, 8192>;
 var<workgroup> wg_threshold: f32;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(
     @builtin(workgroup_id)           wid: vec3<u32>,
     @builtin(local_invocation_index) t:   u32,
@@ -46,55 +52,76 @@ fn main(
     let base = row * p.vocab;
     let kk = min(p.k, 128u);
 
-    if t == 0u {
-        // Maintain the top-k values in a fixed-size register array.
-        // heap[0..heap_size] holds the k largest values seen so far.
-        // heap_min is always the minimum of the k values = the current threshold.
-        var heap: array<f32, 128>;
-        var heap_min: f32 = -1e30;
-        var heap_min_idx: u32 = 0u;
-        var heap_size: u32 = 0u;
+    // ── Phase 1: each thread builds a private top-kk heap ────────────────────
+    var heap: array<f32, 128>;
+    var heap_min: f32 = -1e30;
+    var heap_min_idx: u32 = 0u;
+    var heap_size: u32 = 0u;
 
-        for (var i: u32 = 0u; i < p.vocab; i++) {
-            let v = logits[base + i];
-            if heap_size < kk {
-                heap[heap_size] = v;
-                heap_size++;
-                // Once filled to k, compute the initial min
-                if heap_size == kk {
-                    heap_min = heap[0];
-                    heap_min_idx = 0u;
-                    for (var j: u32 = 1u; j < kk; j++) {
-                        if heap[j] < heap_min {
-                            heap_min = heap[j];
-                            heap_min_idx = j;
-                        }
-                    }
-                }
-            } else if v > heap_min {
-                // Replace the current minimum with this larger value
-                heap[heap_min_idx] = v;
-                heap_min = heap[0];
-                heap_min_idx = 0u;
-                for (var j: u32 = 1u; j < kk; j++) {
-                    if heap[j] < heap_min {
-                        heap_min = heap[j];
-                        heap_min_idx = j;
-                    }
-                }
-            }
-        }
-        // If vocab < k, all values pass (threshold = -inf)
-        wg_threshold = select(heap_min, -1e30, heap_size < kk);
-    }
-    workgroupBarrier();
-
-    let threshold = wg_threshold;
     var i = t;
     while i < p.vocab {
         let v = logits[base + i];
-        out[base + i] = select(-1e9, v, v >= threshold);
-        i += 256u;
+        if heap_size < kk {
+            heap[heap_size] = v;
+            heap_size += 1u;
+            if heap_size == kk {
+                heap_min = heap[0]; heap_min_idx = 0u;
+                for (var j = 1u; j < kk; j++) {
+                    if heap[j] < heap_min { heap_min = heap[j]; heap_min_idx = j; }
+                }
+            }
+        } else if v > heap_min {
+            heap[heap_min_idx] = v;
+            heap_min = heap[0]; heap_min_idx = 0u;
+            for (var j = 1u; j < kk; j++) {
+                if heap[j] < heap_min { heap_min = heap[j]; heap_min_idx = j; }
+            }
+        }
+        i += 64u;
+    }
+
+    // ── Phase 2: deposit candidates to LDS; thread 0 merges ──────────────────
+    let lds_base = t * 128u;
+    for (var j = 0u; j < 128u; j++) {
+        wg_cands[lds_base + j] = select(-1e30, heap[j], j < heap_size);
+    }
+    workgroupBarrier();
+
+    if t == 0u {
+        var heap2: array<f32, 128>;
+        var hs2: u32 = 0u;
+        var hm2: f32 = -1e30;
+        var hmi2: u32 = 0u;
+        for (var ci = 0u; ci < 8192u; ci++) {
+            let v = wg_cands[ci];
+            if hs2 < kk {
+                heap2[hs2] = v;
+                hs2 += 1u;
+                if hs2 == kk {
+                    hm2 = heap2[0]; hmi2 = 0u;
+                    for (var j = 1u; j < kk; j++) {
+                        if heap2[j] < hm2 { hm2 = heap2[j]; hmi2 = j; }
+                    }
+                }
+            } else if v > hm2 {
+                heap2[hmi2] = v;
+                hm2 = heap2[0]; hmi2 = 0u;
+                for (var j = 1u; j < kk; j++) {
+                    if heap2[j] < hm2 { hm2 = heap2[j]; hmi2 = j; }
+                }
+            }
+        }
+        wg_threshold = select(hm2, -1e30, hs2 < kk);
+    }
+    workgroupBarrier();
+
+    // ── Phase 3: all 64 threads apply the mask ────────────────────────────────
+    let threshold = wg_threshold;
+    var j = t;
+    while j < p.vocab {
+        let v = logits[base + j];
+        out[base + j] = select(-1e9, v, v >= threshold);
+        j += 64u;
     }
 }
 ";

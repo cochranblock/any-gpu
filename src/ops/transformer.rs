@@ -276,13 +276,7 @@ impl t500 {
 
         let v0 = (p3 * p4) as usize;
         let v1 = self.f503(v0);
-
-        // Zero-fill output before atomic scatter-add.
-        {
-            let mut v2 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            v2.clear_buffer(&v1.s505, 0, None);
-            self.s501.submit(Some(v2.finish()));
-        }
+        // wgpu guarantees zero-initialization on create_buffer — no explicit clear needed.
 
         let v3 = t526 { n_ids: p2, vocab_size: p3, d_model: p4, _pad: 0 };
         let v4 = self.f506(&v3);

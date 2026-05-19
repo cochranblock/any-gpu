@@ -477,10 +477,12 @@ fn main() {
     bench_rope_backward(&dev, 32,  64, 128);
     bench_rope_backward(&dev, 32, 512, 128);
 
-    header("Embedding backward  (f32 CAS scatter-add)");
-    bench_embed_backward(&dev, 32000, 4096,   1);
-    bench_embed_backward(&dev, 32000, 4096, 128);
-    bench_embed_backward(&dev, 32000, 4096, 512);
+    // vocab=512 keeps the readback at 8 MB instead of 512 MB so PCIe transfer
+    // doesn't swamp the scatter-add time. Real LLM training keeps grad_weight on GPU.
+    header("Embedding backward  (f32 CAS scatter-add, vocab=512)");
+    bench_embed_backward(&dev, 512, 4096,   1);
+    bench_embed_backward(&dev, 512, 4096, 128);
+    bench_embed_backward(&dev, 512, 4096, 512);
 
     println!("\n═══════════════════════════════════════════════════");
 }
