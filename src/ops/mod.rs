@@ -8,6 +8,7 @@ mod tensor_ops;
 mod upsample;
 mod attention;
 pub(crate) mod transformer;
+mod sampler;
 
 use crate::device::{t500, t501};
 use anyhow::Result;

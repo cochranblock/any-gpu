@@ -74,6 +74,145 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+/// t526 = EmbedBwdParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t526 {
+    n_ids: u32,
+    vocab_size: u32,
+    d_model: u32,
+    _pad: u32,
+}
+
+/// t527 = SoftmaxBwdParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t527 {
+    rows: u32,
+    cols: u32,
+    _pad: [u32; 2],
+}
+
+/// t528 = RopeBwdParams. Same layout as attention::t536.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t528 {
+    batch_heads: u32,
+    seq_len: u32,
+    head_dim: u32,
+    start_pos: u32,
+    base: f32,
+    _pad: [u32; 3],
+}
+
+// Embedding backward: scatter-add grad_output into grad_weight using f32 CAS atomics.
+// Output declared as array<atomic<u32>> so f32 bits are written via bitcast + CAS loop.
+const SHADER_EMBED_BWD: &str = "
+struct P { n_ids: u32, vocab_size: u32, d_model: u32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> grad_out: array<f32>;
+@group(0) @binding(2) var<storage, read> ids:      array<f32>;
+@group(0) @binding(3) var<storage, read_write> grad_w: array<atomic<u32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.n_ids * p.d_model;
+    if idx >= total { return; }
+    let id_idx    = idx / p.d_model;
+    let d         = idx % p.d_model;
+    let token_id  = min(u32(ids[id_idx]), p.vocab_size - 1u);
+    let w_idx     = token_id * p.d_model + d;
+    let val       = grad_out[idx];
+    var old_bits  = atomicLoad(&grad_w[w_idx]);
+    loop {
+        let new_val  = bitcast<f32>(old_bits) + val;
+        let new_bits = bitcast<u32>(new_val);
+        let cas      = atomicCompareExchangeWeak(&grad_w[w_idx], old_bits, new_bits);
+        if cas.exchanged { break; }
+        old_bits = cas.old_value;
+    }
+}
+";
+
+// Softmax backward pass 1: one thread per row, compute dot = sum(grad * p, over cols).
+const SHADER_SM_BWD_DOT: &str = "
+struct P { rows: u32, cols: u32, _p0: u32, _p1: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> grad:    array<f32>;
+@group(0) @binding(2) var<storage, read> prob:    array<f32>;
+@group(0) @binding(3) var<storage, read_write> dot_buf: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = gid.x;
+    if r >= p.rows { return; }
+    let base = r * p.cols;
+    var d: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        d += grad[base + c] * prob[base + c];
+    }
+    dot_buf[r] = d;
+}
+";
+
+// Softmax backward pass 2: one thread per element.
+const SHADER_SM_BWD_DX: &str = "
+struct P { rows: u32, cols: u32, _p0: u32, _p1: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> grad:    array<f32>;
+@group(0) @binding(2) var<storage, read> prob:    array<f32>;
+@group(0) @binding(3) var<storage, read> dot_buf: array<f32>;
+@group(0) @binding(4) var<storage, read_write> d_input: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.rows * p.cols;
+    if idx >= total { return; }
+    let r = idx / p.cols;
+    d_input[idx] = prob[idx] * (grad[idx] - dot_buf[r]);
+}
+";
+
+// RoPE backward: identical to forward but sin terms negated (conjugate rotation).
+const SHADER_ROPE_BWD: &str = "
+struct P {
+    batch_heads: u32, seq_len: u32, head_dim: u32, start_pos: u32,
+    base: f32, _p0: u32, _p1: u32, _p2: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.batch_heads * p.seq_len * p.head_dim;
+    if idx >= total { return; }
+
+    let d = idx % p.head_dim;
+    let s = (idx / p.head_dim) % p.seq_len;
+    let bh = idx / (p.seq_len * p.head_dim);
+
+    let pair_idx = d / 2u;
+    let is_first = (d % 2u) == 0u;
+    let pos_f = f32(p.start_pos + s);
+
+    let exponent = -2.0 * f32(pair_idx) / f32(p.head_dim);
+    let inv_freq = pow(p.base, exponent);
+    let angle = pos_f * inv_freq;
+    let cos_a =  cos(angle);
+    let sin_a = -sin(angle);
+
+    let base_idx = bh * p.seq_len * p.head_dim + s * p.head_dim + pair_idx * 2u;
+    let x_a = input[base_idx];
+    let x_b = input[base_idx + 1u];
+
+    if is_first {
+        out[idx] = x_a * cos_a - x_b * sin_a;
+    } else {
+        out[idx] = x_a * sin_a + x_b * cos_a;
+    }
+}
+";
+
 impl t500 {
     /// f670 = embedding_lookup. For each token id in `p0`, return that row of `p1`.
     /// `p1`: [vocab_size, d_model]. `p0`: [n_ids] (f32 holding integer values).
@@ -121,6 +260,133 @@ impl t500 {
             super::f540(p1),
         );
         Ok(v0)
+    }
+
+    /// f793 = embedding_backward. Scatter-add grad_output into grad_weight.
+    /// p0=grad_output[n_ids,d_model], p1=ids[n_ids] (f32), p2=n_ids, p3=vocab_size, p4=d_model.
+    pub fn f793(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: u32, p3: u32, p4: u32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p4) as usize, "embed_bwd: grad_output size mismatch");
+        ensure!(p1.s507 == p2 as usize, "embed_bwd: ids size mismatch");
+        ensure!(p3 > 0, "embed_bwd: vocab_size must be > 0");
+
+        let v0 = (p3 * p4) as usize;
+        let v1 = self.f503(v0);
+
+        // Zero-fill output before atomic scatter-add.
+        {
+            let mut v2 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            v2.clear_buffer(&v1.s505, 0, None);
+            self.s501.submit(Some(v2.finish()));
+        }
+
+        let v3 = t526 { n_ids: p2, vocab_size: p3, d_model: p4, _pad: 0 };
+        let v4 = self.f506(&v3);
+        let v5 = self.f507(SHADER_EMBED_BWD, Some("embed_bwd"));
+        let v6 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &v5.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: v4.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: p1.s505.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: v1.s505.as_entire_binding() },
+            ],
+        });
+        let (v7, v8, v9) = super::f540(p2 * p4);
+        let mut v10 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut v11 = v10.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("embed_bwd"),
+                timestamp_writes: None,
+            });
+            v11.set_pipeline(&v5);
+            v11.set_bind_group(0, &v6, &[]);
+            v11.dispatch_workgroups(v7, v8, v9);
+        }
+        self.s501.submit(Some(v10.finish()));
+        Ok(v1)
+    }
+
+    /// f794 = softmax_backward. p0=grad_output[rows,cols], p1=fwd_softmax_output[rows,cols].
+    pub fn f794(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: u32, p3: u32,
+    ) -> Result<t501> {
+        ensure!(p0.s507 == (p2 * p3) as usize, "sm_bwd: grad_output size mismatch");
+        ensure!(p1.s507 == (p2 * p3) as usize, "sm_bwd: fwd_output size mismatch");
+
+        let v0 = t527 { rows: p2, cols: p3, _pad: [0; 2] };
+
+        // Pass 1: dot product per row.
+        let v1 = self.f503(p2 as usize);
+        self.f543(
+            SHADER_SM_BWD_DOT, Some("sm_bwd_dot"),
+            &v0, &[p0, p1], &v1,
+            super::f540(p2),
+        );
+
+        // Pass 2: grad_input per element. 3 storage inputs → raw dispatch.
+        let v2 = self.f503((p2 * p3) as usize);
+        {
+            let v3 = self.f506(&v0);
+            let v4 = self.f507(SHADER_SM_BWD_DX, Some("sm_bwd_dx"));
+            let v5 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &v4.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: v3.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: p1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: v1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v2.s505.as_entire_binding() },
+                ],
+            });
+            let (v6, v7, v8) = super::f540(p2 * p3);
+            let mut v9 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut v10 = v9.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("sm_bwd_dx"),
+                    timestamp_writes: None,
+                });
+                v10.set_pipeline(&v4);
+                v10.set_bind_group(0, &v5, &[]);
+                v10.dispatch_workgroups(v6, v7, v8);
+            }
+            self.s501.submit(Some(v9.finish()));
+        }
+        Ok(v2)
+    }
+
+    /// f796 = rope_backward. Conjugate RoPE rotation applied to grad_output.
+    /// Same signature as f625. p0=grad_output[batch_heads,seq,head_dim].
+    pub fn f796(
+        &self,
+        p0: &t501,
+        p1: u32, p2: u32, p3: u32, p4: u32, p5: f32,
+    ) -> Result<t501> {
+        ensure!(p3 % 2 == 0, "rope_bwd: head_dim ({}) must be even", p3);
+        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "rope_bwd: input size mismatch");
+        ensure!(p5 > 0.0, "rope_bwd: base must be positive");
+
+        let v0 = p1 * p2 * p3;
+        let v1 = self.f503(v0 as usize);
+        let v2 = t528 {
+            batch_heads: p1, seq_len: p2, head_dim: p3, start_pos: p4,
+            base: p5, _pad: [0; 3],
+        };
+        self.f543(
+            SHADER_ROPE_BWD, Some("rope_bwd"),
+            &v2, &[p0], &v1,
+            super::f540(v0),
+        );
+        Ok(v1)
     }
 }
 
@@ -542,5 +808,80 @@ mod tests {
             for j in 0..kv { out[d] += attn[j] * v[j * dk + d]; }
         }
         out
+    }
+
+    #[test]
+    fn f793_scatter_add() {
+        // vocab=3, d_model=2, n_ids=2. Tokens: [1, 0]. grad_out rows: [[1,2],[3,4]].
+        // Expected grad_weight[0]=[3,4], grad_weight[1]=[1,2], grad_weight[2]=[0,0].
+        let v0 = vec![1.0f32, 2.0, 3.0, 4.0];
+        let v1 = vec![1.0f32, 0.0];
+        let v2 = dev().f504(&dev().f793(
+            &dev().f502(&v0), &dev().f502(&v1),
+            2, 3, 2,
+        ).unwrap()).unwrap();
+        f544(&v2, &[3.0, 4.0, 1.0, 2.0, 0.0, 0.0], 1e-5);
+    }
+
+    #[test]
+    fn f793_repeated_token() {
+        // vocab=2, d_model=2, n_ids=3. Tokens: [0, 1, 0]. grad_out: [[1,1],[2,2],[3,3]].
+        // grad_weight[0] = [1+3, 1+3] = [4,4], grad_weight[1] = [2,2].
+        let v0 = vec![1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0];
+        let v1 = vec![0.0f32, 1.0, 0.0];
+        let v2 = dev().f504(&dev().f793(
+            &dev().f502(&v0), &dev().f502(&v1),
+            3, 2, 2,
+        ).unwrap()).unwrap();
+        f544(&v2, &[4.0, 4.0, 2.0, 2.0], 1e-5);
+    }
+
+    #[test]
+    fn f794_numeric_grad_check() {
+        // 2×4 softmax backward.
+        let rows = 2u32;
+        let cols = 4u32;
+        let input = vec![1.0f32, 2.0, 3.0, 4.0, 0.5, -0.5, 1.5, -1.5];
+        let prob = {
+            let v: Vec<f32> = dev().f504(&dev().f620(
+                &dev().f502(&input), rows, cols,
+            ).unwrap()).unwrap();
+            v
+        };
+        let grad_out = vec![0.1f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+
+        // CPU reference: d_x = p * (g - dot(g, p))
+        let mut d_x_cpu = vec![0.0f32; (rows * cols) as usize];
+        for r in 0..(rows as usize) {
+            let base = r * cols as usize;
+            let dot: f32 = (0..cols as usize).map(|c| grad_out[base + c] * prob[base + c]).sum();
+            for c in 0..cols as usize {
+                d_x_cpu[base + c] = prob[base + c] * (grad_out[base + c] - dot);
+            }
+        }
+
+        let v0 = dev().f504(&dev().f794(
+            &dev().f502(&grad_out), &dev().f502(&prob),
+            rows, cols,
+        ).unwrap()).unwrap();
+
+        f544(&v0, &d_x_cpu, 1e-5);
+    }
+
+    #[test]
+    fn f796_inverse_of_forward() {
+        // RoPE backward (conjugate) applied to RoPE forward output should recover original.
+        let bh = 1u32;
+        let seq = 2u32;
+        let hdim = 4u32;
+        let start = 0u32;
+        let base = 10000.0f32;
+        let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, -0.5, 1.5, -1.5];
+
+        let v0 = dev().f625(&dev().f502(&input), bh, seq, hdim, start, base).unwrap();
+        let v1 = dev().f796(&v0, bh, seq, hdim, start, base).unwrap();
+        let v2 = dev().f504(&v1).unwrap();
+
+        f544(&v2, &input, 1e-5);
     }
 }

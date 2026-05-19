@@ -57,6 +57,27 @@ pub enum t504 {
     AddBroadcast { a: t503, b: t503, outer: u32, inner: u32 },
     /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols] (Linear bias).
     AddPerCol { a: t503, b: t503, rows: u32, cols: u32 },
+    LayerNorm {
+        input: t503, gamma: t503, beta: t503,
+        rows: u32, cols: u32, eps: f32,
+    },
+    RmsNorm {
+        input: t503, gamma: t503,
+        rows: u32, cols: u32, eps: f32,
+    },
+    EmbedLookup {
+        ids: t503, weight: t503,
+        n_ids: u32, vocab_size: u32, d_model: u32,
+    },
+    Softmax {
+        input: t503, rows: u32, cols: u32,
+    },
+    CausalMask {
+        input: t503, batch_heads: u32, q_seq: u32, kv_seq: u32,
+    },
+    Rope {
+        input: t503, batch_heads: u32, seq: u32, head_dim: u32, start_pos: u32, base: f32,
+    },
 }
 
 /// t505 = TapeEntry. One recorded operation.
@@ -300,6 +321,44 @@ impl<'d> t506<'d> {
         Ok(self.f684(v0, t504::AddPerCol { a: p0, b: p1, rows: p2, cols: p3 }))
     }
 
+    /// f712 = Tape::layer_norm. rows×cols input, cols-wide gamma+beta.
+    pub fn f712(&mut self, p0: t503, p1: t503, p2: t503, p3: u32, p4: u32, p5: f32) -> Result<t503> {
+        let v0 = self.dev.f602(self.f685(p0), self.f685(p1), self.f685(p2), p3, p4, p5)?;
+        Ok(self.f684(v0, t504::LayerNorm { input: p0, gamma: p1, beta: p2, rows: p3, cols: p4, eps: p5 }))
+    }
+
+    /// f713 = Tape::rms_norm. rows×cols input, cols-wide gamma.
+    pub fn f713(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: f32) -> Result<t503> {
+        let v0 = self.dev.f603(self.f685(p0), self.f685(p1), p2, p3, p4)?;
+        Ok(self.f684(v0, t504::RmsNorm { input: p0, gamma: p1, rows: p2, cols: p3, eps: p4 }))
+    }
+
+    /// f714 = Tape::embed_lookup. ids [n_ids], weight [vocab, d_model] -> [n_ids, d_model].
+    pub fn f714(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: u32) -> Result<t503> {
+        let v0 = self.dev.f670(self.f685(p0), self.f685(p1), p2, p3, p4)?;
+        Ok(self.f684(v0, t504::EmbedLookup { ids: p0, weight: p1, n_ids: p2, vocab_size: p3, d_model: p4 }))
+    }
+
+    /// f715 = Tape::softmax. [rows, cols] -> same shape.
+    pub fn f715(&mut self, p0: t503, p1: u32, p2: u32) -> Result<t503> {
+        let v0 = self.dev.f620(self.f685(p0), p1, p2)?;
+        Ok(self.f684(v0, t504::Softmax { input: p0, rows: p1, cols: p2 }))
+    }
+
+    /// f716 = Tape::causal_mask. Makes a copy of the scores tensor then applies the in-place mask.
+    /// scores [batch_heads, q_seq, kv_seq] -> same shape with future positions set to -1e30.
+    pub fn f716(&mut self, p0: t503, p1: u32, p2: u32, p3: u32) -> Result<t503> {
+        let v0 = self.dev.f553(self.f685(p0), 1.0)?;
+        self.dev.f624(&v0, p1, p2, p3)?;
+        Ok(self.f684(v0, t504::CausalMask { input: p0, batch_heads: p1, q_seq: p2, kv_seq: p3 }))
+    }
+
+    /// f717 = Tape::rope_fwd. Applies RoPE to [batch_heads, seq, head_dim].
+    pub fn f717(&mut self, p0: t503, p1: u32, p2: u32, p3: u32, p4: u32, p5: f32) -> Result<t503> {
+        let v0 = self.dev.f625(self.f685(p0), p1, p2, p3, p4, p5)?;
+        Ok(self.f684(v0, t504::Rope { input: p0, batch_heads: p1, seq: p2, head_dim: p3, start_pos: p4, base: p5 }))
+    }
+
     // --- Backward ---
 
     /// f703 = Tape::accum_grad. Accumulate gradient into a tensor's grad buffer.
@@ -489,6 +548,40 @@ impl<'d> t506<'d> {
                     let v6 = self.dev.f646(v3, rows, cols)?;
                     self.f703(a, v5)?;
                     self.f703(b, v6)?;
+                }
+
+                t504::LayerNorm { input, gamma, beta, rows, cols, eps } => {
+                    let (v5, v6, v7) = self.dev.f791(v3, &self.bufs[input.0 as usize], &self.bufs[gamma.0 as usize], rows, cols, eps)?;
+                    self.f703(input, v5)?;
+                    self.f703(gamma, v6)?;
+                    self.f703(beta, v7)?;
+                }
+
+                t504::RmsNorm { input, gamma, rows, cols, eps } => {
+                    let (v5, v6) = self.dev.f792(v3, &self.bufs[input.0 as usize], &self.bufs[gamma.0 as usize], rows, cols, eps)?;
+                    self.f703(input, v5)?;
+                    self.f703(gamma, v6)?;
+                }
+
+                t504::EmbedLookup { ids, weight, n_ids, vocab_size, d_model } => {
+                    let v5 = self.dev.f793(v3, &self.bufs[ids.0 as usize], n_ids, vocab_size, d_model)?;
+                    self.f703(weight, v5)?;
+                }
+
+                t504::Softmax { input, rows, cols } => {
+                    let v5 = self.dev.f794(v3, &self.bufs[v2.0 as usize], rows, cols)?;
+                    self.f703(input, v5)?;
+                }
+
+                t504::CausalMask { input, batch_heads, q_seq, kv_seq } => {
+                    let v5 = self.dev.f553(v3, 1.0)?;
+                    self.dev.f624(&v5, batch_heads, q_seq, kv_seq)?;
+                    self.f703(input, v5)?;
+                }
+
+                t504::Rope { input, batch_heads, seq, head_dim, start_pos, base } => {
+                    let v5 = self.dev.f796(v3, batch_heads, seq, head_dim, start_pos, base)?;
+                    self.f703(input, v5)?;
                 }
             }
         }

@@ -418,6 +418,170 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+// LayerNorm backward pass 1: one thread per row.
+// Writes 4 floats per row: [mean, inv_std, S1, S2] where
+//   S1 = (1/n)*sum(grad_y * gamma), S2 = (1/n)*sum(grad_y * gamma * xhat).
+const SHADER_LN_BWD_STATS: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:    array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y:   array<f32>;
+@group(0) @binding(3) var<storage, read> gamma:    array<f32>;
+@group(0) @binding(4) var<storage, read_write> stats: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = gid.x;
+    if r >= p.rows { return; }
+    let base = r * p.cols;
+    var sum: f32 = 0.0;
+    var sum_sq: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        let v = input[base + c];
+        sum += v;
+        sum_sq += v * v;
+    }
+    let mean = sum / f32(p.cols);
+    let inv_std = 1.0 / sqrt(sum_sq / f32(p.cols) - mean * mean + p.eps);
+    var s1: f32 = 0.0;
+    var s2: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        let gy_g = grad_y[base + c] * gamma[c];
+        let xhat = (input[base + c] - mean) * inv_std;
+        s1 += gy_g;
+        s2 += gy_g * xhat;
+    }
+    let n = f32(p.cols);
+    stats[r * 4u]      = mean;
+    stats[r * 4u + 1u] = inv_std;
+    stats[r * 4u + 2u] = s1 / n;
+    stats[r * 4u + 3u] = s2 / n;
+}
+";
+
+// LayerNorm backward pass 2: one thread per element.
+const SHADER_LN_BWD_DINPUT: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:  array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma:  array<f32>;
+@group(0) @binding(4) var<storage, read> stats:  array<f32>;
+@group(0) @binding(5) var<storage, read_write> d_input: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.rows * p.cols;
+    if idx >= total { return; }
+    let r = idx / p.cols;
+    let c = idx % p.cols;
+    let mean    = stats[r * 4u];
+    let inv_std = stats[r * 4u + 1u];
+    let s1      = stats[r * 4u + 2u];
+    let s2      = stats[r * 4u + 3u];
+    let xhat    = (input[idx] - mean) * inv_std;
+    d_input[idx] = inv_std * (grad_y[idx] * gamma[c] - s1 - xhat * s2);
+}
+";
+
+// LayerNorm backward pass 3: one thread per col, sums over all rows.
+const SHADER_LN_BWD_DAFFINE: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:   array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y:  array<f32>;
+@group(0) @binding(3) var<storage, read> stats:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> d_gamma: array<f32>;
+@group(0) @binding(5) var<storage, read_write> d_beta:  array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let c = gid.x;
+    if c >= p.cols { return; }
+    var dg: f32 = 0.0;
+    var db: f32 = 0.0;
+    for (var r: u32 = 0u; r < p.rows; r++) {
+        let mean    = stats[r * 4u];
+        let inv_std = stats[r * 4u + 1u];
+        let xhat    = (input[r * p.cols + c] - mean) * inv_std;
+        dg += grad_y[r * p.cols + c] * xhat;
+        db += grad_y[r * p.cols + c];
+    }
+    d_gamma[c] = dg;
+    d_beta[c]  = db;
+}
+";
+
+// RMSNorm backward pass 1: one thread per row.
+// Writes 2 floats per row: [inv_rms, S] where S = (1/n)*sum(grad_y * gamma * x).
+const SHADER_RN_BWD_STATS: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:  array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma:  array<f32>;
+@group(0) @binding(4) var<storage, read_write> stats: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = gid.x;
+    if r >= p.rows { return; }
+    let base = r * p.cols;
+    var sum_sq: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        let v = input[base + c];
+        sum_sq += v * v;
+    }
+    let inv_rms = 1.0 / sqrt(sum_sq / f32(p.cols) + p.eps);
+    var s: f32 = 0.0;
+    for (var c: u32 = 0u; c < p.cols; c++) {
+        s += grad_y[base + c] * gamma[c] * input[base + c];
+    }
+    stats[r * 2u]      = inv_rms;
+    stats[r * 2u + 1u] = s / f32(p.cols);
+}
+";
+
+// RMSNorm backward pass 2a: one thread per element.
+const SHADER_RN_BWD_DINPUT: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:  array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y: array<f32>;
+@group(0) @binding(3) var<storage, read> gamma:  array<f32>;
+@group(0) @binding(4) var<storage, read> stats:  array<f32>;
+@group(0) @binding(5) var<storage, read_write> d_input: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.rows * p.cols;
+    if idx >= total { return; }
+    let r = idx / p.cols;
+    let c = idx % p.cols;
+    let inv_rms = stats[r * 2u];
+    let s       = stats[r * 2u + 1u];
+    d_input[idx] = inv_rms * gamma[c] * grad_y[idx] - input[idx] * (s * inv_rms * inv_rms * inv_rms);
+}
+";
+
+// RMSNorm backward pass 2b: one thread per col, sums over all rows for grad_gamma.
+const SHADER_RN_BWD_DGAMMA: &str = "
+struct P { rows: u32, cols: u32, eps: f32, _p0: u32, }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> input:  array<f32>;
+@group(0) @binding(2) var<storage, read> grad_y: array<f32>;
+@group(0) @binding(3) var<storage, read> stats:  array<f32>;
+@group(0) @binding(4) var<storage, read_write> d_gamma: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let c = gid.x;
+    if c >= p.cols { return; }
+    var dg: f32 = 0.0;
+    for (var r: u32 = 0u; r < p.rows; r++) {
+        let inv_rms = stats[r * 2u];
+        dg += grad_y[r * p.cols + c] * input[r * p.cols + c] * inv_rms;
+    }
+    d_gamma[c] = dg;
+}
+";
+
 impl t500 {
     /// f600 = group_norm. input[N,C,*spatial] with C/groups groups.
     /// gamma[C] and beta[C] are learnable affine params.
@@ -730,6 +894,114 @@ impl t500 {
         }
 
         Ok((v14, v24, v25))
+    }
+
+    /// f791 = layer_norm_backward. Returns (grad_input, grad_gamma, grad_beta).
+    /// p0=grad_output[rows,cols], p1=fwd_input[rows,cols], p2=gamma[cols].
+    pub fn f791(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32, p4: u32, p5: f32,
+    ) -> Result<(t501, t501, t501)> {
+        ensure!(p0.s507 == (p3 * p4) as usize, "ln_bwd: grad_output size mismatch");
+        ensure!(p1.s507 == (p3 * p4) as usize, "ln_bwd: fwd_input size mismatch");
+        ensure!(p2.s507 == p4 as usize, "ln_bwd: gamma size mismatch");
+
+        let v0 = t523 { rows: p3, cols: p4, eps: p5, _pad: 0 };
+
+        // Pass 1: per-row stats — mean, inv_std, S1, S2.
+        let v1 = self.f503((p3 * 4) as usize);
+        self.f543(
+            SHADER_LN_BWD_STATS, Some("ln_bwd_stats"),
+            &v0, &[p1, p0, p2], &v1,
+            super::f540(p3),
+        );
+
+        // Pass 2: grad_input per element.
+        let v2 = self.f503((p3 * p4) as usize);
+        self.f543(
+            SHADER_LN_BWD_DINPUT, Some("ln_bwd_dinput"),
+            &v0, &[p1, p0, p2, &v1], &v2,
+            super::f540(p3 * p4),
+        );
+
+        // Pass 3: grad_gamma and grad_beta per col.
+        let v3 = self.f503(p4 as usize);
+        let v4 = self.f503(p4 as usize);
+        {
+            let v5 = self.f506(&v0);
+            let v6 = self.f507(SHADER_LN_BWD_DAFFINE, Some("ln_bwd_daffine"));
+            let v7 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &v6.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: v5.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: p0.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: v1.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: v3.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: v4.s505.as_entire_binding() },
+                ],
+            });
+            let (v8, v9, v10) = super::f540(p4);
+            let mut v11 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut v12 = v11.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("ln_bwd_daffine"),
+                    timestamp_writes: None,
+                });
+                v12.set_pipeline(&v6);
+                v12.set_bind_group(0, &v7, &[]);
+                v12.dispatch_workgroups(v8, v9, v10);
+            }
+            self.s501.submit(Some(v11.finish()));
+        }
+
+        Ok((v2, v3, v4))
+    }
+
+    /// f792 = rms_norm_backward. Returns (grad_input, grad_gamma).
+    /// p0=grad_output[rows,cols], p1=fwd_input[rows,cols], p2=gamma[cols].
+    pub fn f792(
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32, p4: u32, p5: f32,
+    ) -> Result<(t501, t501)> {
+        ensure!(p0.s507 == (p3 * p4) as usize, "rn_bwd: grad_output size mismatch");
+        ensure!(p1.s507 == (p3 * p4) as usize, "rn_bwd: fwd_input size mismatch");
+        ensure!(p2.s507 == p4 as usize, "rn_bwd: gamma size mismatch");
+
+        let v0 = t523 { rows: p3, cols: p4, eps: p5, _pad: 0 };
+
+        // Pass 1: per-row stats — inv_rms, S.
+        let v1 = self.f503((p3 * 2) as usize);
+        self.f543(
+            SHADER_RN_BWD_STATS, Some("rn_bwd_stats"),
+            &v0, &[p1, p0, p2], &v1,
+            super::f540(p3),
+        );
+
+        // Pass 2a: grad_input per element.
+        let v2 = self.f503((p3 * p4) as usize);
+        self.f543(
+            SHADER_RN_BWD_DINPUT, Some("rn_bwd_dinput"),
+            &v0, &[p1, p0, p2, &v1], &v2,
+            super::f540(p3 * p4),
+        );
+
+        // Pass 2b: grad_gamma per col.
+        let v3 = self.f503(p4 as usize);
+        self.f543(
+            SHADER_RN_BWD_DGAMMA, Some("rn_bwd_dgamma"),
+            &v0, &[p1, p0, &v1], &v3,
+            super::f540(p4),
+        );
+
+        Ok((v2, v3))
     }
 }
 
@@ -1320,5 +1592,181 @@ mod tests {
             rows as u32, cols as u32, 1e-5,
         ).unwrap()).unwrap();
         f544(&got, &expected, 2e-3);
+    }
+
+    // CPU reference: layer_norm_backward.
+    fn cpu_ln_bwd(
+        grad_y: &[f32], input: &[f32], gamma: &[f32],
+        rows: usize, cols: usize, eps: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut d_input = vec![0.0f32; rows * cols];
+        let mut d_gamma = vec![0.0f32; cols];
+        let mut d_beta  = vec![0.0f32; cols];
+        for r in 0..rows {
+            let base = r * cols;
+            let mean: f32 = input[base..base + cols].iter().sum::<f32>() / cols as f32;
+            let var: f32  = input[base..base + cols].iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+            let mut s1 = 0.0f32;
+            let mut s2 = 0.0f32;
+            for c in 0..cols {
+                let gy_g = grad_y[base + c] * gamma[c];
+                let xhat = (input[base + c] - mean) * inv_std;
+                s1 += gy_g;
+                s2 += gy_g * xhat;
+            }
+            s1 /= cols as f32;
+            s2 /= cols as f32;
+            for c in 0..cols {
+                let xhat = (input[base + c] - mean) * inv_std;
+                d_input[base + c] = inv_std * (grad_y[base + c] * gamma[c] - s1 - xhat * s2);
+                d_gamma[c] += grad_y[base + c] * xhat;
+                d_beta[c]  += grad_y[base + c];
+            }
+        }
+        (d_input, d_gamma, d_beta)
+    }
+
+    #[test]
+    fn f791_numeric_grad_check() {
+        let rows = 2usize;
+        let cols = 4usize;
+        let eps = 1e-5f32;
+        let input: Vec<f32> = vec![0.5, -1.0, 2.0, 0.3, -0.7, 1.2, -0.4, 0.9];
+        let gamma: Vec<f32> = vec![1.2, 0.8, 1.5, 0.6];
+        let beta:  Vec<f32> = vec![0.1, -0.2, 0.3, -0.1];
+        let grad_y: Vec<f32> = vec![1.0, -0.5, 0.8, -0.3, 0.6, -1.0, 0.4, -0.7];
+
+        let (d_input_cpu, d_gamma_cpu, d_beta_cpu) = cpu_ln_bwd(&grad_y, &input, &gamma, rows, cols, eps);
+
+        let (v0, v1, v2) = dev().f791(
+            &dev().f502(&grad_y), &dev().f502(&input), &dev().f502(&gamma),
+            rows as u32, cols as u32, eps,
+        ).unwrap();
+
+        f544(&dev().f504(&v0).unwrap(), &d_input_cpu, 1e-3);
+        f544(&dev().f504(&v1).unwrap(), &d_gamma_cpu, 1e-3);
+        f544(&dev().f504(&v2).unwrap(), &d_beta_cpu,  1e-3);
+    }
+
+    #[test]
+    fn f791_finite_diff() {
+        let rows = 2usize;
+        let cols = 4usize;
+        let eps = 1e-5f32;
+        let h = 1e-3f32;
+        let input: Vec<f32> = vec![0.5, -1.0, 2.0, 0.3, -0.7, 1.2, -0.4, 0.9];
+        let gamma: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0];
+        let beta:  Vec<f32> = vec![0.0, 0.0, 0.0, 0.0];
+
+        let fwd = |inp: &[f32]| -> Vec<f32> {
+            dev().f504(&dev().f602(
+                &dev().f502(inp), &dev().f502(&gamma), &dev().f502(&beta),
+                rows as u32, cols as u32, eps,
+            ).unwrap()).unwrap()
+        };
+
+        let fwd_out = fwd(&input);
+        let grad_y: Vec<f32> = fwd_out.iter().map(|&v| v * 0.1 + 0.05).collect();
+
+        let (d_input_gpu, _, _) = dev().f791(
+            &dev().f502(&grad_y), &dev().f502(&input), &dev().f502(&gamma),
+            rows as u32, cols as u32, eps,
+        ).unwrap();
+        let d_input_gpu = dev().f504(&d_input_gpu).unwrap();
+
+        for i in 0..rows * cols {
+            let mut inp_p = input.clone();
+            let mut inp_m = input.clone();
+            inp_p[i] += h;
+            inp_m[i] -= h;
+            let fp: f32 = fwd(&inp_p).iter().zip(&grad_y).map(|(a, b)| a * b).sum();
+            let fm: f32 = fwd(&inp_m).iter().zip(&grad_y).map(|(a, b)| a * b).sum();
+            let numeric = (fp - fm) / (2.0 * h);
+            assert!(
+                (d_input_gpu[i] - numeric).abs() < 5e-2,
+                "ln_bwd d_input[{i}]: gpu={} numeric={}", d_input_gpu[i], numeric
+            );
+        }
+    }
+
+    // CPU reference: rms_norm_backward.
+    fn cpu_rn_bwd(
+        grad_y: &[f32], input: &[f32], gamma: &[f32],
+        rows: usize, cols: usize, eps: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut d_input = vec![0.0f32; rows * cols];
+        let mut d_gamma = vec![0.0f32; cols];
+        for r in 0..rows {
+            let base = r * cols;
+            let sum_sq: f32 = input[base..base + cols].iter().map(|&v| v * v).sum::<f32>() / cols as f32;
+            let inv_rms = 1.0 / (sum_sq + eps).sqrt();
+            let s: f32 = (0..cols).map(|c| grad_y[base + c] * gamma[c] * input[base + c]).sum::<f32>() / cols as f32;
+            for c in 0..cols {
+                d_input[base + c] = inv_rms * gamma[c] * grad_y[base + c] - input[base + c] * (s * inv_rms * inv_rms * inv_rms);
+                d_gamma[c] += grad_y[base + c] * input[base + c] * inv_rms;
+            }
+        }
+        (d_input, d_gamma)
+    }
+
+    #[test]
+    fn f792_numeric_grad_check() {
+        let rows = 2usize;
+        let cols = 4usize;
+        let eps = 1e-5f32;
+        let input: Vec<f32> = vec![0.5, -1.0, 2.0, 0.3, -0.7, 1.2, -0.4, 0.9];
+        let gamma: Vec<f32> = vec![1.2, 0.8, 1.5, 0.6];
+        let grad_y: Vec<f32> = vec![1.0, -0.5, 0.8, -0.3, 0.6, -1.0, 0.4, -0.7];
+
+        let (d_input_cpu, d_gamma_cpu) = cpu_rn_bwd(&grad_y, &input, &gamma, rows, cols, eps);
+
+        let (v0, v1) = dev().f792(
+            &dev().f502(&grad_y), &dev().f502(&input), &dev().f502(&gamma),
+            rows as u32, cols as u32, eps,
+        ).unwrap();
+
+        f544(&dev().f504(&v0).unwrap(), &d_input_cpu, 1e-3);
+        f544(&dev().f504(&v1).unwrap(), &d_gamma_cpu, 1e-3);
+    }
+
+    #[test]
+    fn f792_finite_diff() {
+        let rows = 2usize;
+        let cols = 4usize;
+        let eps = 1e-5f32;
+        let h = 1e-3f32;
+        let input: Vec<f32> = vec![0.5, -1.0, 2.0, 0.3, -0.7, 1.2, -0.4, 0.9];
+        let gamma: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0];
+
+        let fwd = |inp: &[f32]| -> Vec<f32> {
+            dev().f504(&dev().f603(
+                &dev().f502(inp), &dev().f502(&gamma),
+                rows as u32, cols as u32, eps,
+            ).unwrap()).unwrap()
+        };
+
+        let fwd_out = fwd(&input);
+        let grad_y: Vec<f32> = fwd_out.iter().map(|&v| v * 0.1 + 0.05).collect();
+
+        let (d_input_gpu, _) = dev().f792(
+            &dev().f502(&grad_y), &dev().f502(&input), &dev().f502(&gamma),
+            rows as u32, cols as u32, eps,
+        ).unwrap();
+        let d_input_gpu = dev().f504(&d_input_gpu).unwrap();
+
+        for i in 0..rows * cols {
+            let mut inp_p = input.clone();
+            let mut inp_m = input.clone();
+            inp_p[i] += h;
+            inp_m[i] -= h;
+            let fp: f32 = fwd(&inp_p).iter().zip(&grad_y).map(|(a, b)| a * b).sum();
+            let fm: f32 = fwd(&inp_m).iter().zip(&grad_y).map(|(a, b)| a * b).sum();
+            let numeric = (fp - fm) / (2.0 * h);
+            assert!(
+                (d_input_gpu[i] - numeric).abs() < 5e-2,
+                "rn_bwd d_input[{i}]: gpu={} numeric={}", d_input_gpu[i], numeric
+            );
+        }
     }
 }
