@@ -1,0 +1,1 @@
+{"name":"lang_detector","feature_dim":256,"num_classes":5,"class_names":["rust", "python", "javascript", "go", "shell"],"best_accuracy":0.96666664}

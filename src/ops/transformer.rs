@@ -496,6 +496,283 @@ impl t534 {
     pub fn f677(&self) -> &t501 { &self.s512 }
 }
 
+// --- BatchKvPool (t551) ---
+//
+// t551 = BatchKvPool. Pooled K/V storage for up to `max_batch` concurrent decode requests.
+// Layout: K (and V) are [max_batch * num_kv_heads, max_seq, head_dim] flat.
+//   Slot `s`, kv-head `h` occupies row index `s * num_kv_heads + h`.
+// Cursors are CPU-tracked; GPU writes use the cursor to find the insertion point.
+//
+// f800 = BatchKvPool::new
+// f801 = BatchKvPool::copy_from_kvcache  -- copy a prefilled t534 into a slot
+// f802 = BatchKvPool::reset_slot         -- zero cursor for a slot
+// f803 = BatchKvPool::cursor             -- get cursor for a slot
+// f804k / f804v = BatchKvPool::k_buf / v_buf
+// f805 = BatchKvPool::batch_decode_append -- append one decode token per active slot
+// f806 = BatchKvPool::kv_lens_buf        -- upload cursors as f32 GPU buffer
+// f807 = BatchKvPool::migrate_slot       -- copy KV from slot src→dst (for compaction)
+
+/// t552 = CopyToSlotParams. Copies a single-slot KV (t534) into a BatchKvPool slot.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t552 {
+    num_kv_heads: u32,
+    cursor: u32,
+    head_dim: u32,
+    max_seq_src: u32,
+    max_seq_dst: u32,
+    slot_idx: u32,
+    _p0: u32,
+    _p1: u32,
+}
+
+// src layout: kh * max_seq_src * hd + pos * hd + d
+// dst layout: (slot * nkv_h + kh) * max_seq_dst * hd + pos * hd + d
+const SHADER_COPY_TO_SLOT: &str = "
+struct P {
+    num_kv_heads: u32, cursor: u32, head_dim: u32, max_seq_src: u32,
+    max_seq_dst: u32, slot_idx: u32, _p0: u32, _p1: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.num_kv_heads * p.cursor * p.head_dim;
+    if idx >= total { return; }
+    let d   = idx % p.head_dim;
+    let pos = (idx / p.head_dim) % p.cursor;
+    let kh  = idx / (p.cursor * p.head_dim);
+    let src_idx = kh * p.max_seq_src * p.head_dim + pos * p.head_dim + d;
+    let dst_kh  = p.slot_idx * p.num_kv_heads + kh;
+    let dst_idx = dst_kh * p.max_seq_dst * p.head_dim + pos * p.head_dim + d;
+    dst[dst_idx] = src[src_idx];
+}
+";
+
+/// t553 = BatchDecodeAppendParams. Appends one decode token per active slot.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t553 {
+    active_batch: u32,
+    num_kv_heads: u32,
+    head_dim: u32,
+    max_seq: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+    _p3: u32,
+}
+
+// new_data: [active_batch * num_kv_heads * head_dim]  (one token per slot, all heads)
+// cursors:  [active_batch] as f32  (cursor position for each slot before this append)
+// cache:    [max_batch * num_kv_heads * max_seq * head_dim]
+const SHADER_BATCH_DECODE_APPEND: &str = "
+struct P {
+    active_batch: u32, num_kv_heads: u32, head_dim: u32, max_seq: u32,
+    _p0: u32, _p1: u32, _p2: u32, _p3: u32,
+}
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       new_data: array<f32>;
+@group(0) @binding(2) var<storage, read>       cursors:  array<f32>;
+@group(0) @binding(3) var<storage, read_write> cache:    array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.active_batch * p.num_kv_heads * p.head_dim;
+    if idx >= total { return; }
+    let d    = idx % p.head_dim;
+    let kh   = (idx / p.head_dim) % p.num_kv_heads;
+    let slot = idx / (p.num_kv_heads * p.head_dim);
+    let cursor = u32(cursors[slot]);
+    let cache_idx = (slot * p.num_kv_heads + kh) * p.max_seq * p.head_dim
+                  + cursor * p.head_dim + d;
+    cache[cache_idx] = new_data[idx];
+}
+";
+
+/// t557 = CopySlotParams. Shared params for slot-to-staging / staging-to-slot shaders.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t557 {
+    num_kv_heads: u32,
+    cursor: u32,
+    head_dim: u32,
+    max_seq: u32,
+    slot_idx: u32,
+    _p0: u32, _p1: u32, _p2: u32,
+}
+
+// pool[(slot_idx * nkv_h + kh) * max_seq * hd + pos * hd + d] -> staging[kh * max_seq * hd + ...]
+const SHADER_SLOT_TO_STAGING: &str = "
+struct P { num_kv_heads: u32, cursor: u32, head_dim: u32, max_seq: u32,
+           slot_idx: u32, _p0: u32, _p1: u32, _p2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       pool:    array<f32>;
+@group(0) @binding(2) var<storage, read_write> staging: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.num_kv_heads * p.cursor * p.head_dim;
+    if idx >= total { return; }
+    let d   = idx % p.head_dim;
+    let pos = (idx / p.head_dim) % p.cursor;
+    let kh  = idx / (p.cursor * p.head_dim);
+    let pool_kh = p.slot_idx * p.num_kv_heads + kh;
+    staging[idx] = pool[pool_kh * p.max_seq * p.head_dim + pos * p.head_dim + d];
+}
+";
+
+// staging[kh * max_seq * hd + pos * hd + d] -> pool[(slot_idx * nkv_h + kh) * max_seq * hd + ...]
+const SHADER_STAGING_TO_SLOT: &str = "
+struct P { num_kv_heads: u32, cursor: u32, head_dim: u32, max_seq: u32,
+           slot_idx: u32, _p0: u32, _p1: u32, _p2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       staging: array<f32>;
+@group(0) @binding(2) var<storage, read_write> pool:    array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.num_kv_heads * p.cursor * p.head_dim;
+    if idx >= total { return; }
+    let d   = idx % p.head_dim;
+    let pos = (idx / p.head_dim) % p.cursor;
+    let kh  = idx / (p.cursor * p.head_dim);
+    let pool_kh = p.slot_idx * p.num_kv_heads + kh;
+    pool[pool_kh * p.max_seq * p.head_dim + pos * p.head_dim + d] = staging[idx];
+}
+";
+
+/// t551 = BatchKvPool. Pooled KV storage for concurrent decode requests.
+pub struct t551 {
+    pub(crate) s530: t501,    // K: [max_batch * num_kv_heads * max_seq * head_dim]
+    pub(crate) s531: t501,    // V: same shape
+    pub(crate) s532: u32,     // max_batch
+    pub(crate) s533: u32,     // num_kv_heads
+    pub(crate) s534: u32,     // max_seq
+    pub(crate) s535: u32,     // head_dim
+    pub(crate) s536: Vec<u32>, // cursors[max_batch] -- CPU-side KV length per slot
+    pub(crate) s537: t501,    // staging K: [num_kv_heads * max_seq * head_dim] for f807
+    pub(crate) s538: t501,    // staging V: same
+}
+
+impl t551 {
+    /// f800 = BatchKvPool::new. Allocate zeroed K/V for up to `p1` (max_batch) slots.
+    /// `p2` = num_kv_heads, `p3` = max_seq, `p4` = head_dim.
+    pub fn f800(p0: &t500, p1: u32, p2: u32, p3: u32, p4: u32) -> Self {
+        let len = (p1 * p2 * p3 * p4) as usize;
+        let staging_len = (p2 * p3 * p4) as usize; // one slot worth
+        Self {
+            s530: p0.f503(len),
+            s531: p0.f503(len),
+            s532: p1, s533: p2, s534: p3, s535: p4,
+            s536: vec![0u32; p1 as usize],
+            s537: p0.f503(staging_len),
+            s538: p0.f503(staging_len),
+        }
+    }
+
+    /// f801 = copy_from_kvcache. Copy a prefilled `p2` (t534) into slot `p1`.
+    /// After this call, cursor(p1) == p2.cursor().
+    pub fn f801(&mut self, p0: &t500, p1: usize, k_src: &t501, v_src: &t501,
+                cursor: u32, max_seq_src: u32) -> Result<()> {
+        ensure!(p1 < self.s532 as usize, "copy_from_kvcache: slot {} >= max_batch {}", p1, self.s532);
+        ensure!(cursor <= self.s534, "copy_from_kvcache: cursor {} > pool max_seq {}", cursor, self.s534);
+        if cursor == 0 { self.s536[p1] = 0; return Ok(()); }
+        let params = t552 {
+            num_kv_heads: self.s533,
+            cursor,
+            head_dim: self.s535,
+            max_seq_src,
+            max_seq_dst: self.s534,
+            slot_idx: p1 as u32,
+            _p0: 0, _p1: 0,
+        };
+        let total = self.s533 * cursor * self.s535;
+        p0.f543(SHADER_COPY_TO_SLOT, Some("copy_to_slot_k"),
+            &params, &[k_src], &self.s530, super::f540(total));
+        p0.f543(SHADER_COPY_TO_SLOT, Some("copy_to_slot_v"),
+            &params, &[v_src], &self.s531, super::f540(total));
+        self.s536[p1] = cursor;
+        Ok(())
+    }
+
+    /// f802 = reset_slot. Zero the cursor for slot `p1`.
+    pub fn f802(&mut self, p1: usize) {
+        self.s536[p1] = 0;
+    }
+
+    /// f803 = cursor. Number of KV tokens stored in slot `p1`.
+    pub fn f803(&self, p1: usize) -> u32 { self.s536[p1] }
+
+    /// f804k = k_buf. Borrow the K buffer.
+    pub fn f804k(&self) -> &t501 { &self.s530 }
+
+    /// f804v = v_buf. Borrow the V buffer.
+    pub fn f804v(&self) -> &t501 { &self.s531 }
+
+    /// f805 = batch_decode_append. Append one new token per active slot (slots 0..`p3`).
+    /// `p1` = new K: [p3 * num_kv_heads * head_dim] (i.e., [p3*nkv_h, head_dim] flat)
+    /// `p2` = new V: same shape.
+    /// Reads cursors from self.s536[0..p3], writes to cache, then advances each cursor by 1.
+    pub fn f805(&mut self, p0: &t500, p1: &t501, p2: &t501, p3: usize) -> Result<()> {
+        ensure!(p3 <= self.s532 as usize,
+            "batch_decode_append: active_batch {} > max_batch {}", p3, self.s532);
+        let cursor_data: Vec<f32> = self.s536[..p3].iter().map(|&c| c as f32).collect();
+        let cursor_buf = p0.f502(&cursor_data);
+        let params = t553 {
+            active_batch: p3 as u32,
+            num_kv_heads: self.s533,
+            head_dim: self.s535,
+            max_seq: self.s534,
+            _p0: 0, _p1: 0, _p2: 0, _p3: 0,
+        };
+        let total = (p3 as u32) * self.s533 * self.s535;
+        p0.f543(SHADER_BATCH_DECODE_APPEND, Some("batch_append_k"),
+            &params, &[p1, &cursor_buf], &self.s530, super::f540(total));
+        p0.f543(SHADER_BATCH_DECODE_APPEND, Some("batch_append_v"),
+            &params, &[p2, &cursor_buf], &self.s531, super::f540(total));
+        for s in 0..p3 { self.s536[s] += 1; }
+        Ok(())
+    }
+
+    /// f806 = kv_lens_buf. Upload current cursors[0..`p1`] as a [p1] f32 GPU buffer.
+    /// Returns the kv lengths AFTER any recent f805 call — pass to fused_sdpa_batch_decode.
+    pub fn f806(&self, p0: &t500, p1: usize) -> t501 {
+        let data: Vec<f32> = self.s536[..p1].iter().map(|&c| c as f32).collect();
+        p0.f502(&data)
+    }
+
+    /// f807 = migrate_slot. Copy KV from pool slot `p1` (src) to pool slot `p2` (dst).
+    /// Used by serve-side compaction when a slot completes out of order.
+    /// Stages through `s537`/`s538` to avoid aliasing within the same buffer.
+    pub fn f807(&mut self, p0: &t500, p1: usize, p2: usize) {
+        if p1 == p2 { return; }
+        let cursor = self.s536[p1];
+        if cursor == 0 { self.s536[p2] = 0; return; }
+        let total = self.s533 * cursor * self.s535;
+        let params_src = t557 {
+            num_kv_heads: self.s533, cursor,
+            head_dim: self.s535, max_seq: self.s534,
+            slot_idx: p1 as u32,
+            _p0: 0, _p1: 0, _p2: 0,
+        };
+        let params_dst = t557 { slot_idx: p2 as u32, ..params_src };
+        // pool[src] → staging
+        p0.f543(SHADER_SLOT_TO_STAGING, Some("slot_to_staging_k"),
+            &params_src, &[&self.s530], &self.s537, super::f540(total));
+        p0.f543(SHADER_SLOT_TO_STAGING, Some("slot_to_staging_v"),
+            &params_src, &[&self.s531], &self.s538, super::f540(total));
+        // staging → pool[dst]
+        p0.f543(SHADER_STAGING_TO_SLOT, Some("staging_to_slot_k"),
+            &params_dst, &[&self.s537], &self.s530, super::f540(total));
+        p0.f543(SHADER_STAGING_TO_SLOT, Some("staging_to_slot_v"),
+            &params_dst, &[&self.s538], &self.s531, super::f540(total));
+        self.s536[p2] = cursor;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +1154,143 @@ mod tests {
         let v2 = dev().f504(&v1).unwrap();
 
         f544(&v2, &input, 1e-5);
+    }
+
+    // --- BatchKvPool (t551) ---
+
+    #[test]
+    fn f800_new_pool_starts_empty() {
+        // max_batch=2, num_kv_heads=1, max_seq=4, head_dim=2 → 16 floats per K/V
+        let v0 = t551::f800(dev(), 2, 1, 4, 2);
+        assert_eq!(v0.s532, 2);
+        assert_eq!(v0.s536, vec![0u32, 0u32]);
+        assert_eq!(v0.s530.s507, 2 * 1 * 4 * 2); // 16 elements
+        assert_eq!(v0.s531.s507, 16);
+        assert_eq!(v0.f803(0), 0);
+        assert_eq!(v0.f803(1), 0);
+    }
+
+    #[test]
+    fn f801_copy_from_kvcache_single_slot() {
+        // Prefill 2 tokens into a t534, then copy into slot 0 of a BatchKvPool.
+        // num_kv_heads=1, max_seq=4, head_dim=2.
+        let mut kv = t534::f672(dev(), 4, 1, 2);
+        let k_data = vec![1.0f32, 2.0, 3.0, 4.0]; // [1 head, 2 tokens, dim=2]
+        let v_data = vec![10.0f32, 20.0, 30.0, 40.0];
+        kv.f673(dev(), &dev().f502(&k_data), &dev().f502(&v_data), 2).unwrap();
+        assert_eq!(kv.f675(), 2);
+
+        let mut pool = t551::f800(dev(), 2, 1, 4, 2);
+        // Clone the t501 buffers (cheap Arc clone) to avoid split-borrow conflict
+        let k_src = kv.s511.clone();
+        let v_src = kv.s512.clone();
+        pool.f801(dev(), 0, &k_src, &v_src, kv.s513, kv.s514).unwrap();
+        assert_eq!(pool.f803(0), 2);
+        assert_eq!(pool.f803(1), 0); // slot 1 untouched
+
+        // Verify pool K layout: slot=0, head=0 occupies rows 0..max_seq
+        // slot_offset = 0 * 1 * max_seq * dim = 0
+        // position 0: [1.0, 2.0] at pool.k[0*4*2 + 0*2 .. 0*4*2 + 0*2 + 2]
+        // position 1: [3.0, 4.0] at pool.k[0*4*2 + 1*2 .. 0*4*2 + 1*2 + 2]
+        let k_pool = dev().f504(pool.f804k()).unwrap();
+        assert_eq!(&k_pool[0..4], &[1.0, 2.0, 3.0, 4.0]); // positions 0,1 of slot 0
+        assert!(k_pool[4..8].iter().all(|&x| x == 0.0));   // positions 2,3 still zero
+        // Slot 1 (rows 8..16) should be zero
+        assert!(k_pool[8..].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn f801_two_slots_independent() {
+        // Copy different data into slot 0 and slot 1; verify no cross-contamination.
+        let mut pool = t551::f800(dev(), 2, 1, 4, 2);
+
+        let mut kv0 = t534::f672(dev(), 4, 1, 2);
+        kv0.f673(dev(), &dev().f502(&[1.0f32, 2.0]), &dev().f502(&[10.0f32, 20.0]), 1).unwrap();
+        let k0 = kv0.s511.clone(); let v0 = kv0.s512.clone();
+        pool.f801(dev(), 0, &k0, &v0, kv0.s513, kv0.s514).unwrap();
+
+        let mut kv1 = t534::f672(dev(), 4, 1, 2);
+        kv1.f673(dev(), &dev().f502(&[5.0f32, 6.0, 7.0, 8.0]), &dev().f502(&[50.0f32, 60.0, 70.0, 80.0]), 2).unwrap();
+        let k1 = kv1.s511.clone(); let v1 = kv1.s512.clone();
+        pool.f801(dev(), 1, &k1, &v1, kv1.s513, kv1.s514).unwrap();
+
+        assert_eq!(pool.f803(0), 1);
+        assert_eq!(pool.f803(1), 2);
+
+        let k_pool = dev().f504(pool.f804k()).unwrap();
+        // Slot 0: position 0 = [1,2], positions 1..3 = 0
+        assert_eq!(&k_pool[0..2], &[1.0, 2.0]);
+        assert!(k_pool[2..8].iter().all(|&x| x == 0.0));
+        // Slot 1 (offset = 1 * max_seq * hd = 8): positions 0,1 = [5,6,7,8], positions 2,3 = 0
+        assert_eq!(&k_pool[8..12], &[5.0, 6.0, 7.0, 8.0]);
+        assert!(k_pool[12..].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn f805_batch_decode_append_two_slots() {
+        // pool: max_batch=2, nkvh=1, max_seq=4, hd=2
+        // Pre-set cursor for slot 0 = 1, slot 1 = 2.
+        // Append one token per slot; verify correct positions in cache.
+        let mut pool = t551::f800(dev(), 2, 1, 4, 2);
+        pool.s536[0] = 1;
+        pool.s536[1] = 2;
+
+        // new K: [2 * 1 * 2] = [slot0_h0: 9,10   slot1_h0: 11,12]
+        let new_k = dev().f502(&[9.0f32, 10.0, 11.0, 12.0]);
+        let new_v = dev().f502(&[90.0f32, 100.0, 110.0, 120.0]);
+        pool.f805(dev(), &new_k, &new_v, 2).unwrap();
+
+        assert_eq!(pool.f803(0), 2); // cursor advanced
+        assert_eq!(pool.f803(1), 3);
+
+        let k_pool = dev().f504(pool.f804k()).unwrap();
+        // Slot 0: position 1 (cursor was 1) = [9, 10]
+        assert_eq!(&k_pool[2..4], &[9.0, 10.0]);
+        // Slot 1 (offset=8): position 2 (cursor was 2) = [11, 12]
+        assert_eq!(&k_pool[12..14], &[11.0, 12.0]);
+    }
+
+    #[test]
+    fn f802_reset_slot() {
+        let mut pool = t551::f800(dev(), 2, 1, 4, 2);
+        pool.s536[0] = 3;
+        pool.s536[1] = 1;
+        pool.f802(0);
+        assert_eq!(pool.f803(0), 0);
+        assert_eq!(pool.f803(1), 1); // slot 1 unaffected
+    }
+
+    #[test]
+    fn f807_migrate_slot_copies_kv_and_cursor() {
+        // Fill slot 1 with known data; slot 0 should be empty.
+        // After f807(1 -> 0), slot 0 should have the same data and cursor.
+        let nkv_h = 1u32;
+        let max_seq = 4u32;
+        let hd = 2u32;
+        let mut pool = t551::f800(dev(), 2, nkv_h, max_seq, hd);
+
+        // Manually set slot 1 cursor and write known K/V values via f801.
+        // Build a source t534 with 2 KV positions.
+        let cursor = 2u32;
+        // K for slot 1: kh=0, pos=0: [1.0, 2.0]; pos=1: [3.0, 4.0]
+        let k_data = vec![1.0f32, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]; // [nkv_h * max_seq * hd]
+        let v_data = vec![5.0f32, 6.0, 7.0, 8.0, 0.0, 0.0, 0.0, 0.0];
+        let k_src = dev().f502(&k_data);
+        let v_src = dev().f502(&v_data);
+        pool.f801(dev(), 1, &k_src, &v_src, cursor, max_seq).unwrap();
+        assert_eq!(pool.f803(1), 2);
+
+        // Migrate slot 1 → slot 0.
+        pool.f807(dev(), 1, 0);
+        assert_eq!(pool.f803(0), 2);
+        assert_eq!(pool.f803(1), 2); // src cursor unchanged
+
+        // Read back pool K buffer and verify slot 0 has the right values.
+        let pool_k = dev().f504(&pool.s530).unwrap();
+        // Slot 0, kh=0 row starts at index 0 * nkv_h * max_seq * hd = 0
+        assert_eq!(pool_k[0], 1.0);
+        assert_eq!(pool_k[1], 2.0);
+        assert_eq!(pool_k[2], 3.0);
+        assert_eq!(pool_k[3], 4.0);
     }
 }

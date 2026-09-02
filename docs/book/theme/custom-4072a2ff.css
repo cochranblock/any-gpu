@@ -1,0 +1,108 @@
+/* Cochran Block brand theme — kova palette (overrides coal) */
+
+.coal {
+    --bg: #050508;
+    --fg: #e2e8f0;
+
+    --sidebar-bg: #0a0a0f;
+    --sidebar-fg: #e2e8f0;
+    --sidebar-non-existant: #64748b;
+    --sidebar-active: #00d9ff;
+    --sidebar-spacer: #14141f;
+
+    --scrollbar: #14141f;
+
+    --icons: #00d9ff;
+    --icons-hover: #fbbf24;
+
+    --links: #00d9ff;
+
+    --inline-code-color: #c084fc;
+
+    --theme-popup-bg: #14141f;
+    --theme-popup-border: #00d9ff;
+    --theme-hover: #14141f;
+
+    --quote-bg: #14141f;
+    --quote-border: #14b8a6;
+
+    --table-border-color: #1e2a3a;
+    --table-header-bg: #14141f;
+    --table-alternate-bg: #0a0a0f;
+
+    --searchbar-border-color: #00d9ff;
+    --searchbar-bg: #14141f;
+    --searchbar-fg: #e2e8f0;
+    --searchresults-header-fg: #00d9ff;
+    --searchresults-border-color: #1e2a3a;
+    --searchresults-li-bg: #14141f;
+    --search-mark-bg: #fbbf24;
+}
+
+/* Sidebar */
+.sidebar { background: #0a0a0f; border-right: 1px solid #1e2a3a; }
+.sidebar .sidebar-scrollbox { padding-top: 0.5rem; }
+
+/* Sidebar title */
+.sidebar .sidebar-title { padding: 1rem 1rem 0.5rem; }
+.sidebar .sidebar-title a {
+    color: #00d9ff;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+/* Nav items */
+.sidebar ol.chapter li a { color: #a0aec0; transition: color 0.15s; }
+.sidebar ol.chapter li a:hover { color: #fbbf24; }
+.sidebar ol.chapter li a.active { color: #00d9ff; font-weight: 600; }
+
+/* Subsection indent */
+.sidebar ol.section { border-left: 1px solid #1e2a3a; margin-left: 0.8rem; }
+
+/* Content */
+.page { background: #050508; }
+.content { background: #050508; color: #e2e8f0; }
+.content main { padding: 0 2rem 4rem; max-width: 860px; }
+
+/* Headings */
+.content h1 { color: #e2e8f0; border-bottom: 1px solid #1e2a3a; padding-bottom: 0.4rem; }
+.content h2 { color: #e2e8f0; margin-top: 2rem; }
+.content h3 { color: #00d9ff; }
+.content h4 { color: #14b8a6; }
+
+/* Links */
+.content a { color: #00d9ff; text-decoration: none; }
+.content a:hover { color: #fbbf24; text-decoration: underline; }
+
+/* Inline code */
+code { color: #c084fc; background: #14141f; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
+
+/* Code blocks */
+pre { background: #14141f !important; border: 1px solid #1e2a3a; border-left: 3px solid #00d9ff; border-radius: 4px; }
+pre code { background: transparent; padding: 0; color: inherit; }
+
+/* Blockquote */
+blockquote { border-left: 4px solid #14b8a6; background: #14141f; padding: 0.5rem 1rem; margin: 1rem 0; }
+
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+table th { background: #14141f; color: #00d9ff; padding: 0.5rem 0.75rem; border: 1px solid #1e2a3a; }
+table td { padding: 0.45rem 0.75rem; border: 1px solid #1e2a3a; }
+table tr:nth-child(even) td { background: #0a0a0f; }
+table tr:hover td { background: #14141f; }
+
+/* Top nav bar */
+#menu-bar { background: #0a0a0f; border-bottom: 1px solid #1e2a3a; }
+#menu-bar .icon-button { color: #00d9ff; }
+#menu-bar .icon-button:hover { color: #fbbf24; }
+
+/* Brand footer */
+sub { color: #64748b; font-size: 0.75em; }
+
+/* Search */
+#searchbar { background: #14141f; border: 1px solid #00d9ff; color: #e2e8f0; border-radius: 4px; }
+
+/* Print */
+@media print { .coal { --bg: #fff; --fg: #000; } }

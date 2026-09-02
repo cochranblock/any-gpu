@@ -33,10 +33,10 @@ pub mod module;
 pub mod lm;
 
 pub use device::{t500, t501, t540, t549};
-pub use ops::transformer::t534;
+pub use ops::transformer::{t534, t551};
 pub use pager::{t539, DEFAULT_STAGE_BYTES};
 pub use safetensors::t538;
 pub use tensor::t502;
 pub use tokenizer::t544;
 pub use module::{t545, t546};
-pub use lm::{t547, t548};
+pub use lm::{t547, t548, t556};

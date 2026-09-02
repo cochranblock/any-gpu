@@ -14,9 +14,12 @@
 // f784 = CausalLM::prefill    (tokenize + run prompt through all layers)
 // f785 = CausalLM::decode_one (single autoregressive decode step)
 // f786 = CausalLM::generate   (prefill + decode loop → String)
+// t556 = DecodeSlot (CPU-only; tracks one active request in the batch pool)
+// f788b = CausalLM::prefill_slot  (prefill into a batch pool slot)
+// f789b = CausalLM::batch_decode_step (one decode step for all active slots)
 
 use crate::device::{t500, t501};
-use crate::ops::transformer::t534;
+use crate::ops::transformer::{t534, t551};
 use crate::pager::t539;
 use crate::safetensors::t538;
 use crate::tokenizer::t544;
@@ -45,10 +48,15 @@ pub struct t547 {
     /// RMSNorm epsilon. Default 1e-5.
     #[serde(default = "default_norm_eps")]
     pub norm_eps:     f32,
+    /// Maximum concurrent decode requests for batch inference. Default 1 (single-request mode).
+    /// Allocates `max_batch` KV slots in the batch pool. Larger values use more VRAM.
+    #[serde(default = "default_max_batch")]
+    pub max_batch:    usize,
 }
 
 fn default_rope_base() -> f32 { 10000.0 }
 fn default_norm_eps()   -> f32 { 1e-5 }
+fn default_max_batch()  -> usize { 1 }
 
 impl t547 {
     /// f782 = LmConfig::from_json. Parse an architecture config from a JSON string.
@@ -72,14 +80,28 @@ struct LmLayer {
     down_w:      t501,  // [ff_dim, hidden_dim]
 }
 
+/// t556 = DecodeSlot. CPU-only state for one active request in the batch pool.
+#[derive(Clone)]
+pub struct t556 {
+    /// Slot index in the batch pool (0..max_batch).
+    pub slot: usize,
+    /// Tokens generated so far (not including the prefill prompt).
+    pub generated: Vec<u32>,
+    /// Next token to feed as input for the next decode step.
+    pub next_token: u32,
+    /// Remaining decode steps allowed.
+    pub tokens_left: usize,
+}
+
 /// t548 = CausalLM. LLaMA-style decoder-only transformer with KV cache.
 pub struct t548 {
-    cfg:          t547,
-    embed_w:      t501,        // [vocab_size, hidden_dim]
-    layers:       Vec<LmLayer>,
-    final_norm_w: t501,        // [hidden_dim]
-    lm_head_w:    t501,        // [hidden_dim, vocab_size]  (pre-transposed)
-    kv_caches:    Vec<t534>,
+    pub cfg:          t547,
+    embed_w:          t501,        // [vocab_size, hidden_dim]
+    layers:           Vec<LmLayer>,
+    final_norm_w:     t501,        // [hidden_dim]
+    lm_head_w:        t501,        // [hidden_dim, vocab_size]  (pre-transposed)
+    kv_caches:        Vec<t534>,   // single-request KV (f784/f785/f786)
+    pub batch_kv:     Vec<t551>,   // batch KV pool (f788b/f789b): one per layer
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -150,13 +172,20 @@ impl t548 {
         let lm_head_w = upload_and_transpose(dev, pager, model, "lm_head.weight",
                                              cfg.vocab_size, cfg.hidden_dim)?;
 
-        // Pre-allocate KV caches for all layers
+        // Pre-allocate single-request KV caches (f784/f785/f786)
         let kv_caches = (0..cfg.num_layers)
             .map(|_| t534::f672(dev, cfg.max_seq as u32,
                                 cfg.num_kv_heads as u32, hd as u32))
             .collect();
 
-        Ok(Self { cfg, embed_w, layers, final_norm_w, lm_head_w, kv_caches })
+        // Pre-allocate batch KV pool (f788b/f789b); max_batch slots per layer
+        let max_batch = cfg.max_batch.max(1) as u32;
+        let batch_kv = (0..cfg.num_layers)
+            .map(|_| t551::f800(dev, max_batch, cfg.num_kv_heads as u32,
+                                cfg.max_seq as u32, hd as u32))
+            .collect();
+
+        Ok(Self { cfg, embed_w, layers, final_norm_w, lm_head_w, kv_caches, batch_kv })
     }
 
     /// Single transformer layer forward. `x` is [seq_len, hidden_dim].
@@ -319,6 +348,136 @@ impl t548 {
         }
 
         tok.f777(&generated)
+    }
+
+    // ─── batch inference (f788b / f789b) ─────────────────────────────────────
+
+    /// One transformer layer in batch-decode mode.
+    /// `x`:            [active_batch, hidden_dim]
+    /// `start_pos_buf`: [active_batch] as f32 — absolute KV position before this step
+    /// Returns: [active_batch, hidden_dim]
+    fn layer_forward_batch_decode(
+        &mut self,
+        dev: &t500,
+        x: &t501,
+        layer_idx: usize,
+        active_batch: u32,
+        start_pos_buf: &t501,
+    ) -> Result<t501> {
+        let hd   = self.cfg.head_dim() as u32;
+        let nh   = self.cfg.num_heads as u32;
+        let nkvh = self.cfg.num_kv_heads as u32;
+        let hdim = self.cfg.hidden_dim as u32;
+
+        // Step 1: Pre-attention RMSNorm
+        let normed = dev.f603(x, &self.layers[layer_idx].attn_norm_w,
+                              active_batch, hdim, self.cfg.norm_eps)?;
+
+        // Step 2: Q/K/V projections → [B, nh*hd] and [B, nkvh*hd]
+        // These are identical to [B*nh, hd] and [B*nkvh, hd] in memory (same flat layout).
+        let q_flat = dev.f580(&normed, &self.layers[layer_idx].q_w,
+                              active_batch, nh * hd, hdim)?;
+        let k_flat = dev.f580(&normed, &self.layers[layer_idx].k_w,
+                              active_batch, nkvh * hd, hdim)?;
+        let v_flat = dev.f580(&normed, &self.layers[layer_idx].v_w,
+                              active_batch, nkvh * hd, hdim)?;
+
+        // Step 3: Batch RoPE on Q ([B*nh, hd]) and K ([B*nkvh, hd])
+        let q = dev.f631(&q_flat, start_pos_buf, active_batch * nh, nh, hd, self.cfg.rope_base)?;
+        let k = dev.f631(&k_flat, start_pos_buf, active_batch * nkvh, nkvh, hd, self.cfg.rope_base)?;
+
+        // Step 4: Append new K/V tokens to the batch KV pool (advances cursors)
+        self.batch_kv[layer_idx].f805(dev, &k, &v_flat, active_batch as usize)?;
+
+        // Step 5: Build kv_lens buffer (post-append cursors)
+        let kv_lens_buf = self.batch_kv[layer_idx].f806(dev, active_batch as usize);
+        let max_kv_seq  = self.cfg.max_seq as u32;
+
+        // Step 6: Batch decode SDPA — Q [B*nh, hd] × K/V [max_batch*nkvh, max_kv_seq, hd]
+        let k_buf = self.batch_kv[layer_idx].f804k().clone();
+        let v_buf = self.batch_kv[layer_idx].f804v().clone();
+        let attn = dev.f630(&q, &k_buf, &v_buf, &kv_lens_buf,
+                            active_batch, nh, nkvh, max_kv_seq, hd)?;
+
+        // Step 7: Output projection: [B*nh, hd] treated as [B, nh*hd] @ [nh*hd, hdim]
+        let attn_out = dev.f580(&attn, &self.layers[layer_idx].o_w,
+                                active_batch, hdim, nh * hd)?;
+
+        // Step 8: Residual
+        let x = dev.f550(x, &attn_out)?;
+
+        // Step 9: Pre-FFN RMSNorm
+        let normed2 = dev.f603(&x, &self.layers[layer_idx].ffn_norm_w,
+                               active_batch, hdim, self.cfg.norm_eps)?;
+
+        // Step 10: SwiGLU FFN
+        let gate    = dev.f580(&normed2, &self.layers[layer_idx].gate_w,
+                               active_batch, self.cfg.ff_dim as u32, hdim)?;
+        let up      = dev.f580(&normed2, &self.layers[layer_idx].up_w,
+                               active_batch, self.cfg.ff_dim as u32, hdim)?;
+        let sgate   = dev.f556(&gate)?;
+        let ffn     = dev.f552(&sgate, &up)?;
+        let ffn_out = dev.f580(&ffn, &self.layers[layer_idx].down_w,
+                               active_batch, hdim, self.cfg.ff_dim as u32)?;
+
+        // Step 11: Residual
+        dev.f550(&x, &ffn_out)
+    }
+
+    /// f788b = CausalLM::prefill_slot. Prefill `token_ids` into batch pool slot `slot`.
+    /// Runs the normal single-request prefill (f784), then copies each layer's KV
+    /// into the batch pool. After this, batch_kv[layer].cursor(slot) == token_ids.len().
+    /// Returns the logits for the position after the last prefill token.
+    pub fn f788b(&mut self, dev: &t500, slot: usize, token_ids: &[u32]) -> Result<t501> {
+        ensure!(slot < self.cfg.max_batch.max(1),
+            "f788b: slot {} >= max_batch {}", slot, self.cfg.max_batch.max(1));
+        // Run standard prefill — fills self.kv_caches
+        let logits = self.f784(dev, token_ids)?;
+        // Copy each layer's prefilled KV into the batch pool at `slot`
+        for layer_idx in 0..self.cfg.num_layers {
+            let cursor     = self.kv_caches[layer_idx].s513;
+            let max_seq_src = self.kv_caches[layer_idx].s514;
+            let k_src = self.kv_caches[layer_idx].s511.clone();
+            let v_src = self.kv_caches[layer_idx].s512.clone();
+            self.batch_kv[layer_idx].f801(dev, slot, &k_src, &v_src, cursor, max_seq_src)?;
+        }
+        Ok(logits)
+    }
+
+    /// f789b = CausalLM::batch_decode_step. Run one decode step for `next_tokens.len()`
+    /// concurrent requests (slots 0..active_batch-1 of the batch pool).
+    /// Reads start positions from batch_kv[0].s536 (cursor before append).
+    /// Returns logits: [active_batch, vocab_size].
+    pub fn f789b(&mut self, dev: &t500, next_tokens: &[u32]) -> Result<t501> {
+        let active_batch = next_tokens.len() as u32;
+        ensure!(active_batch > 0, "f789b: empty next_tokens");
+        ensure!(active_batch <= self.cfg.max_batch.max(1) as u32,
+            "f789b: active_batch {} > max_batch {}", active_batch, self.cfg.max_batch.max(1));
+
+        let hdim = self.cfg.hidden_dim as u32;
+        let vsz  = self.cfg.vocab_size as u32;
+
+        // Read start positions (= current KV cursor before this step) for RoPE
+        let start_pos_f32: Vec<f32> = (0..active_batch as usize)
+            .map(|s| self.batch_kv[0].s536[s] as f32)
+            .collect();
+        let start_pos_buf = dev.f502(&start_pos_f32);
+
+        // Embed all next tokens: [active_batch, hidden_dim]
+        let ids_f32: Vec<f32> = next_tokens.iter().map(|&id| id as f32).collect();
+        let ids_buf = dev.f502(&ids_f32);
+        let mut x = dev.f670(&ids_buf, &self.embed_w, active_batch, vsz, hdim)?;
+
+        // Run all transformer layers in batch-decode mode
+        for layer_idx in 0..self.cfg.num_layers {
+            x = self.layer_forward_batch_decode(dev, &x, layer_idx, active_batch, &start_pos_buf)?;
+        }
+
+        // Final norm: [active_batch, hidden_dim]
+        let normed = dev.f603(&x, &self.final_norm_w, active_batch, hdim, self.cfg.norm_eps)?;
+
+        // LM head: [active_batch, hidden_dim] @ [hidden_dim, vocab_size] = [active_batch, vocab_size]
+        dev.f580(&normed, &self.lm_head_w, active_batch, vsz, hdim)
     }
 }
 

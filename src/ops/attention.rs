@@ -485,6 +485,217 @@ fn main() {
 }
 ";
 
+// --- Batch-decode SDPA (f630) and batch RoPE (f631) ---
+//
+// f630: Online-softmax SDPA for a batch of single decode tokens.
+//   Q: [B*Nh, Hd], K/V: [max_batch*Nkv, max_kv_seq, Hd] (BatchKvPool layout).
+//   kv_lens[b] = how many KV positions are valid for batch element b.
+//   One workgroup per query row (bq = b*Nh + h_q).
+//
+// f631: RoPE for a batch of single decode tokens.
+//   Input: [B*Nh, Hd]. start_pos_buf[b] = absolute position for token b.
+//   b = bh / num_heads.
+
+/// t554 = BatchDecodeSdpaParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t554 {
+    total_q_heads: u32,  // B * Nh
+    num_heads:     u32,  // Nh (per request)
+    num_kv_heads:  u32,  // Nkv (per request)
+    max_kv_seq:    u32,  // stride: positions in KV pool per (slot, head)
+    head_dim:      u32,  // Hd
+    slot_stride:   u32,  // Nkv * max_kv_seq * Hd (elements per slot in K/V buffer)
+    scale:         f32,  // 1/sqrt(Hd)
+    _pad:          u32,
+}
+
+/// t555 = RopeBatchParams.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct t555 {
+    total_heads: u32,  // B * Nh (or B * Nkv for K)
+    num_heads:   u32,  // Nh (used to compute b = bh / num_heads)
+    head_dim:    u32,
+    _pad:        u32,
+    base:        f32,
+    _p1:         u32,
+    _p2:         u32,
+    _p3:         u32,
+}
+
+// Wave64 path: one 64-thread workgroup per query row (bq = b*Nh + h_q).
+// Lane `d` handles elements {d, d+64, d+128, ...} of head_dim (dpl = head_dim/64).
+// kv_lens[b] controls the attention window (no causal mask needed: decode has q_seq=1,
+// so the new token always attends to all previous tokens including itself).
+const SHADER_FUSED_SDPA_BATCH_DECODE_W64: &str = "
+struct P {
+    total_q_heads: u32, num_heads: u32, num_kv_heads: u32, max_kv_seq: u32,
+    head_dim: u32, slot_stride: u32, scale: f32, _pad: u32,
+}
+@group(0) @binding(0) var<uniform>             p:       P;
+@group(0) @binding(1) var<storage, read>       q:       array<f32>;
+@group(0) @binding(2) var<storage, read>       k_all:   array<f32>;
+@group(0) @binding(3) var<storage, read>       v_all:   array<f32>;
+@group(0) @binding(4) var<storage, read>       kv_lens: array<f32>;
+@group(0) @binding(5) var<storage, read_write> out:     array<f32>;
+
+var<private> lane_acc: array<f32, 4>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id)           wg:   vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+) {
+    let bq = wg.x + wg.y * 65535u;
+    if bq >= p.total_q_heads { return; }
+
+    let b     = bq / p.num_heads;
+    let h_q   = bq % p.num_heads;
+    let n_rep = p.num_heads / p.num_kv_heads;
+    let h_kv  = h_q / n_rep;
+    let kv_len = u32(kv_lens[b]);
+    if kv_len == 0u { return; }
+
+    let q_base  = bq * p.head_dim;
+    let kv_base = b * p.slot_stride + h_kv * p.max_kv_seq * p.head_dim;
+    let dpl     = p.head_dim / 64u;
+
+    for (var s: u32 = 0u; s < dpl; s++) { lane_acc[s] = 0.0; }
+    var m: f32 = -1.0e30;
+    var l: f32 = 0.0;
+
+    for (var j: u32 = 0u; j < kv_len; j++) {
+        let k_row = kv_base + j * p.head_dim;
+        var partial: f32 = 0.0;
+        for (var s: u32 = 0u; s < dpl; s++) {
+            partial += q[q_base + lane + s * 64u] * k_all[k_row + lane + s * 64u];
+        }
+        let score = subgroupAdd(partial) * p.scale;
+
+        let m_new = max(m, score);
+        let alpha = exp(m - m_new);
+        let beta  = exp(score - m_new);
+        let v_row = kv_base + j * p.head_dim;
+        for (var s: u32 = 0u; s < dpl; s++) {
+            lane_acc[s] = lane_acc[s] * alpha + beta * v_all[v_row + lane + s * 64u];
+        }
+        l = alpha * l + beta;
+        m = m_new;
+    }
+
+    let inv_l = 1.0 / l;
+    for (var s: u32 = 0u; s < dpl; s++) {
+        out[bq * p.head_dim + lane + s * 64u] = lane_acc[s] * inv_l;
+    }
+}
+";
+
+// Fallback (non-wave64): one thread per query row, scalar dot product.
+// head_dim must be ≤ 128 (fits in private VGPR array).
+const SHADER_FUSED_SDPA_BATCH_DECODE: &str = "
+struct P {
+    total_q_heads: u32, num_heads: u32, num_kv_heads: u32, max_kv_seq: u32,
+    head_dim: u32, slot_stride: u32, scale: f32, _pad: u32,
+}
+@group(0) @binding(0) var<uniform>             p:       P;
+@group(0) @binding(1) var<storage, read>       q:       array<f32>;
+@group(0) @binding(2) var<storage, read>       k_all:   array<f32>;
+@group(0) @binding(3) var<storage, read>       v_all:   array<f32>;
+@group(0) @binding(4) var<storage, read>       kv_lens: array<f32>;
+@group(0) @binding(5) var<storage, read_write> out:     array<f32>;
+
+var<private> acc_p: array<f32, 128>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bq = gid.x + gid.y * 65535u * 256u;
+    if bq >= p.total_q_heads { return; }
+
+    let b     = bq / p.num_heads;
+    let h_q   = bq % p.num_heads;
+    let n_rep = p.num_heads / p.num_kv_heads;
+    let h_kv  = h_q / n_rep;
+    let kv_len = u32(kv_lens[b]);
+    if kv_len == 0u { return; }
+
+    let q_base  = bq * p.head_dim;
+    let kv_base = b * p.slot_stride + h_kv * p.max_kv_seq * p.head_dim;
+
+    for (var d: u32 = 0u; d < p.head_dim; d++) { acc_p[d] = 0.0; }
+    var m: f32 = -1.0e30;
+    var l: f32 = 0.0;
+
+    for (var j: u32 = 0u; j < kv_len; j++) {
+        var score: f32 = 0.0;
+        let k_row = kv_base + j * p.head_dim;
+        for (var d: u32 = 0u; d < p.head_dim; d++) {
+            score += q[q_base + d] * k_all[k_row + d];
+        }
+        score *= p.scale;
+
+        let m_new = max(m, score);
+        let alpha = exp(m - m_new);
+        let beta  = exp(score - m_new);
+        let v_row = kv_base + j * p.head_dim;
+        for (var d: u32 = 0u; d < p.head_dim; d++) {
+            acc_p[d] = acc_p[d] * alpha + beta * v_all[v_row + d];
+        }
+        l = alpha * l + beta;
+        m = m_new;
+    }
+
+    let inv_l = 1.0 / l;
+    for (var d: u32 = 0u; d < p.head_dim; d++) {
+        out[bq * p.head_dim + d] = acc_p[d] * inv_l;
+    }
+}
+";
+
+// RoPE for a batch of single decode tokens.
+// Input: [total_heads, head_dim]. start_pos_buf[b] = absolute position for batch element b.
+// b = bh / num_heads. seq_len is implicitly 1 (decode), so pos = start_pos + 0 = start_pos.
+const SHADER_ROPE_BATCH: &str = "
+struct P {
+    total_heads: u32, num_heads: u32, head_dim: u32, _pad: u32,
+    base: f32, _p1: u32, _p2: u32, _p3: u32,
+}
+@group(0) @binding(0) var<uniform>             p:             P;
+@group(0) @binding(1) var<storage, read>       input:         array<f32>;
+@group(0) @binding(2) var<storage, read>       start_pos_buf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out:           array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x + gid.y * 65535u * 256u;
+    let total = p.total_heads * p.head_dim;
+    if idx >= total { return; }
+
+    let bh  = idx / p.head_dim;
+    let d   = idx % p.head_dim;
+    let b   = bh / p.num_heads;
+    let start_pos = u32(start_pos_buf[b]);
+    let pos_f = f32(start_pos);
+
+    let pair_idx = d / 2u;
+    let is_first = (d % 2u) == 0u;
+    let exponent = -2.0 * f32(pair_idx) / f32(p.head_dim);
+    let inv_freq = pow(p.base, exponent);
+    let angle = pos_f * inv_freq;
+    let cos_a = cos(angle);
+    let sin_a = sin(angle);
+
+    let base_idx = bh * p.head_dim + pair_idx * 2u;
+    let x_a = input[base_idx];
+    let x_b = input[base_idx + 1u];
+
+    if is_first {
+        out[idx] = x_a * cos_a - x_b * sin_a;
+    } else {
+        out[idx] = x_a * sin_a + x_b * cos_a;
+    }
+}
+";
+
 impl t500 {
     /// f620 = softmax. Softmax along the last dimension. Input shape: [rows, cols].
     /// Uses fused subgroup reduction when s509 (SUBGROUP feature) is available,
@@ -733,6 +944,78 @@ impl t500 {
             (1, 1, 1),
         );
         Ok(v0)
+    }
+
+    /// f630 = fused_sdpa_batch_decode. Online-softmax SDPA for a batch of decode steps.
+    /// Each of `p5` (active_batch) requests contributes exactly one query token (q_seq=1).
+    /// Q:     [active_batch * num_heads,    head_dim]  flat (= [B*Nh, Hd])
+    /// K/V:   [max_batch * num_kv_heads, max_kv_seq, head_dim] flat  (BatchKvPool buffers)
+    /// kv_lens: [active_batch] as f32  (valid KV length per slot, including the new token)
+    /// Returns: [active_batch * num_heads, head_dim]  (same shape as Q)
+    pub fn f630(
+        &self,
+        p0: &t501,  // Q
+        p1: &t501,  // K_all (batch KV pool K buffer)
+        p2: &t501,  // V_all (batch KV pool V buffer)
+        p3: &t501,  // kv_lens [active_batch] as f32
+        p4: u32,    // active_batch
+        p5: u32,    // num_heads (Nh, per request)
+        p6: u32,    // num_kv_heads (Nkv, per request)
+        p7: u32,    // max_kv_seq (pool stride per head row)
+        p8: u32,    // head_dim
+    ) -> Result<t501> {
+        let total_q = p4 * p5;
+        ensure!(p0.s507 == (total_q * p8) as usize,
+            "f630: Q size mismatch: got {} want {}", p0.s507, total_q * p8);
+        ensure!(p5 % p6 == 0, "f630: num_heads ({}) not divisible by num_kv_heads ({})", p5, p6);
+        ensure!(p8 % 64 == 0 || p8 <= 128, "f630: head_dim ({}) must be multiple of 64 or ≤128", p8);
+
+        let slot_stride = p6 * p7 * p8;
+        let out = self.f503((total_q * p8) as usize);
+        let params = t554 {
+            total_q_heads: total_q, num_heads: p5, num_kv_heads: p6,
+            max_kv_seq: p7, head_dim: p8, slot_stride,
+            scale: 1.0 / (p8 as f32).sqrt(), _pad: 0,
+        };
+
+        if self.s509 && p8 % 64 == 0 && p8 <= 256 {
+            let (wx, wy) = if total_q <= 65535 { (total_q, 1) } else { (65535, total_q.div_ceil(65535)) };
+            self.f543(SHADER_FUSED_SDPA_BATCH_DECODE_W64, Some("sdpa_batch_decode_w64"),
+                &params, &[p0, p1, p2, p3], &out, (wx, wy, 1));
+        } else {
+            self.f543(SHADER_FUSED_SDPA_BATCH_DECODE, Some("sdpa_batch_decode"),
+                &params, &[p0, p1, p2, p3], &out, super::f540(total_q));
+        }
+        Ok(out)
+    }
+
+    /// f631 = rope_batch_decode. RoPE for a batch of single decode tokens.
+    /// Input: [total_heads, head_dim]  where total_heads = active_batch * num_heads.
+    /// start_pos_buf: [active_batch] as f32 — absolute position for token of each batch element.
+    /// b = bh / p3 (num_heads) gives the batch element index.
+    /// Returns: [total_heads, head_dim]  (same shape).
+    pub fn f631(
+        &self,
+        p0: &t501,  // input [total_heads * head_dim]
+        p1: &t501,  // start_pos_buf [active_batch] as f32
+        p2: u32,    // total_heads = active_batch * num_heads
+        p3: u32,    // num_heads per batch element (to compute b = bh / p3)
+        p4: u32,    // head_dim
+        p5: f32,    // rope_base
+    ) -> Result<t501> {
+        ensure!(p4 % 2 == 0, "f631: head_dim ({}) must be even", p4);
+        ensure!(p0.s507 == (p2 * p4) as usize,
+            "f631: input size mismatch: got {} want {}", p0.s507, p2 * p4);
+        ensure!(p5 > 0.0, "f631: base must be positive");
+
+        let out = self.f503((p2 * p4) as usize);
+        let params = t555 {
+            total_heads: p2, num_heads: p3, head_dim: p4, _pad: 0,
+            base: p5, _p1: 0, _p2: 0, _p3: 0,
+        };
+        self.f543(SHADER_ROPE_BATCH, Some("rope_batch"),
+            &params, &[p0, p1], &out, super::f540(p2 * p4));
+        Ok(out)
     }
 }
 
@@ -1461,5 +1744,132 @@ mod tests {
         // Both head 0 and head 1 should be copies of the single kv head
         f544(&got[..4], &v0, 1e-6);
         f544(&got[4..], &v0, 1e-6);
+    }
+
+    // --- f631 = rope_batch_decode ---
+
+    #[test]
+    fn f631_matches_serial_f625() {
+        // Two batch elements (B=2), num_heads=2, head_dim=4.
+        // Element 0 start_pos=3, element 1 start_pos=7.
+        // Compare f631 output to running f625 twice with respective start_pos.
+        let nh = 2u32; let hd = 4u32; let b = 2u32; let base = 10000.0f32;
+        let input: Vec<f32> = (0..(b * nh * hd) as usize)
+            .map(|i| (i as f32) * 0.13 - 1.0)
+            .collect();
+        let start_pos_buf = dev().f502(&[3.0f32, 7.0]);
+
+        let batch_out = dev().f504(&dev().f631(
+            &dev().f502(&input), &start_pos_buf, b * nh, nh, hd, base,
+        ).unwrap()).unwrap();
+
+        // Serial reference: run f625 for each batch element's heads separately.
+        // Batch element 0: heads 0..nh → input[0..nh*hd], start_pos=3
+        let serial_0 = dev().f504(&dev().f625(
+            &dev().f502(&input[..(nh * hd) as usize]),
+            nh, 1, hd, 3, base,
+        ).unwrap()).unwrap();
+        // Batch element 1: heads nh..2nh → input[nh*hd..2nh*hd], start_pos=7
+        let serial_1 = dev().f504(&dev().f625(
+            &dev().f502(&input[(nh * hd) as usize..]),
+            nh, 1, hd, 7, base,
+        ).unwrap()).unwrap();
+
+        let (lo, hi) = batch_out.split_at((nh * hd) as usize);
+        f544(lo, &serial_0, 1e-4);
+        f544(hi, &serial_1, 1e-4);
+    }
+
+    #[test]
+    fn f631_position_zero_is_identity() {
+        // start_pos=0 for all → RoPE at position 0 is identity.
+        let nh = 2u32; let hd = 4u32; let b = 2u32;
+        let input: Vec<f32> = (0..(b * nh * hd) as usize).map(|i| i as f32 * 0.1).collect();
+        let sp = dev().f502(&[0.0f32, 0.0]);
+        let out = dev().f504(&dev().f631(&dev().f502(&input), &sp, b*nh, nh, hd, 10000.0).unwrap()).unwrap();
+        f544(&out, &input, 1e-5);
+    }
+
+    // --- f630 = fused_sdpa_batch_decode ---
+
+    // CPU reference for batch decode SDPA: for each (b, h_q), full attention over kv_len positions.
+    fn cpu_batch_decode_sdpa(
+        q: &[f32], k_all: &[f32], v_all: &[f32], kv_lens: &[u32],
+        active_batch: usize, num_heads: usize, num_kv_heads: usize,
+        max_kv_seq: usize, head_dim: usize,
+    ) -> Vec<f32> {
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let n_rep = num_heads / num_kv_heads;
+        let slot_stride = num_kv_heads * max_kv_seq * head_dim;
+        let mut out = vec![0.0f32; active_batch * num_heads * head_dim];
+        for b in 0..active_batch {
+            let kv_len = kv_lens[b] as usize;
+            for h_q in 0..num_heads {
+                let h_kv = h_q / n_rep;
+                let q_base = (b * num_heads + h_q) * head_dim;
+                let kv_base = b * slot_stride + h_kv * max_kv_seq * head_dim;
+                let mut scores: Vec<f32> = (0..kv_len).map(|j| {
+                    let k_row = kv_base + j * head_dim;
+                    (0..head_dim).map(|d| q[q_base + d] * k_all[k_row + d]).sum::<f32>() * scale
+                }).collect();
+                let mx = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let sum: f32 = scores.iter().map(|&s| (s - mx).exp()).sum();
+                let attn: Vec<f32> = scores.iter().map(|&s| (s - mx).exp() / sum).collect();
+                let out_base = (b * num_heads + h_q) * head_dim;
+                for d in 0..head_dim {
+                    out[out_base + d] = (0..kv_len).map(|j| {
+                        let v_row = kv_base + j * head_dim;
+                        attn[j] * v_all[v_row + d]
+                    }).sum();
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f630_batch_vs_serial_mha() {
+        // B=2, Nh=Nkv=2 (MHA), max_kv_seq=8, head_dim=64 (wave64 path).
+        // kv_lens=[3,5]. Compare against CPU reference.
+        let (b, nh, nkv, mkv, hd) = (2usize, 2usize, 2usize, 8usize, 64usize);
+        let total_q = b * nh;
+        let slot_stride = nkv * mkv * hd;
+        let q: Vec<f32>     = (0..total_q * hd).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let k_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.005 - 0.3).collect();
+        let v_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.007 + 0.1).collect();
+        let kv_lens_cpu = vec![3u32, 5u32];
+        let kv_lens_f32 = vec![3.0f32, 5.0];
+
+        let cpu_out = cpu_batch_decode_sdpa(&q, &k_all, &v_all, &kv_lens_cpu, b, nh, nkv, mkv, hd);
+        let gpu_out = dev().f504(&dev().f630(
+            &dev().f502(&q), &dev().f502(&k_all), &dev().f502(&v_all),
+            &dev().f502(&kv_lens_f32),
+            b as u32, nh as u32, nkv as u32, mkv as u32, hd as u32,
+        ).unwrap()).unwrap();
+
+        f544(&gpu_out, &cpu_out, 1e-2);
+    }
+
+    #[test]
+    fn f630_batch_vs_serial_gqa() {
+        // B=2, Nh=4, Nkv=2 (GQA n_rep=2), max_kv_seq=6, head_dim=64.
+        // kv_lens=[4,2].
+        let (b, nh, nkv, mkv, hd) = (2usize, 4usize, 2usize, 6usize, 64usize);
+        let total_q = b * nh;
+        let slot_stride = nkv * mkv * hd;
+        let q:     Vec<f32> = (0..total_q * hd).map(|i| (i as f32) * 0.02 - 1.0).collect();
+        let k_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.01 - 0.4).collect();
+        let v_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.015 + 0.2).collect();
+        let kv_lens_cpu = vec![4u32, 2u32];
+        let kv_lens_f32 = vec![4.0f32, 2.0];
+
+        let cpu_out = cpu_batch_decode_sdpa(&q, &k_all, &v_all, &kv_lens_cpu, b, nh, nkv, mkv, hd);
+        let gpu_out = dev().f504(&dev().f630(
+            &dev().f502(&q), &dev().f502(&k_all), &dev().f502(&v_all),
+            &dev().f502(&kv_lens_f32),
+            b as u32, nh as u32, nkv as u32, mkv as u32, hd as u32,
+        ).unwrap()).unwrap();
+
+        f544(&gpu_out, &cpu_out, 1e-2);
     }
 }

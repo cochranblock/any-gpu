@@ -1,0 +1,1 @@
+{"name":"code_vs_english","feature_dim":256,"num_classes":2,"class_names":["english", "code"],"best_accuracy":1}

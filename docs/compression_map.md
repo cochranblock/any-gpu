@@ -64,6 +64,13 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | t548 | CausalLM | lm (Sprint 7 step 7) |
 | t549 | GpuBatch | device (batch-dispatch recording guard) |
 | t550 | GpuParams | train (GPU-resident param set for f734) |
+| t551 | BatchKvPool | lm — batch KV pool for f788b/f789b (continuous batching) |
+| t552 | CopyToSlotParams | ops/transformer — uniform params for SHADER_COPY_TO_SLOT |
+| t553 | BatchDecodeAppendParams | ops/transformer — uniform params for SHADER_BATCH_DECODE_APPEND |
+| t554 | BatchDecodeSdpaParams | ops/attention — uniform params for fused batch-decode SDPA |
+| t555 | RopeBatchParams | ops/attention — uniform params for SHADER_ROPE_BATCH |
+| t556 | DecodeSlot | lm — CPU-only; tracks one active request in the batch pool |
+| t557 | CopySlotParams | ops/transformer — uniform params for slot-migrate shaders (f807) |
 
 ## Functions (fN)
 
@@ -168,6 +175,8 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f627 | split_heads — [seq, n*hd] → [n, seq, hd] (Sprint 7 step 7) |
 | f628 | merge_heads — [n, seq, hd] → [seq, n*hd] (Sprint 7 step 7) |
 | f629 | repeat_kv — GQA key/value expansion [n_kv, kv_seq, hd] → [n, kv_seq, hd] (Sprint 7 step 7) |
+| f630 | fused_sdpa_batch_decode — wave64 or scalar batch-decode SDPA; Q:[B*nh,hd], K/V pool, per-slot kv_lens |
+| f631 | rope_batch_decode — batch RoPE with per-request start_pos_buf[B] |
 
 ### ops/tensor_ops (f640–f659)
 
@@ -188,7 +197,7 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f660 | upsample_nearest2d |
 | f661 | upsample_nearest2d_backward |
 
-### ops/transformer (f670–f679)
+### ops/transformer (f670–f679, f800–f807)
 
 | Token | Human name |
 |-------|------------|
@@ -200,6 +209,14 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f675 | KVCache::cursor (Sprint 7 step 2) |
 | f676 | KVCache::k_buffer (Sprint 7 step 2) |
 | f677 | KVCache::v_buffer (Sprint 7 step 2) |
+| f800 | BatchKvPool::new |
+| f801 | BatchKvPool::copy_from_kvcache — copy prefilled t534 into a pool slot |
+| f802 | BatchKvPool::reset_slot |
+| f803 | BatchKvPool::cursor |
+| f804k/f804v | BatchKvPool::k_buf / v_buf |
+| f805 | BatchKvPool::batch_decode_append — append one token per active slot |
+| f806 | BatchKvPool::kv_lens_buf — cursors[0..n] as f32 GPU buffer |
+| f807 | BatchKvPool::migrate_slot — copy slot src→dst via staging buffers (compaction) |
 
 ### autograd (f680–f719)
 
@@ -300,6 +317,8 @@ Preserved (not compressed): Rust std types, primitives, traits, ecosystem types 
 | f784 | CausalLM::prefill |
 | f785 | CausalLM::decode_one |
 | f786 | CausalLM::generate |
+| f788b | CausalLM::prefill_slot — prefill into a batch pool slot |
+| f789b | CausalLM::batch_decode_step — one decode step for all active slots |
 
 ### pager (f768–f774) — Sprint 7 step 4
 
