@@ -40,7 +40,10 @@ impl t539 {
             usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        t539 { s519, s520: stage_bytes }
+        t539 {
+            s519,
+            s520: stage_bytes,
+        }
     }
 
     /// f769 = LayerPager::upload. Copy a f32 slice into a freshly-allocated VRAM buffer
@@ -85,12 +88,7 @@ impl t539 {
     /// f770 = LayerPager::page_layer. Upload a named set of tensors from a
     /// SafetensorsModel into VRAM. Returns a name→GpuBuffer map ready for compute
     /// dispatch. Drop the map to release all VRAM for those tensors.
-    pub fn f770(
-        &self,
-        dev: &t500,
-        model: &t538,
-        names: &[&str],
-    ) -> Result<HashMap<String, t501>> {
+    pub fn f770(&self, dev: &t500, model: &t538, names: &[&str]) -> Result<HashMap<String, t501>> {
         let mut out = HashMap::with_capacity(names.len());
         for &name in names {
             let data = model
@@ -142,12 +140,7 @@ impl t539 {
     /// into VRAM as f16. Model weights (stored as f32 in t538) are quantized f32→f16 on
     /// the CPU before staging, halving VRAM bandwidth during inference.
     /// Returns a name→t540 map. Expand to f32 for computation via f772.
-    pub fn f774(
-        &self,
-        dev: &t500,
-        model: &t538,
-        names: &[&str],
-    ) -> Result<HashMap<String, t540>> {
+    pub fn f774(&self, dev: &t500, model: &t538, names: &[&str]) -> Result<HashMap<String, t540>> {
         let mut out = HashMap::with_capacity(names.len());
         for &name in names {
             let f32_data = model
@@ -166,7 +159,7 @@ impl t539 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use safetensors::tensor::{serialize, Dtype, TensorView};
+    use safetensors::tensor::{Dtype, TensorView, serialize};
 
     fn dev() -> &'static crate::device::t500 {
         &crate::ops::TEST_DEV
@@ -243,8 +236,14 @@ mod tests {
         let w_bytes = to_bytes(&w);
         let b_bytes = to_bytes(&b);
         let tensors = vec![
-            ("weight", TensorView::new(Dtype::F32, vec![4, 4], &w_bytes).unwrap()),
-            ("bias",   TensorView::new(Dtype::F32, vec![4],    &b_bytes).unwrap()),
+            (
+                "weight",
+                TensorView::new(Dtype::F32, vec![4, 4], &w_bytes).unwrap(),
+            ),
+            (
+                "bias",
+                TensorView::new(Dtype::F32, vec![4], &b_bytes).unwrap(),
+            ),
         ];
         let raw = serialize(tensors, &None).unwrap();
         let model = t538::f761(&raw).unwrap();
@@ -278,7 +277,8 @@ mod tests {
     #[test]
     fn f773_roundtrip_via_f772() {
         let f32_vals: Vec<f32> = vec![1.0, 2.0, -1.0, 0.5, 0.0, 100.0, -0.25, 0.125];
-        let f16_bits: Vec<u16> = f32_vals.iter()
+        let f16_bits: Vec<u16> = f32_vals
+            .iter()
             .map(|&v| half::f16::from_f32(v).to_bits())
             .collect();
         let p = t539::f768(dev(), 1024 * 2);
@@ -298,7 +298,8 @@ mod tests {
     #[test]
     fn f773_chunked_f16_upload() {
         let f32_vals: Vec<f32> = (0..256).map(|i| i as f32 * 0.1).collect();
-        let f16_bits: Vec<u16> = f32_vals.iter()
+        let f16_bits: Vec<u16> = f32_vals
+            .iter()
             .map(|&v| half::f16::from_f32(v).to_bits())
             .collect();
         let p = t539::f768(dev(), 32 * 2); // 32 bytes = 16 f16 per chunk
@@ -307,7 +308,10 @@ mod tests {
         let back = dev().f504(&expanded).unwrap();
         assert_eq!(back.len(), 256);
         for (i, (&a, &b)) in f32_vals.iter().zip(back.iter()).enumerate() {
-            assert!((a - b).abs() < 0.01, "chunk boundary error at {i}: {a} vs {b}");
+            assert!(
+                (a - b).abs() < 0.01,
+                "chunk boundary error at {i}: {a} vs {b}"
+            );
         }
     }
 
@@ -316,7 +320,10 @@ mod tests {
     fn f774_page_layer_f16() {
         let w: Vec<f32> = vec![1.0, 2.0, 4.0, 8.0, 0.5, -0.5, 0.25, -0.25];
         let w_bytes = to_bytes(&w);
-        let tensors = vec![("weight", TensorView::new(Dtype::F32, vec![8], &w_bytes).unwrap())];
+        let tensors = vec![(
+            "weight",
+            TensorView::new(Dtype::F32, vec![8], &w_bytes).unwrap(),
+        )];
         let raw = serialize(tensors, &None).unwrap();
         let model = t538::f761(&raw).unwrap();
 

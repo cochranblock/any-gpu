@@ -9,7 +9,7 @@
 // the t501 surface uniform.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// t524 = EmbedParams.
 #[repr(C)]
@@ -218,26 +218,35 @@ impl t500 {
     /// `p1`: [vocab_size, d_model]. `p0`: [n_ids] (f32 holding integer values).
     /// Returns [n_ids, d_model]. For a transformer with input shape [batch, seq],
     /// pass n_ids = batch * seq.
-    pub fn f670(
-        &self,
-        p0: &t501,
-        p1: &t501,
-        p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
-        ensure!(p0.s507 == p2 as usize, "embedding: ids len {} != n_ids {}", p0.s507, p2);
+    pub fn f670(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
+        ensure!(
+            p0.s507 == p2 as usize,
+            "embedding: ids len {} != n_ids {}",
+            p0.s507,
+            p2
+        );
         ensure!(
             p1.s507 == (p3 * p4) as usize,
             "embedding: weights len {} != vocab_size*d_model {}",
-            p1.s507, p3 * p4,
+            p1.s507,
+            p3 * p4,
         );
         ensure!(p3 > 0, "embedding: vocab_size must be > 0");
 
         let v0 = p2 * p4;
         let v1 = self.f503(v0 as usize);
-        let v2 = t524 { n: v0, n_ids: p2, d_model: p4, vocab_size: p3 };
+        let v2 = t524 {
+            n: v0,
+            n_ids: p2,
+            d_model: p4,
+            vocab_size: p3,
+        };
         self.f543(
-            SHADER_EMBED, Some("embedding_lookup"),
-            &v2, &[p0, p1], &v1,
+            SHADER_EMBED,
+            Some("embedding_lookup"),
+            &v2,
+            &[p0, p1],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
@@ -245,18 +254,21 @@ impl t500 {
 
     /// f671 = argmax. Along the last dim: input [rows, cols] -> indices [rows] (as f32).
     /// For LM-head logits with shape [batch*seq, vocab_size], returns one token id per row.
-    pub fn f671(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32,
-    ) -> Result<t501> {
+    pub fn f671(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2) as usize, "argmax: input size mismatch");
         ensure!(p2 > 0, "argmax: cols must be > 0");
         let v0 = self.f503(p1 as usize);
-        let v1 = t525 { rows: p1, cols: p2, _pad: [0; 2] };
+        let v1 = t525 {
+            rows: p1,
+            cols: p2,
+            _pad: [0; 2],
+        };
         self.f543(
-            SHADER_ARGMAX, Some("argmax"),
-            &v1, &[p0], &v0,
+            SHADER_ARGMAX,
+            Some("argmax"),
+            &v1,
+            &[p0],
+            &v0,
             super::f540(p1),
         );
         Ok(v0)
@@ -264,13 +276,11 @@ impl t500 {
 
     /// f793 = embedding_backward. Scatter-add grad_output into grad_weight.
     /// p0=grad_output[n_ids,d_model], p1=ids[n_ids] (f32), p2=n_ids, p3=vocab_size, p4=d_model.
-    pub fn f793(
-        &self,
-        p0: &t501,
-        p1: &t501,
-        p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
-        ensure!(p0.s507 == (p2 * p4) as usize, "embed_bwd: grad_output size mismatch");
+    pub fn f793(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
+        ensure!(
+            p0.s507 == (p2 * p4) as usize,
+            "embed_bwd: grad_output size mismatch"
+        );
         ensure!(p1.s507 == p2 as usize, "embed_bwd: ids size mismatch");
         ensure!(p3 > 0, "embed_bwd: vocab_size must be > 0");
 
@@ -278,21 +288,40 @@ impl t500 {
         let v1 = self.f503(v0);
         // wgpu guarantees zero-initialization on create_buffer — no explicit clear needed.
 
-        let v3 = t526 { n_ids: p2, vocab_size: p3, d_model: p4, _pad: 0 };
+        let v3 = t526 {
+            n_ids: p2,
+            vocab_size: p3,
+            d_model: p4,
+            _pad: 0,
+        };
         let v4 = self.f506(&v3);
         let v5 = self.f507(SHADER_EMBED_BWD, Some("embed_bwd"));
         let v6 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &v5.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: v4.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: p1.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: v1.s505.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: v4.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: p0.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: p1.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: v1.s505.as_entire_binding(),
+                },
             ],
         });
         let (v7, v8, v9) = super::f540(p2 * p4);
-        let mut v10 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut v10 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut v11 = v10.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("embed_bwd"),
@@ -307,22 +336,30 @@ impl t500 {
     }
 
     /// f794 = softmax_backward. p0=grad_output[rows,cols], p1=fwd_softmax_output[rows,cols].
-    pub fn f794(
-        &self,
-        p0: &t501,
-        p1: &t501,
-        p2: u32, p3: u32,
-    ) -> Result<t501> {
-        ensure!(p0.s507 == (p2 * p3) as usize, "sm_bwd: grad_output size mismatch");
-        ensure!(p1.s507 == (p2 * p3) as usize, "sm_bwd: fwd_output size mismatch");
+    pub fn f794(&self, p0: &t501, p1: &t501, p2: u32, p3: u32) -> Result<t501> {
+        ensure!(
+            p0.s507 == (p2 * p3) as usize,
+            "sm_bwd: grad_output size mismatch"
+        );
+        ensure!(
+            p1.s507 == (p2 * p3) as usize,
+            "sm_bwd: fwd_output size mismatch"
+        );
 
-        let v0 = t527 { rows: p2, cols: p3, _pad: [0; 2] };
+        let v0 = t527 {
+            rows: p2,
+            cols: p3,
+            _pad: [0; 2],
+        };
 
         // Pass 1: dot product per row.
         let v1 = self.f503(p2 as usize);
         self.f543(
-            SHADER_SM_BWD_DOT, Some("sm_bwd_dot"),
-            &v0, &[p0, p1], &v1,
+            SHADER_SM_BWD_DOT,
+            Some("sm_bwd_dot"),
+            &v0,
+            &[p0, p1],
+            &v1,
             super::f540(p2),
         );
 
@@ -335,15 +372,32 @@ impl t500 {
                 label: None,
                 layout: &v4.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: v3.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: p1.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: v1.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: v2.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: v3.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: p0.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: p1.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: v1.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: v2.s505.as_entire_binding(),
+                    },
                 ],
             });
             let (v6, v7, v8) = super::f540(p2 * p3);
-            let mut v9 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let mut v9 = self
+                .s500
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
                 let mut v10 = v9.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("sm_bwd_dx"),
@@ -360,24 +414,30 @@ impl t500 {
 
     /// f796 = rope_backward. Conjugate RoPE rotation applied to grad_output.
     /// Same signature as f625. p0=grad_output[batch_heads,seq,head_dim].
-    pub fn f796(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32, p5: f32,
-    ) -> Result<t501> {
+    pub fn f796(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32, p5: f32) -> Result<t501> {
         ensure!(p3 % 2 == 0, "rope_bwd: head_dim ({}) must be even", p3);
-        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "rope_bwd: input size mismatch");
+        ensure!(
+            p0.s507 == (p1 * p2 * p3) as usize,
+            "rope_bwd: input size mismatch"
+        );
         ensure!(p5 > 0.0, "rope_bwd: base must be positive");
 
         let v0 = p1 * p2 * p3;
         let v1 = self.f503(v0 as usize);
         let v2 = t528 {
-            batch_heads: p1, seq_len: p2, head_dim: p3, start_pos: p4,
-            base: p5, _pad: [0; 3],
+            batch_heads: p1,
+            seq_len: p2,
+            head_dim: p3,
+            start_pos: p4,
+            base: p5,
+            _pad: [0; 3],
         };
         self.f543(
-            SHADER_ROPE_BWD, Some("rope_bwd"),
-            &v2, &[p0], &v1,
+            SHADER_ROPE_BWD,
+            Some("rope_bwd"),
+            &v2,
+            &[p0],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
@@ -429,12 +489,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// t534 = KVCache. Append-only K and V storage for autoregressive decoding.
 pub struct t534 {
-    pub(crate) s511: t501,    // k
-    pub(crate) s512: t501,    // v
-    pub(crate) s513: u32,     // cursor (tokens stored)
-    pub(crate) s514: u32,     // max_seq
-    pub(crate) s515: u32,     // batch_heads
-    pub(crate) s516: u32,     // head_dim
+    pub(crate) s511: t501, // k
+    pub(crate) s512: t501, // v
+    pub(crate) s513: u32,  // cursor (tokens stored)
+    pub(crate) s514: u32,  // max_seq
+    pub(crate) s515: u32,  // batch_heads
+    pub(crate) s516: u32,  // head_dim
 }
 
 impl t534 {
@@ -444,35 +504,66 @@ impl t534 {
         let v0 = (p2 * p1 * p3) as usize;
         let v1 = p0.f503(v0);
         let v2 = p0.f503(v0);
-        Self { s511: v1, s512: v2, s513: 0, s514: p1, s515: p2, s516: p3 }
+        Self {
+            s511: v1,
+            s512: v2,
+            s513: 0,
+            s514: p1,
+            s515: p2,
+            s516: p3,
+        }
     }
 
     /// f673 = KVCache::append. Write `p1` (new K) and `p2` (new V), each
     /// shaped [batch_heads, p3 new_tokens, head_dim], at the current cursor; advance.
     pub fn f673(&mut self, p0: &t500, p1: &t501, p2: &t501, p3: u32) -> Result<()> {
-        ensure!(self.s513 + p3 <= self.s514,
+        ensure!(
+            self.s513 + p3 <= self.s514,
             "KVCache::append: cursor {} + new {} exceeds max_seq {}",
-            self.s513, p3, self.s514);
+            self.s513,
+            p3,
+            self.s514
+        );
         let v0 = (self.s515 * p3 * self.s516) as usize;
-        ensure!(p1.s507 == v0, "KVCache::append: K size mismatch (got {}, expected {})", p1.s507, v0);
-        ensure!(p2.s507 == v0, "KVCache::append: V size mismatch (got {}, expected {})", p2.s507, v0);
+        ensure!(
+            p1.s507 == v0,
+            "KVCache::append: K size mismatch (got {}, expected {})",
+            p1.s507,
+            v0
+        );
+        ensure!(
+            p2.s507 == v0,
+            "KVCache::append: V size mismatch (got {}, expected {})",
+            p2.s507,
+            v0
+        );
 
         let v1 = t537 {
-            batch_heads: self.s515, max_seq: self.s514, head_dim: self.s516,
-            cursor: self.s513, new_tokens: p3, _pad: [0; 3],
+            batch_heads: self.s515,
+            max_seq: self.s514,
+            head_dim: self.s516,
+            cursor: self.s513,
+            new_tokens: p3,
+            _pad: [0; 3],
         };
         let v2 = self.s515 * p3 * self.s516;
 
         // Append into K
         p0.f543(
-            SHADER_KV_APPEND, Some("kv_append_k"),
-            &v1, &[p1], &self.s511,
+            SHADER_KV_APPEND,
+            Some("kv_append_k"),
+            &v1,
+            &[p1],
+            &self.s511,
             super::f540(v2),
         );
         // Append into V
         p0.f543(
-            SHADER_KV_APPEND, Some("kv_append_v"),
-            &v1, &[p2], &self.s512,
+            SHADER_KV_APPEND,
+            Some("kv_append_v"),
+            &v1,
+            &[p2],
+            &self.s512,
             super::f540(v2),
         );
 
@@ -487,13 +578,19 @@ impl t534 {
     }
 
     /// f675 = KVCache::cursor. Number of tokens currently stored.
-    pub fn f675(&self) -> u32 { self.s513 }
+    pub fn f675(&self) -> u32 {
+        self.s513
+    }
 
     /// f676 = KVCache::k_buffer. Borrow the underlying K buffer.
-    pub fn f676(&self) -> &t501 { &self.s511 }
+    pub fn f676(&self) -> &t501 {
+        &self.s511
+    }
 
     /// f677 = KVCache::v_buffer. Borrow the underlying V buffer.
-    pub fn f677(&self) -> &t501 { &self.s512 }
+    pub fn f677(&self) -> &t501 {
+        &self.s512
+    }
 }
 
 // --- BatchKvPool (t551) ---
@@ -601,7 +698,9 @@ struct t557 {
     head_dim: u32,
     max_seq: u32,
     slot_idx: u32,
-    _p0: u32, _p1: u32, _p2: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
 }
 
 // pool[(slot_idx * nkv_h + kh) * max_seq * hd + pos * hd + d] -> staging[kh * max_seq * hd + ...]
@@ -646,15 +745,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// t551 = BatchKvPool. Pooled KV storage for concurrent decode requests.
 pub struct t551 {
-    pub(crate) s530: t501,    // K: [max_batch * num_kv_heads * max_seq * head_dim]
-    pub(crate) s531: t501,    // V: same shape
-    pub(crate) s532: u32,     // max_batch
-    pub(crate) s533: u32,     // num_kv_heads
-    pub(crate) s534: u32,     // max_seq
-    pub(crate) s535: u32,     // head_dim
+    pub(crate) s530: t501,     // K: [max_batch * num_kv_heads * max_seq * head_dim]
+    pub(crate) s531: t501,     // V: same shape
+    pub(crate) s532: u32,      // max_batch
+    pub(crate) s533: u32,      // num_kv_heads
+    pub(crate) s534: u32,      // max_seq
+    pub(crate) s535: u32,      // head_dim
     pub(crate) s536: Vec<u32>, // cursors[max_batch] -- CPU-side KV length per slot
-    pub(crate) s537: t501,    // staging K: [num_kv_heads * max_seq * head_dim] for f807
-    pub(crate) s538: t501,    // staging V: same
+    pub(crate) s537: t501,     // staging K: [num_kv_heads * max_seq * head_dim] for f807
+    pub(crate) s538: t501,     // staging V: same
 }
 
 impl t551 {
@@ -666,7 +765,10 @@ impl t551 {
         Self {
             s530: p0.f503(len),
             s531: p0.f503(len),
-            s532: p1, s533: p2, s534: p3, s535: p4,
+            s532: p1,
+            s533: p2,
+            s534: p3,
+            s535: p4,
             s536: vec![0u32; p1 as usize],
             s537: p0.f503(staging_len),
             s538: p0.f503(staging_len),
@@ -675,11 +777,31 @@ impl t551 {
 
     /// f801 = copy_from_kvcache. Copy a prefilled `p2` (t534) into slot `p1`.
     /// After this call, cursor(p1) == p2.cursor().
-    pub fn f801(&mut self, p0: &t500, p1: usize, k_src: &t501, v_src: &t501,
-                cursor: u32, max_seq_src: u32) -> Result<()> {
-        ensure!(p1 < self.s532 as usize, "copy_from_kvcache: slot {} >= max_batch {}", p1, self.s532);
-        ensure!(cursor <= self.s534, "copy_from_kvcache: cursor {} > pool max_seq {}", cursor, self.s534);
-        if cursor == 0 { self.s536[p1] = 0; return Ok(()); }
+    pub fn f801(
+        &mut self,
+        p0: &t500,
+        p1: usize,
+        k_src: &t501,
+        v_src: &t501,
+        cursor: u32,
+        max_seq_src: u32,
+    ) -> Result<()> {
+        ensure!(
+            p1 < self.s532 as usize,
+            "copy_from_kvcache: slot {} >= max_batch {}",
+            p1,
+            self.s532
+        );
+        ensure!(
+            cursor <= self.s534,
+            "copy_from_kvcache: cursor {} > pool max_seq {}",
+            cursor,
+            self.s534
+        );
+        if cursor == 0 {
+            self.s536[p1] = 0;
+            return Ok(());
+        }
         let params = t552 {
             num_kv_heads: self.s533,
             cursor,
@@ -687,13 +809,26 @@ impl t551 {
             max_seq_src,
             max_seq_dst: self.s534,
             slot_idx: p1 as u32,
-            _p0: 0, _p1: 0,
+            _p0: 0,
+            _p1: 0,
         };
         let total = self.s533 * cursor * self.s535;
-        p0.f543(SHADER_COPY_TO_SLOT, Some("copy_to_slot_k"),
-            &params, &[k_src], &self.s530, super::f540(total));
-        p0.f543(SHADER_COPY_TO_SLOT, Some("copy_to_slot_v"),
-            &params, &[v_src], &self.s531, super::f540(total));
+        p0.f543(
+            SHADER_COPY_TO_SLOT,
+            Some("copy_to_slot_k"),
+            &params,
+            &[k_src],
+            &self.s530,
+            super::f540(total),
+        );
+        p0.f543(
+            SHADER_COPY_TO_SLOT,
+            Some("copy_to_slot_v"),
+            &params,
+            &[v_src],
+            &self.s531,
+            super::f540(total),
+        );
         self.s536[p1] = cursor;
         Ok(())
     }
@@ -704,21 +839,31 @@ impl t551 {
     }
 
     /// f803 = cursor. Number of KV tokens stored in slot `p1`.
-    pub fn f803(&self, p1: usize) -> u32 { self.s536[p1] }
+    pub fn f803(&self, p1: usize) -> u32 {
+        self.s536[p1]
+    }
 
     /// f804k = k_buf. Borrow the K buffer.
-    pub fn f804k(&self) -> &t501 { &self.s530 }
+    pub fn f804k(&self) -> &t501 {
+        &self.s530
+    }
 
     /// f804v = v_buf. Borrow the V buffer.
-    pub fn f804v(&self) -> &t501 { &self.s531 }
+    pub fn f804v(&self) -> &t501 {
+        &self.s531
+    }
 
     /// f805 = batch_decode_append. Append one new token per active slot (slots 0..`p3`).
     /// `p1` = new K: [p3 * num_kv_heads * head_dim] (i.e., [p3*nkv_h, head_dim] flat)
     /// `p2` = new V: same shape.
     /// Reads cursors from self.s536[0..p3], writes to cache, then advances each cursor by 1.
     pub fn f805(&mut self, p0: &t500, p1: &t501, p2: &t501, p3: usize) -> Result<()> {
-        ensure!(p3 <= self.s532 as usize,
-            "batch_decode_append: active_batch {} > max_batch {}", p3, self.s532);
+        ensure!(
+            p3 <= self.s532 as usize,
+            "batch_decode_append: active_batch {} > max_batch {}",
+            p3,
+            self.s532
+        );
         let cursor_data: Vec<f32> = self.s536[..p3].iter().map(|&c| c as f32).collect();
         let cursor_buf = p0.f502(&cursor_data);
         let params = t553 {
@@ -726,14 +871,31 @@ impl t551 {
             num_kv_heads: self.s533,
             head_dim: self.s535,
             max_seq: self.s534,
-            _p0: 0, _p1: 0, _p2: 0, _p3: 0,
+            _p0: 0,
+            _p1: 0,
+            _p2: 0,
+            _p3: 0,
         };
         let total = (p3 as u32) * self.s533 * self.s535;
-        p0.f543(SHADER_BATCH_DECODE_APPEND, Some("batch_append_k"),
-            &params, &[p1, &cursor_buf], &self.s530, super::f540(total));
-        p0.f543(SHADER_BATCH_DECODE_APPEND, Some("batch_append_v"),
-            &params, &[p2, &cursor_buf], &self.s531, super::f540(total));
-        for s in 0..p3 { self.s536[s] += 1; }
+        p0.f543(
+            SHADER_BATCH_DECODE_APPEND,
+            Some("batch_append_k"),
+            &params,
+            &[p1, &cursor_buf],
+            &self.s530,
+            super::f540(total),
+        );
+        p0.f543(
+            SHADER_BATCH_DECODE_APPEND,
+            Some("batch_append_v"),
+            &params,
+            &[p2, &cursor_buf],
+            &self.s531,
+            super::f540(total),
+        );
+        for s in 0..p3 {
+            self.s536[s] += 1;
+        }
         Ok(())
     }
 
@@ -748,27 +910,63 @@ impl t551 {
     /// Used by serve-side compaction when a slot completes out of order.
     /// Stages through `s537`/`s538` to avoid aliasing within the same buffer.
     pub fn f807(&mut self, p0: &t500, p1: usize, p2: usize) {
-        if p1 == p2 { return; }
+        if p1 == p2 {
+            return;
+        }
         let cursor = self.s536[p1];
-        if cursor == 0 { self.s536[p2] = 0; return; }
+        if cursor == 0 {
+            self.s536[p2] = 0;
+            return;
+        }
         let total = self.s533 * cursor * self.s535;
         let params_src = t557 {
-            num_kv_heads: self.s533, cursor,
-            head_dim: self.s535, max_seq: self.s534,
+            num_kv_heads: self.s533,
+            cursor,
+            head_dim: self.s535,
+            max_seq: self.s534,
             slot_idx: p1 as u32,
-            _p0: 0, _p1: 0, _p2: 0,
+            _p0: 0,
+            _p1: 0,
+            _p2: 0,
         };
-        let params_dst = t557 { slot_idx: p2 as u32, ..params_src };
+        let params_dst = t557 {
+            slot_idx: p2 as u32,
+            ..params_src
+        };
         // pool[src] → staging
-        p0.f543(SHADER_SLOT_TO_STAGING, Some("slot_to_staging_k"),
-            &params_src, &[&self.s530], &self.s537, super::f540(total));
-        p0.f543(SHADER_SLOT_TO_STAGING, Some("slot_to_staging_v"),
-            &params_src, &[&self.s531], &self.s538, super::f540(total));
+        p0.f543(
+            SHADER_SLOT_TO_STAGING,
+            Some("slot_to_staging_k"),
+            &params_src,
+            &[&self.s530],
+            &self.s537,
+            super::f540(total),
+        );
+        p0.f543(
+            SHADER_SLOT_TO_STAGING,
+            Some("slot_to_staging_v"),
+            &params_src,
+            &[&self.s531],
+            &self.s538,
+            super::f540(total),
+        );
         // staging → pool[dst]
-        p0.f543(SHADER_STAGING_TO_SLOT, Some("staging_to_slot_k"),
-            &params_dst, &[&self.s537], &self.s530, super::f540(total));
-        p0.f543(SHADER_STAGING_TO_SLOT, Some("staging_to_slot_v"),
-            &params_dst, &[&self.s538], &self.s531, super::f540(total));
+        p0.f543(
+            SHADER_STAGING_TO_SLOT,
+            Some("staging_to_slot_k"),
+            &params_dst,
+            &[&self.s537],
+            &self.s530,
+            super::f540(total),
+        );
+        p0.f543(
+            SHADER_STAGING_TO_SLOT,
+            Some("staging_to_slot_v"),
+            &params_dst,
+            &[&self.s538],
+            &self.s531,
+            super::f540(total),
+        );
         self.s536[p2] = cursor;
     }
 }
@@ -777,23 +975,25 @@ impl t551 {
 mod tests {
     use super::*;
     use crate::ops::f544;
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // --- embedding_lookup ---
 
     #[test]
     fn f670_basic() {
         let v0 = vec![
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-            10.0, 11.0, 12.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ];
         let v1 = vec![2.0f32, 0.0, 3.0];
-        let v2 = dev().f504(&dev().f670(
-            &dev().f502(&v1), &dev().f502(&v0),
-            3, 4, 3,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f670(&dev().f502(&v1), &dev().f502(&v0), 3, 4, 3)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2, vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0]);
     }
 
@@ -801,10 +1001,13 @@ mod tests {
     fn f670_single_token() {
         let v0: Vec<f32> = (0..50).map(|i| i as f32).collect();
         let v1 = vec![7.0f32];
-        let v2 = dev().f504(&dev().f670(
-            &dev().f502(&v1), &dev().f502(&v0),
-            1, 10, 5,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f670(&dev().f502(&v1), &dev().f502(&v0), 1, 10, 5)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2, vec![35.0, 36.0, 37.0, 38.0, 39.0]);
     }
 
@@ -812,10 +1015,13 @@ mod tests {
     fn f670_repeat_token() {
         let v0 = vec![10.0, 20.0, 99.0, 88.0];
         let v1 = vec![1.0f32, 1.0, 1.0];
-        let v2 = dev().f504(&dev().f670(
-            &dev().f502(&v1), &dev().f502(&v0),
-            3, 2, 2,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f670(&dev().f502(&v1), &dev().f502(&v0), 3, 2, 2)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2, vec![99.0, 88.0, 99.0, 88.0, 99.0, 88.0]);
     }
 
@@ -823,10 +1029,13 @@ mod tests {
     fn f670_out_of_range_clamped() {
         let v0 = vec![1.0, 2.0, 3.0, 4.0];
         let v1 = vec![5.0f32];
-        let v2 = dev().f504(&dev().f670(
-            &dev().f502(&v1), &dev().f502(&v0),
-            1, 2, 2,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f670(&dev().f502(&v1), &dev().f502(&v0), 1, 2, 2)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2, vec![3.0, 4.0]);
     }
 
@@ -837,16 +1046,22 @@ mod tests {
         let v2 = 4;
         let v3: Vec<f32> = (0..v0 * v1).map(|i| (i as f32) * 0.001).collect();
         let v4 = vec![10.0f32, 500.0, 0.0, 1023.0];
-        let v5 = dev().f504(&dev().f670(
-            &dev().f502(&v4), &dev().f502(&v3),
-            v2, v0 as u32, v1 as u32,
-        ).unwrap()).unwrap();
+        let v5 = dev()
+            .f504(
+                &dev()
+                    .f670(&dev().f502(&v4), &dev().f502(&v3), v2, v0 as u32, v1 as u32)
+                    .unwrap(),
+            )
+            .unwrap();
         for (v6, &v7) in (0..v2 as usize).zip(&v4) {
             let v8 = v7 as usize;
             for v9 in 0..v1 {
                 let v10 = v3[v8 * v1 + v9];
                 let v11 = v5[v6 * v1 + v9];
-                assert!((v11 - v10).abs() < 1e-6, "row {v6} col {v9}: got {v11} expected {v10}");
+                assert!(
+                    (v11 - v10).abs() < 1e-6,
+                    "row {v6} col {v9}: got {v11} expected {v10}"
+                );
             }
         }
     }
@@ -855,14 +1070,22 @@ mod tests {
     fn f670_size_mismatch() {
         let v0 = vec![1.0; 6];
         let v1 = vec![0.0f32, 1.0];
-        assert!(dev().f670(&dev().f502(&v1), &dev().f502(&v0), 2, 3, 3).is_err());
+        assert!(
+            dev()
+                .f670(&dev().f502(&v1), &dev().f502(&v0), 2, 3, 3)
+                .is_err()
+        );
     }
 
     #[test]
     fn f670_ids_length_mismatch() {
         let v0 = vec![1.0; 6];
         let v1 = vec![0.0f32, 1.0, 1.0];
-        assert!(dev().f670(&dev().f502(&v1), &dev().f502(&v0), 2, 2, 3).is_err());
+        assert!(
+            dev()
+                .f670(&dev().f502(&v1), &dev().f502(&v0), 2, 2, 3)
+                .is_err()
+        );
     }
 
     // --- argmax ---
@@ -870,32 +1093,38 @@ mod tests {
     #[test]
     fn f671_basic() {
         let v0 = vec![
-            1.0f32, 5.0, 2.0, 3.0,
-            7.0, 1.0, 9.0, 8.0,
-            -1.0, -5.0, -3.0, -2.0,
+            1.0f32, 5.0, 2.0, 3.0, 7.0, 1.0, 9.0, 8.0, -1.0, -5.0, -3.0, -2.0,
         ];
-        let v1 = dev().f504(&dev().f671(&dev().f502(&v0), 3, 4).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f671(&dev().f502(&v0), 3, 4).unwrap())
+            .unwrap();
         assert_eq!(v1, vec![1.0, 2.0, 0.0]);
     }
 
     #[test]
     fn f671_single_row() {
         let v0 = vec![3.0f32, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0];
-        let v1 = dev().f504(&dev().f671(&dev().f502(&v0), 1, 7).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f671(&dev().f502(&v0), 1, 7).unwrap())
+            .unwrap();
         assert_eq!(v1, vec![5.0]);
     }
 
     #[test]
     fn f671_single_column() {
         let v0 = vec![42.0f32, -7.0, 100.0];
-        let v1 = dev().f504(&dev().f671(&dev().f502(&v0), 3, 1).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f671(&dev().f502(&v0), 3, 1).unwrap())
+            .unwrap();
         assert_eq!(v1, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn f671_ties_pick_lowest_index() {
         let v0 = vec![5.0f32, 5.0, 5.0, 5.0];
-        let v1 = dev().f504(&dev().f671(&dev().f502(&v0), 1, 4).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f671(&dev().f502(&v0), 1, 4).unwrap())
+            .unwrap();
         assert_eq!(v1, vec![0.0]);
     }
 
@@ -913,7 +1142,9 @@ mod tests {
             v2[(v4 * v1 + v5) as usize] = 99.0;
             v3.push(v5 as f32);
         }
-        let v7 = dev().f504(&dev().f671(&dev().f502(&v2), v0, v1).unwrap()).unwrap();
+        let v7 = dev()
+            .f504(&dev().f671(&dev().f502(&v2), v0, v1).unwrap())
+            .unwrap();
         f544(&v7, &v3, 1e-6);
     }
 
@@ -987,7 +1218,10 @@ mod tests {
         let v2 = dev().f502(&[10.0f32, 20.0, 30.0, 40.0]);
         v0.f673(dev(), &v1, &v2, 1).unwrap();
         let v3 = dev().f504(v0.f676()).unwrap();
-        assert_eq!(v3, vec![1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            v3,
+            vec![1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]
+        );
     }
 
     #[test]
@@ -1020,18 +1254,14 @@ mod tests {
         // Prefill: K_prefill [2, 4], V_prefill [2, 4]
         let k_prefill: Vec<f32> = (0..8).map(|i| (i as f32) * 0.1).collect();
         let v_prefill: Vec<f32> = (0..8).map(|i| (i as f32) * 0.2 - 0.5).collect();
-        v0.f673(dev(),
-            &dev().f502(&k_prefill),
-            &dev().f502(&v_prefill),
-            2).unwrap();
+        v0.f673(dev(), &dev().f502(&k_prefill), &dev().f502(&v_prefill), 2)
+            .unwrap();
 
         // Decode step: append 1 more token
         let k_decode = vec![0.7f32, 0.8, 0.9, 1.0];
         let v_decode = vec![-0.1f32, 0.3, 0.6, 0.9];
-        v0.f673(dev(),
-            &dev().f502(&k_decode),
-            &dev().f502(&v_decode),
-            1).unwrap();
+        v0.f673(dev(), &dev().f502(&k_decode), &dev().f502(&v_decode), 1)
+            .unwrap();
         assert_eq!(v0.f675(), 3);
 
         // Build Q for the current decode step (1 row)
@@ -1046,12 +1276,21 @@ mod tests {
         let k_used = &k_full[..(3 * dk as usize)];
         let v_used = &v_full[..(3 * dk as usize)];
 
-        let attn_gpu = dev().f504(&dev().f623(
-            &dev().f502(&q_now),
-            &dev().f502(k_used),
-            &dev().f502(v_used),
-            1, 1, 3, dk,
-        ).unwrap()).unwrap();
+        let attn_gpu = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&q_now),
+                        &dev().f502(k_used),
+                        &dev().f502(v_used),
+                        1,
+                        1,
+                        3,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         // CPU reference using the full prefilled+decoded K/V
         let mut k_all = k_prefill.clone();
@@ -1068,7 +1307,9 @@ mod tests {
         let mut scores = vec![0.0f32; kv];
         for j in 0..kv {
             let mut s = 0.0;
-            for d in 0..dk { s += q[d] * k[j * dk + d]; }
+            for d in 0..dk {
+                s += q[d] * k[j * dk + d];
+            }
             scores[j] = s * scale;
         }
         let mx = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -1076,7 +1317,9 @@ mod tests {
         let attn: Vec<f32> = scores.iter().map(|&x| (x - mx).exp() / sum).collect();
         let mut out = vec![0.0f32; dk];
         for d in 0..dk {
-            for j in 0..kv { out[d] += attn[j] * v[j * dk + d]; }
+            for j in 0..kv {
+                out[d] += attn[j] * v[j * dk + d];
+            }
         }
         out
     }
@@ -1087,10 +1330,13 @@ mod tests {
         // Expected grad_weight[0]=[3,4], grad_weight[1]=[1,2], grad_weight[2]=[0,0].
         let v0 = vec![1.0f32, 2.0, 3.0, 4.0];
         let v1 = vec![1.0f32, 0.0];
-        let v2 = dev().f504(&dev().f793(
-            &dev().f502(&v0), &dev().f502(&v1),
-            2, 3, 2,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f793(&dev().f502(&v0), &dev().f502(&v1), 2, 3, 2)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v2, &[3.0, 4.0, 1.0, 2.0, 0.0, 0.0], 1e-5);
     }
 
@@ -1100,10 +1346,13 @@ mod tests {
         // grad_weight[0] = [1+3, 1+3] = [4,4], grad_weight[1] = [2,2].
         let v0 = vec![1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0];
         let v1 = vec![0.0f32, 1.0, 0.0];
-        let v2 = dev().f504(&dev().f793(
-            &dev().f502(&v0), &dev().f502(&v1),
-            3, 2, 2,
-        ).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f793(&dev().f502(&v0), &dev().f502(&v1), 3, 2, 2)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v2, &[4.0, 4.0, 2.0, 2.0], 1e-5);
     }
 
@@ -1114,9 +1363,9 @@ mod tests {
         let cols = 4u32;
         let input = vec![1.0f32, 2.0, 3.0, 4.0, 0.5, -0.5, 1.5, -1.5];
         let prob = {
-            let v: Vec<f32> = dev().f504(&dev().f620(
-                &dev().f502(&input), rows, cols,
-            ).unwrap()).unwrap();
+            let v: Vec<f32> = dev()
+                .f504(&dev().f620(&dev().f502(&input), rows, cols).unwrap())
+                .unwrap();
             v
         };
         let grad_out = vec![0.1f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
@@ -1125,16 +1374,21 @@ mod tests {
         let mut d_x_cpu = vec![0.0f32; (rows * cols) as usize];
         for r in 0..(rows as usize) {
             let base = r * cols as usize;
-            let dot: f32 = (0..cols as usize).map(|c| grad_out[base + c] * prob[base + c]).sum();
+            let dot: f32 = (0..cols as usize)
+                .map(|c| grad_out[base + c] * prob[base + c])
+                .sum();
             for c in 0..cols as usize {
                 d_x_cpu[base + c] = prob[base + c] * (grad_out[base + c] - dot);
             }
         }
 
-        let v0 = dev().f504(&dev().f794(
-            &dev().f502(&grad_out), &dev().f502(&prob),
-            rows, cols,
-        ).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(
+                &dev()
+                    .f794(&dev().f502(&grad_out), &dev().f502(&prob), rows, cols)
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&v0, &d_x_cpu, 1e-5);
     }
@@ -1149,7 +1403,9 @@ mod tests {
         let base = 10000.0f32;
         let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, -0.5, 1.5, -1.5];
 
-        let v0 = dev().f625(&dev().f502(&input), bh, seq, hdim, start, base).unwrap();
+        let v0 = dev()
+            .f625(&dev().f502(&input), bh, seq, hdim, start, base)
+            .unwrap();
         let v1 = dev().f796(&v0, bh, seq, hdim, start, base).unwrap();
         let v2 = dev().f504(&v1).unwrap();
 
@@ -1177,14 +1433,16 @@ mod tests {
         let mut kv = t534::f672(dev(), 4, 1, 2);
         let k_data = vec![1.0f32, 2.0, 3.0, 4.0]; // [1 head, 2 tokens, dim=2]
         let v_data = vec![10.0f32, 20.0, 30.0, 40.0];
-        kv.f673(dev(), &dev().f502(&k_data), &dev().f502(&v_data), 2).unwrap();
+        kv.f673(dev(), &dev().f502(&k_data), &dev().f502(&v_data), 2)
+            .unwrap();
         assert_eq!(kv.f675(), 2);
 
         let mut pool = t551::f800(dev(), 2, 1, 4, 2);
         // Clone the t501 buffers (cheap Arc clone) to avoid split-borrow conflict
         let k_src = kv.s511.clone();
         let v_src = kv.s512.clone();
-        pool.f801(dev(), 0, &k_src, &v_src, kv.s513, kv.s514).unwrap();
+        pool.f801(dev(), 0, &k_src, &v_src, kv.s513, kv.s514)
+            .unwrap();
         assert_eq!(pool.f803(0), 2);
         assert_eq!(pool.f803(1), 0); // slot 1 untouched
 
@@ -1194,7 +1452,7 @@ mod tests {
         // position 1: [3.0, 4.0] at pool.k[0*4*2 + 1*2 .. 0*4*2 + 1*2 + 2]
         let k_pool = dev().f504(pool.f804k()).unwrap();
         assert_eq!(&k_pool[0..4], &[1.0, 2.0, 3.0, 4.0]); // positions 0,1 of slot 0
-        assert!(k_pool[4..8].iter().all(|&x| x == 0.0));   // positions 2,3 still zero
+        assert!(k_pool[4..8].iter().all(|&x| x == 0.0)); // positions 2,3 still zero
         // Slot 1 (rows 8..16) should be zero
         assert!(k_pool[8..].iter().all(|&x| x == 0.0));
     }
@@ -1205,13 +1463,27 @@ mod tests {
         let mut pool = t551::f800(dev(), 2, 1, 4, 2);
 
         let mut kv0 = t534::f672(dev(), 4, 1, 2);
-        kv0.f673(dev(), &dev().f502(&[1.0f32, 2.0]), &dev().f502(&[10.0f32, 20.0]), 1).unwrap();
-        let k0 = kv0.s511.clone(); let v0 = kv0.s512.clone();
+        kv0.f673(
+            dev(),
+            &dev().f502(&[1.0f32, 2.0]),
+            &dev().f502(&[10.0f32, 20.0]),
+            1,
+        )
+        .unwrap();
+        let k0 = kv0.s511.clone();
+        let v0 = kv0.s512.clone();
         pool.f801(dev(), 0, &k0, &v0, kv0.s513, kv0.s514).unwrap();
 
         let mut kv1 = t534::f672(dev(), 4, 1, 2);
-        kv1.f673(dev(), &dev().f502(&[5.0f32, 6.0, 7.0, 8.0]), &dev().f502(&[50.0f32, 60.0, 70.0, 80.0]), 2).unwrap();
-        let k1 = kv1.s511.clone(); let v1 = kv1.s512.clone();
+        kv1.f673(
+            dev(),
+            &dev().f502(&[5.0f32, 6.0, 7.0, 8.0]),
+            &dev().f502(&[50.0f32, 60.0, 70.0, 80.0]),
+            2,
+        )
+        .unwrap();
+        let k1 = kv1.s511.clone();
+        let v1 = kv1.s512.clone();
         pool.f801(dev(), 1, &k1, &v1, kv1.s513, kv1.s514).unwrap();
 
         assert_eq!(pool.f803(0), 1);
@@ -1277,7 +1549,8 @@ mod tests {
         let v_data = vec![5.0f32, 6.0, 7.0, 8.0, 0.0, 0.0, 0.0, 0.0];
         let k_src = dev().f502(&k_data);
         let v_src = dev().f502(&v_data);
-        pool.f801(dev(), 1, &k_src, &v_src, cursor, max_seq).unwrap();
+        pool.f801(dev(), 1, &k_src, &v_src, cursor, max_seq)
+            .unwrap();
         assert_eq!(pool.f803(1), 2);
 
         // Migrate slot 1 → slot 0.

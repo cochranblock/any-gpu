@@ -1,14 +1,14 @@
 // Unlicense — cochranblock.org
 // Contributors: GotEmCoach, KOVA, Claude Opus 4.6, Claude Opus 4.7
 
-mod elementwise;
-mod conv;
-mod norm;
-mod tensor_ops;
-mod upsample;
 mod attention;
-pub(crate) mod transformer;
+mod conv;
+mod elementwise;
+mod norm;
 mod sampler;
+mod tensor_ops;
+pub(crate) mod transformer;
+mod upsample;
 
 use crate::device::{t500, t501};
 use anyhow::Result;
@@ -47,14 +47,25 @@ impl t500 {
             label: None,
             layout: &v2.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: v1.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: v0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: v1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: p1.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v0.s505.as_entire_binding(),
+                },
             ],
         });
 
         let (v4, v5, v6) = f540(p1.s507 as u32);
-        let mut v7 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut v7 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut v8 = v7.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
@@ -82,15 +93,29 @@ impl t500 {
             label: None,
             layout: &v2.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: v1.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p1.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: p2.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: v0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: v1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: p1.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: p2.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: v0.s505.as_entire_binding(),
+                },
             ],
         });
 
         let (v4, v5, v6) = f540(p1.s507 as u32);
-        let mut v7 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut v7 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut v8 = v7.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
@@ -119,9 +144,10 @@ impl t500 {
 
         let v1 = self.f507(p0, p1);
 
-        let mut v2 = vec![
-            wgpu::BindGroupEntry { binding: 0, resource: v0.as_entire_binding() },
-        ];
+        let mut v2 = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: v0.as_entire_binding(),
+        }];
         for (v3, v4) in p3.iter().enumerate() {
             v2.push(wgpu::BindGroupEntry {
                 binding: (v3 + 1) as u32,
@@ -144,7 +170,8 @@ impl t500 {
             // Batch mode: record into the active encoder, defer submission.
             {
                 let mut v7 = batch.enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: p1, timestamp_writes: None,
+                    label: p1,
+                    timestamp_writes: None,
                 });
                 v7.set_pipeline(&v1);
                 v7.set_bind_group(0, &v5, &[]);
@@ -154,11 +181,13 @@ impl t500 {
         } else {
             // Eager mode: own encoder, submit immediately.
             drop(v6);
-            let mut v7 = self.s500.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: None });
+            let mut v7 = self
+                .s500
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
                 let mut v8 = v7.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: p1, timestamp_writes: None,
+                    label: p1,
+                    timestamp_writes: None,
                 });
                 v8.set_pipeline(&v1);
                 v8.set_bind_group(0, &v5, &[]);
@@ -176,7 +205,13 @@ pub(crate) static TEST_DEV: std::sync::LazyLock<crate::t500> =
 /// f544 = assert_approx. Element-wise tolerance check for f32 vectors. Test-only.
 #[cfg(test)]
 pub(crate) fn f544(p0: &[f32], p1: &[f32], p2: f32) {
-    assert_eq!(p0.len(), p1.len(), "length mismatch: got {} want {}", p0.len(), p1.len());
+    assert_eq!(
+        p0.len(),
+        p1.len(),
+        "length mismatch: got {} want {}",
+        p0.len(),
+        p1.len()
+    );
     for (v0, (v1, v2)) in p0.iter().zip(p1).enumerate() {
         assert!(
             (v1 - v2).abs() < p2,

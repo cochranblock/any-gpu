@@ -18,65 +18,149 @@ pub struct t503(pub u32);
 pub enum t504 {
     /// Leaf tensor (parameter or input). No backward.
     Leaf,
-    Add { a: t503, b: t503 },
-    Sub { a: t503, b: t503 },
-    Mul { a: t503, b: t503 },
-    Scale { a: t503, s: f32 },
-    Relu { a: t503 },
-    Sigmoid { a: t503 },
-    Swish { a: t503 },
-    Tanh { a: t503 },
-    Matmul { a: t503, b: t503, m: u32, n: u32, k: u32 },
-    MseLoss { pred: t503, target: t503 },
+    Add {
+        a: t503,
+        b: t503,
+    },
+    Sub {
+        a: t503,
+        b: t503,
+    },
+    Mul {
+        a: t503,
+        b: t503,
+    },
+    Scale {
+        a: t503,
+        s: f32,
+    },
+    Relu {
+        a: t503,
+    },
+    Sigmoid {
+        a: t503,
+    },
+    Swish {
+        a: t503,
+    },
+    Tanh {
+        a: t503,
+    },
+    Matmul {
+        a: t503,
+        b: t503,
+        m: u32,
+        n: u32,
+        k: u32,
+    },
+    MseLoss {
+        pred: t503,
+        target: t503,
+    },
     Conv2d {
         input: t503,
         weight: t503,
         bias: Option<t503>,
-        batch: u32, in_c: u32, in_h: u32, in_w: u32,
-        out_c: u32, out_h: u32, out_w: u32,
-        kh: u32, kw: u32,
-        stride_h: u32, stride_w: u32,
-        pad_h: u32, pad_w: u32,
-        dil_h: u32, dil_w: u32,
+        batch: u32,
+        in_c: u32,
+        in_h: u32,
+        in_w: u32,
+        out_c: u32,
+        out_h: u32,
+        out_w: u32,
+        kh: u32,
+        kw: u32,
+        stride_h: u32,
+        stride_w: u32,
+        pad_h: u32,
+        pad_w: u32,
+        dil_h: u32,
+        dil_w: u32,
         groups: u32,
     },
     /// Concat a[outer, a_inner] and b[outer, b_inner] along trailing axis.
-    Concat { a: t503, b: t503, outer: u32, a_inner: u32, b_inner: u32 },
+    Concat {
+        a: t503,
+        b: t503,
+        outer: u32,
+        a_inner: u32,
+        b_inner: u32,
+    },
     /// GroupNorm with learnable affine (gamma, beta).
     GroupNorm {
-        input: t503, gamma: t503, beta: t503,
-        batch: u32, channels: u32, spatial: u32, groups: u32, eps: f32,
+        input: t503,
+        gamma: t503,
+        beta: t503,
+        batch: u32,
+        channels: u32,
+        spatial: u32,
+        groups: u32,
+        eps: f32,
     },
     /// Nearest-neighbor 2D upsample.
     UpsampleNearest2d {
         input: t503,
-        batch: u32, channels: u32, in_h: u32, in_w: u32,
-        scale_h: u32, scale_w: u32,
+        batch: u32,
+        channels: u32,
+        in_h: u32,
+        in_w: u32,
+        scale_h: u32,
+        scale_w: u32,
     },
     /// Broadcast add: out[outer, inner] = a[outer, inner] + b[outer].
-    AddBroadcast { a: t503, b: t503, outer: u32, inner: u32 },
+    AddBroadcast {
+        a: t503,
+        b: t503,
+        outer: u32,
+        inner: u32,
+    },
     /// Per-column add: out[rows, cols] = a[rows, cols] + b[cols] (Linear bias).
-    AddPerCol { a: t503, b: t503, rows: u32, cols: u32 },
+    AddPerCol {
+        a: t503,
+        b: t503,
+        rows: u32,
+        cols: u32,
+    },
     LayerNorm {
-        input: t503, gamma: t503, beta: t503,
-        rows: u32, cols: u32, eps: f32,
+        input: t503,
+        gamma: t503,
+        beta: t503,
+        rows: u32,
+        cols: u32,
+        eps: f32,
     },
     RmsNorm {
-        input: t503, gamma: t503,
-        rows: u32, cols: u32, eps: f32,
+        input: t503,
+        gamma: t503,
+        rows: u32,
+        cols: u32,
+        eps: f32,
     },
     EmbedLookup {
-        ids: t503, weight: t503,
-        n_ids: u32, vocab_size: u32, d_model: u32,
+        ids: t503,
+        weight: t503,
+        n_ids: u32,
+        vocab_size: u32,
+        d_model: u32,
     },
     Softmax {
-        input: t503, rows: u32, cols: u32,
+        input: t503,
+        rows: u32,
+        cols: u32,
     },
     CausalMask {
-        input: t503, batch_heads: u32, q_seq: u32, kv_seq: u32,
+        input: t503,
+        batch_heads: u32,
+        q_seq: u32,
+        kv_seq: u32,
     },
     Rope {
-        input: t503, batch_heads: u32, seq: u32, head_dim: u32, start_pos: u32, base: f32,
+        input: t503,
+        batch_heads: u32,
+        seq: u32,
+        head_dim: u32,
+        start_pos: u32,
+        base: f32,
     },
 }
 
@@ -112,7 +196,10 @@ impl<'d> t506<'d> {
         let v1 = t503(self.bufs.len() as u32);
         self.bufs.push(v0);
         self.grads.push(None);
-        self.entries.push(t505 { op: t504::Leaf, output: v1 });
+        self.entries.push(t505 {
+            op: t504::Leaf,
+            output: v1,
+        });
         v1
     }
 
@@ -124,7 +211,10 @@ impl<'d> t506<'d> {
         let v0 = t503(self.bufs.len() as u32);
         self.bufs.push(p0.clone());
         self.grads.push(None);
-        self.entries.push(t505 { op: t504::Leaf, output: v0 });
+        self.entries.push(t505 {
+            op: t504::Leaf,
+            output: v0,
+        });
         v0
     }
 
@@ -216,13 +306,28 @@ impl<'d> t506<'d> {
     /// f694 = Tape::matmul.
     pub fn f694(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: u32) -> Result<t503> {
         let v0 = self.dev.f580(self.f685(p0), self.f685(p1), p2, p3, p4)?;
-        Ok(self.f684(v0, t504::Matmul { a: p0, b: p1, m: p2, n: p3, k: p4 }))
+        Ok(self.f684(
+            v0,
+            t504::Matmul {
+                a: p0,
+                b: p1,
+                m: p2,
+                n: p3,
+                k: p4,
+            },
+        ))
     }
 
     /// f695 = Tape::mse_loss.
     pub fn f695(&mut self, p0: t503, p1: t503) -> Result<t503> {
         let v0 = self.dev.f622(self.f685(p0), self.f685(p1))?;
-        Ok(self.f684(v0, t504::MseLoss { pred: p0, target: p1 }))
+        Ok(self.f684(
+            v0,
+            t504::MseLoss {
+                pred: p0,
+                target: p1,
+            },
+        ))
     }
 
     /// f696 = Tape::conv2d.
@@ -231,56 +336,114 @@ impl<'d> t506<'d> {
         p0: t503,
         p1: t503,
         p2: Option<t503>,
-        p3: u32, p4: u32, p5: u32, p6: u32,
-        p7: u32, p8: u32, p9: u32,
-        p10: (u32, u32), p11: (u32, u32),
-        p12: (u32, u32), p13: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
+        p7: u32,
+        p8: u32,
+        p9: u32,
+        p10: (u32, u32),
+        p11: (u32, u32),
+        p12: (u32, u32),
+        p13: u32,
     ) -> Result<t503> {
         let v0 = (p5 + 2 * p11.0 - p12.0 * (p8 - 1) - 1) / p10.0 + 1;
         let v1 = (p6 + 2 * p11.1 - p12.1 * (p9 - 1) - 1) / p10.1 + 1;
         let v2 = self.dev.f582(
-            self.f685(p0), self.f685(p1),
+            self.f685(p0),
+            self.f685(p1),
             p2.map(|v3| &self.bufs[v3.0 as usize]).as_deref(),
-            p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13,
+            p3,
+            p4,
+            p5,
+            p6,
+            p7,
+            p8,
+            p9,
+            p10,
+            p11,
+            p12,
+            p13,
         )?;
-        Ok(self.f684(v2, t504::Conv2d {
-            input: p0, weight: p1, bias: p2,
-            batch: p3, in_c: p4, in_h: p5, in_w: p6,
-            out_c: p7, out_h: v0, out_w: v1,
-            kh: p8, kw: p9,
-            stride_h: p10.0, stride_w: p10.1,
-            pad_h: p11.0, pad_w: p11.1,
-            dil_h: p12.0, dil_w: p12.1,
-            groups: p13,
-        }))
+        Ok(self.f684(
+            v2,
+            t504::Conv2d {
+                input: p0,
+                weight: p1,
+                bias: p2,
+                batch: p3,
+                in_c: p4,
+                in_h: p5,
+                in_w: p6,
+                out_c: p7,
+                out_h: v0,
+                out_w: v1,
+                kh: p8,
+                kw: p9,
+                stride_h: p10.0,
+                stride_w: p10.1,
+                pad_h: p11.0,
+                pad_w: p11.1,
+                dil_h: p12.0,
+                dil_w: p12.1,
+                groups: p13,
+            },
+        ))
     }
 
     /// f697 = Tape::concat. Two tensors along trailing axis: a[outer, a_inner] +
     /// b[outer, b_inner] -> out[outer, a_inner + b_inner].
-    pub fn f697(
-        &mut self,
-        p0: t503, p1: t503,
-        p2: u32, p3: u32, p4: u32,
-    ) -> Result<t503> {
+    pub fn f697(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: u32) -> Result<t503> {
         let v0 = self.dev.f640(self.f685(p0), self.f685(p1), p2, p3, p4)?;
-        Ok(self.f684(v0, t504::Concat { a: p0, b: p1, outer: p2, a_inner: p3, b_inner: p4 }))
+        Ok(self.f684(
+            v0,
+            t504::Concat {
+                a: p0,
+                b: p1,
+                outer: p2,
+                a_inner: p3,
+                b_inner: p4,
+            },
+        ))
     }
 
     /// f698 = Tape::group_norm. GroupNorm with learnable affine. Input shape
     /// [batch, channels, spatial].
     pub fn f698(
         &mut self,
-        p0: t503, p1: t503, p2: t503,
-        p3: u32, p4: u32, p5: u32, p6: u32, p7: f32,
+        p0: t503,
+        p1: t503,
+        p2: t503,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
+        p7: f32,
     ) -> Result<t503> {
         let v0 = self.dev.f600(
-            self.f685(p0), self.f685(p1), self.f685(p2),
-            p3, p4, p5, p6, p7,
+            self.f685(p0),
+            self.f685(p1),
+            self.f685(p2),
+            p3,
+            p4,
+            p5,
+            p6,
+            p7,
         )?;
-        Ok(self.f684(v0, t504::GroupNorm {
-            input: p0, gamma: p1, beta: p2,
-            batch: p3, channels: p4, spatial: p5, groups: p6, eps: p7,
-        }))
+        Ok(self.f684(
+            v0,
+            t504::GroupNorm {
+                input: p0,
+                gamma: p1,
+                beta: p2,
+                batch: p3,
+                channels: p4,
+                spatial: p5,
+                groups: p6,
+                eps: p7,
+            },
+        ))
     }
 
     /// f699 = Tape::upsample_nearest2d. input: [batch, channels, in_h, in_w]
@@ -288,61 +451,125 @@ impl<'d> t506<'d> {
     pub fn f699(
         &mut self,
         p0: t503,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-        p5: u32, p6: u32,
+        p1: u32,
+        p2: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
     ) -> Result<t503> {
-        let v0 = self.dev.f660(
-            self.f685(p0), p1, p2, p3, p4, p5, p6,
-        )?;
-        Ok(self.f684(v0, t504::UpsampleNearest2d {
-            input: p0, batch: p1, channels: p2, in_h: p3, in_w: p4, scale_h: p5, scale_w: p6,
-        }))
+        let v0 = self.dev.f660(self.f685(p0), p1, p2, p3, p4, p5, p6)?;
+        Ok(self.f684(
+            v0,
+            t504::UpsampleNearest2d {
+                input: p0,
+                batch: p1,
+                channels: p2,
+                in_h: p3,
+                in_w: p4,
+                scale_h: p5,
+                scale_w: p6,
+            },
+        ))
     }
 
     /// f700 = Tape::add_broadcast. out[outer, inner] = a[outer, inner] + b[outer].
     /// For bias add: outer = channels, inner = batch * spatial.
     /// For time conditioning: outer = batch * channels, inner = spatial.
-    pub fn f700(
-        &mut self,
-        p0: t503, p1: t503,
-        p2: u32, p3: u32,
-    ) -> Result<t503> {
+    pub fn f700(&mut self, p0: t503, p1: t503, p2: u32, p3: u32) -> Result<t503> {
         let v0 = self.dev.f642(self.f685(p0), self.f685(p1), p2, p3)?;
-        Ok(self.f684(v0, t504::AddBroadcast { a: p0, b: p1, outer: p2, inner: p3 }))
+        Ok(self.f684(
+            v0,
+            t504::AddBroadcast {
+                a: p0,
+                b: p1,
+                outer: p2,
+                inner: p3,
+            },
+        ))
     }
 
     /// f701 = Tape::add_per_col. out[rows, cols] = a[rows, cols] + b[cols]. Linear bias.
-    pub fn f701(
-        &mut self,
-        p0: t503, p1: t503,
-        p2: u32, p3: u32,
-    ) -> Result<t503> {
+    pub fn f701(&mut self, p0: t503, p1: t503, p2: u32, p3: u32) -> Result<t503> {
         let v0 = self.dev.f645(self.f685(p0), self.f685(p1), p2, p3)?;
-        Ok(self.f684(v0, t504::AddPerCol { a: p0, b: p1, rows: p2, cols: p3 }))
+        Ok(self.f684(
+            v0,
+            t504::AddPerCol {
+                a: p0,
+                b: p1,
+                rows: p2,
+                cols: p3,
+            },
+        ))
     }
 
     /// f712 = Tape::layer_norm. rows×cols input, cols-wide gamma+beta.
-    pub fn f712(&mut self, p0: t503, p1: t503, p2: t503, p3: u32, p4: u32, p5: f32) -> Result<t503> {
-        let v0 = self.dev.f602(self.f685(p0), self.f685(p1), self.f685(p2), p3, p4, p5)?;
-        Ok(self.f684(v0, t504::LayerNorm { input: p0, gamma: p1, beta: p2, rows: p3, cols: p4, eps: p5 }))
+    pub fn f712(
+        &mut self,
+        p0: t503,
+        p1: t503,
+        p2: t503,
+        p3: u32,
+        p4: u32,
+        p5: f32,
+    ) -> Result<t503> {
+        let v0 = self
+            .dev
+            .f602(self.f685(p0), self.f685(p1), self.f685(p2), p3, p4, p5)?;
+        Ok(self.f684(
+            v0,
+            t504::LayerNorm {
+                input: p0,
+                gamma: p1,
+                beta: p2,
+                rows: p3,
+                cols: p4,
+                eps: p5,
+            },
+        ))
     }
 
     /// f713 = Tape::rms_norm. rows×cols input, cols-wide gamma.
     pub fn f713(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: f32) -> Result<t503> {
         let v0 = self.dev.f603(self.f685(p0), self.f685(p1), p2, p3, p4)?;
-        Ok(self.f684(v0, t504::RmsNorm { input: p0, gamma: p1, rows: p2, cols: p3, eps: p4 }))
+        Ok(self.f684(
+            v0,
+            t504::RmsNorm {
+                input: p0,
+                gamma: p1,
+                rows: p2,
+                cols: p3,
+                eps: p4,
+            },
+        ))
     }
 
     /// f714 = Tape::embed_lookup. ids [n_ids], weight [vocab, d_model] -> [n_ids, d_model].
     pub fn f714(&mut self, p0: t503, p1: t503, p2: u32, p3: u32, p4: u32) -> Result<t503> {
         let v0 = self.dev.f670(self.f685(p0), self.f685(p1), p2, p3, p4)?;
-        Ok(self.f684(v0, t504::EmbedLookup { ids: p0, weight: p1, n_ids: p2, vocab_size: p3, d_model: p4 }))
+        Ok(self.f684(
+            v0,
+            t504::EmbedLookup {
+                ids: p0,
+                weight: p1,
+                n_ids: p2,
+                vocab_size: p3,
+                d_model: p4,
+            },
+        ))
     }
 
     /// f715 = Tape::softmax. [rows, cols] -> same shape.
     pub fn f715(&mut self, p0: t503, p1: u32, p2: u32) -> Result<t503> {
         let v0 = self.dev.f620(self.f685(p0), p1, p2)?;
-        Ok(self.f684(v0, t504::Softmax { input: p0, rows: p1, cols: p2 }))
+        Ok(self.f684(
+            v0,
+            t504::Softmax {
+                input: p0,
+                rows: p1,
+                cols: p2,
+            },
+        ))
     }
 
     /// f716 = Tape::causal_mask. Makes a copy of the scores tensor then applies the in-place mask.
@@ -350,13 +577,31 @@ impl<'d> t506<'d> {
     pub fn f716(&mut self, p0: t503, p1: u32, p2: u32, p3: u32) -> Result<t503> {
         let v0 = self.dev.f553(self.f685(p0), 1.0)?;
         self.dev.f624(&v0, p1, p2, p3)?;
-        Ok(self.f684(v0, t504::CausalMask { input: p0, batch_heads: p1, q_seq: p2, kv_seq: p3 }))
+        Ok(self.f684(
+            v0,
+            t504::CausalMask {
+                input: p0,
+                batch_heads: p1,
+                q_seq: p2,
+                kv_seq: p3,
+            },
+        ))
     }
 
     /// f717 = Tape::rope_fwd. Applies RoPE to [batch_heads, seq, head_dim].
     pub fn f717(&mut self, p0: t503, p1: u32, p2: u32, p3: u32, p4: u32, p5: f32) -> Result<t503> {
         let v0 = self.dev.f625(self.f685(p0), p1, p2, p3, p4, p5)?;
-        Ok(self.f684(v0, t504::Rope { input: p0, batch_heads: p1, seq: p2, head_dim: p3, start_pos: p4, base: p5 }))
+        Ok(self.f684(
+            v0,
+            t504::Rope {
+                input: p0,
+                batch_heads: p1,
+                seq: p2,
+                head_dim: p3,
+                start_pos: p4,
+                base: p5,
+            },
+        ))
     }
 
     // --- Backward ---
@@ -378,7 +623,10 @@ impl<'d> t506<'d> {
     /// f702 = Tape::backward. Run backward pass from a loss tensor. Computes
     /// gradients for all tensors on the tape.
     pub fn f702(&mut self, p0: t503) -> Result<()> {
-        ensure!(self.bufs[p0.0 as usize].s507 == 1, "backward: loss must be a scalar (1 element)");
+        ensure!(
+            self.bufs[p0.0 as usize].s507 == 1,
+            "backward: loss must be a scalar (1 element)"
+        );
 
         // Seed: d(loss)/d(loss) = 1.0
         self.grads[p0.0 as usize] = Some(self.dev.f502(&[1.0]));
@@ -457,21 +705,41 @@ impl<'d> t506<'d> {
                 t504::MseLoss { pred, target } => {
                     // grad_pred = 2 * (pred - target) / n
                     let v5 = self.bufs[pred.0 as usize].s507 as f32;
-                    let v6 = self.dev.f551(&self.bufs[pred.0 as usize], &self.bufs[target.0 as usize])?;
+                    let v6 = self
+                        .dev
+                        .f551(&self.bufs[pred.0 as usize], &self.bufs[target.0 as usize])?;
                     let v7 = self.dev.f553(&v6, 2.0 / v5)?;
                     self.f703(pred, v7)?;
                 }
 
-                t504::Conv2d { input, weight, bias, batch, in_c, in_h, in_w, out_c, out_h, out_w, kh, kw, stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups } => {
+                t504::Conv2d {
+                    input,
+                    weight,
+                    bias,
+                    batch,
+                    in_c,
+                    in_h,
+                    in_w,
+                    out_c,
+                    out_h,
+                    out_w,
+                    kh,
+                    kw,
+                    stride_h,
+                    stride_w,
+                    pad_h,
+                    pad_w,
+                    dil_h,
+                    dil_w,
+                    groups,
+                } => {
                     // grad_input via f583 (conv_transpose2d).
                     let v5 = (in_h as i32)
-                        - ((out_h as i32 - 1) * stride_h as i32
-                            - 2 * pad_h as i32
+                        - ((out_h as i32 - 1) * stride_h as i32 - 2 * pad_h as i32
                             + dil_h as i32 * (kh as i32 - 1)
                             + 1);
                     let v6 = (in_w as i32)
-                        - ((out_w as i32 - 1) * stride_w as i32
-                            - 2 * pad_w as i32
+                        - ((out_w as i32 - 1) * stride_w as i32 - 2 * pad_w as i32
                             + dil_w as i32 * (kw as i32 - 1)
                             + 1);
                     ensure!(v5 >= 0 && v6 >= 0, "negative output_pad in conv backward");
@@ -479,8 +747,13 @@ impl<'d> t506<'d> {
                         v3,
                         &self.bufs[weight.0 as usize],
                         None,
-                        batch, out_c, out_h, out_w,
-                        in_c, kh, kw,
+                        batch,
+                        out_c,
+                        out_h,
+                        out_w,
+                        in_c,
+                        kh,
+                        kw,
                         (stride_h, stride_w),
                         (pad_h, pad_w),
                         (v5 as u32, v6 as u32),
@@ -491,10 +764,22 @@ impl<'d> t506<'d> {
                     let v8 = self.dev.f584(
                         &self.bufs[input.0 as usize],
                         v3,
-                        batch, in_c, in_h, in_w,
-                        out_c, out_h, out_w, kh, kw,
-                        stride_h, stride_w, pad_h, pad_w,
-                        dil_h, dil_w, groups,
+                        batch,
+                        in_c,
+                        in_h,
+                        in_w,
+                        out_c,
+                        out_h,
+                        out_w,
+                        kh,
+                        kw,
+                        stride_h,
+                        stride_w,
+                        pad_h,
+                        pad_w,
+                        dil_h,
+                        dil_w,
+                        groups,
                     )?;
                     // grad_bias
                     let v9 = if bias.is_some() {
@@ -509,7 +794,13 @@ impl<'d> t506<'d> {
                     }
                 }
 
-                t504::Concat { a, b, outer, a_inner, b_inner } => {
+                t504::Concat {
+                    a,
+                    b,
+                    outer,
+                    a_inner,
+                    b_inner,
+                } => {
                     let v5 = a_inner + b_inner;
                     let v6 = self.dev.f643(v3, outer, a_inner, 0, v5)?;
                     let v7 = self.dev.f643(v3, outer, b_inner, a_inner, v5)?;
@@ -517,22 +808,43 @@ impl<'d> t506<'d> {
                     self.f703(b, v7)?;
                 }
 
-                t504::GroupNorm { input, gamma, beta, batch, channels, spatial, groups, eps } => {
+                t504::GroupNorm {
+                    input,
+                    gamma,
+                    beta,
+                    batch,
+                    channels,
+                    spatial,
+                    groups,
+                    eps,
+                } => {
                     let (v5, v6, v7) = self.dev.f601(
                         v3,
                         &self.bufs[input.0 as usize],
                         &self.bufs[gamma.0 as usize],
-                        batch, channels, spatial, groups, eps,
+                        batch,
+                        channels,
+                        spatial,
+                        groups,
+                        eps,
                     )?;
                     self.f703(input, v5)?;
                     self.f703(gamma, v6)?;
                     self.f703(beta, v7)?;
                 }
 
-                t504::UpsampleNearest2d { input, batch, channels, in_h, in_w, scale_h, scale_w } => {
-                    let v5 = self.dev.f661(
-                        v3, batch, channels, in_h, in_w, scale_h, scale_w,
-                    )?;
+                t504::UpsampleNearest2d {
+                    input,
+                    batch,
+                    channels,
+                    in_h,
+                    in_w,
+                    scale_h,
+                    scale_w,
+                } => {
+                    let v5 = self
+                        .dev
+                        .f661(v3, batch, channels, in_h, in_w, scale_h, scale_w)?;
                     self.f703(input, v5)?;
                 }
 
@@ -550,21 +862,60 @@ impl<'d> t506<'d> {
                     self.f703(b, v6)?;
                 }
 
-                t504::LayerNorm { input, gamma, beta, rows, cols, eps } => {
-                    let (v5, v6, v7) = self.dev.f791(v3, &self.bufs[input.0 as usize], &self.bufs[gamma.0 as usize], rows, cols, eps)?;
+                t504::LayerNorm {
+                    input,
+                    gamma,
+                    beta,
+                    rows,
+                    cols,
+                    eps,
+                } => {
+                    let (v5, v6, v7) = self.dev.f791(
+                        v3,
+                        &self.bufs[input.0 as usize],
+                        &self.bufs[gamma.0 as usize],
+                        rows,
+                        cols,
+                        eps,
+                    )?;
                     self.f703(input, v5)?;
                     self.f703(gamma, v6)?;
                     self.f703(beta, v7)?;
                 }
 
-                t504::RmsNorm { input, gamma, rows, cols, eps } => {
-                    let (v5, v6) = self.dev.f792(v3, &self.bufs[input.0 as usize], &self.bufs[gamma.0 as usize], rows, cols, eps)?;
+                t504::RmsNorm {
+                    input,
+                    gamma,
+                    rows,
+                    cols,
+                    eps,
+                } => {
+                    let (v5, v6) = self.dev.f792(
+                        v3,
+                        &self.bufs[input.0 as usize],
+                        &self.bufs[gamma.0 as usize],
+                        rows,
+                        cols,
+                        eps,
+                    )?;
                     self.f703(input, v5)?;
                     self.f703(gamma, v6)?;
                 }
 
-                t504::EmbedLookup { ids, weight, n_ids, vocab_size, d_model } => {
-                    let v5 = self.dev.f793(v3, &self.bufs[ids.0 as usize], n_ids, vocab_size, d_model)?;
+                t504::EmbedLookup {
+                    ids,
+                    weight,
+                    n_ids,
+                    vocab_size,
+                    d_model,
+                } => {
+                    let v5 = self.dev.f793(
+                        v3,
+                        &self.bufs[ids.0 as usize],
+                        n_ids,
+                        vocab_size,
+                        d_model,
+                    )?;
                     self.f703(weight, v5)?;
                 }
 
@@ -573,14 +924,28 @@ impl<'d> t506<'d> {
                     self.f703(input, v5)?;
                 }
 
-                t504::CausalMask { input, batch_heads, q_seq, kv_seq } => {
+                t504::CausalMask {
+                    input,
+                    batch_heads,
+                    q_seq,
+                    kv_seq,
+                } => {
                     let v5 = self.dev.f553(v3, 1.0)?;
                     self.dev.f624(&v5, batch_heads, q_seq, kv_seq)?;
                     self.f703(input, v5)?;
                 }
 
-                t504::Rope { input, batch_heads, seq, head_dim, start_pos, base } => {
-                    let v5 = self.dev.f796(v3, batch_heads, seq, head_dim, start_pos, base)?;
+                t504::Rope {
+                    input,
+                    batch_heads,
+                    seq,
+                    head_dim,
+                    start_pos,
+                    base,
+                } => {
+                    let v5 = self
+                        .dev
+                        .f796(v3, batch_heads, seq, head_dim, start_pos, base)?;
                     self.f703(input, v5)?;
                 }
             }
@@ -594,7 +959,9 @@ mod tests {
     use super::*;
     use crate::ops::f544;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f686_backward() {
@@ -611,8 +978,8 @@ mod tests {
 
         let v7 = v0.f683(v1).unwrap().unwrap();
         let v8 = v0.f683(v2).unwrap().unwrap();
-        f544(&v7, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
-        f544(&v8, &[10.0/3.0, 14.0/3.0, 18.0/3.0], 1e-3);
+        f544(&v7, &[10.0 / 3.0, 14.0 / 3.0, 18.0 / 3.0], 1e-3);
+        f544(&v8, &[10.0 / 3.0, 14.0 / 3.0, 18.0 / 3.0], 1e-3);
     }
 
     #[test]
@@ -706,7 +1073,9 @@ mod tests {
         v0.f702(v4).unwrap();
 
         let v5 = [0.5f32, 0.7311, 0.2689];
-        let v6: Vec<f32> = (0..3).map(|i| 2.0 * v5[i] / 3.0 * v5[i] * (1.0 - v5[i])).collect();
+        let v6: Vec<f32> = (0..3)
+            .map(|i| 2.0 * v5[i] / 3.0 * v5[i] * (1.0 - v5[i]))
+            .collect();
         let v7 = v0.f683(v1).unwrap().unwrap();
         f544(&v7, &v6, 1e-3);
     }
@@ -721,7 +1090,9 @@ mod tests {
         v0.f702(v4).unwrap();
 
         let v5 = [0.0f32, 0.7616, -0.7616];
-        let v6: Vec<f32> = (0..3).map(|i| 2.0 * v5[i] / 3.0 * (1.0 - v5[i] * v5[i])).collect();
+        let v6: Vec<f32> = (0..3)
+            .map(|i| 2.0 * v5[i] / 3.0 * (1.0 - v5[i] * v5[i]))
+            .collect();
         let v7 = v0.f683(v1).unwrap().unwrap();
         f544(&v7, &v6, 1e-2);
     }
@@ -737,11 +1108,13 @@ mod tests {
 
         let v5 = [0.0f32, 1.0, -1.0];
         let v6: Vec<f32> = v5.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
-        let v7: Vec<f32> = (0..3).map(|i| {
-            let s = 1.0 / (1.0 + (-v5[i]).exp());
-            let d = s + v5[i] * s * (1.0 - s);
-            2.0 * v6[i] / 3.0 * d
-        }).collect();
+        let v7: Vec<f32> = (0..3)
+            .map(|i| {
+                let s = 1.0 / (1.0 + (-v5[i]).exp());
+                let d = s + v5[i] * s * (1.0 - s);
+                2.0 * v6[i] / 3.0 * d
+            })
+            .collect();
         let v8 = v0.f683(v1).unwrap().unwrap();
         f544(&v8, &v7, 1e-2);
     }
@@ -790,7 +1163,24 @@ mod tests {
         let v2 = v0.f681(&v1);
         let v3 = v0.f681(&[1.0f32]);
         let v4 = v0.f681(&[0.0f32]);
-        let v5 = v0.f696(v2, v3, Some(v4), 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v5 = v0
+            .f696(
+                v2,
+                v3,
+                Some(v4),
+                1,
+                1,
+                3,
+                3,
+                1,
+                1,
+                1,
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                1,
+            )
+            .unwrap();
         let v6 = v0.f682(v5).unwrap();
         f544(&v6, &v1, 1e-5);
     }
@@ -805,7 +1195,9 @@ mod tests {
             let mut v5 = t506::f680(dev());
             let v6 = v5.f681(&v1);
             let v7 = v5.f681(&[v4]);
-            let v8 = v5.f696(v6, v7, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let v8 = v5
+                .f696(v6, v7, None, 1, 1, 3, 3, 1, 1, 1, (1, 1), (0, 0), (1, 1), 1)
+                .unwrap();
             let v9 = v5.f681(&vec![0.0f32; 9]);
             let v10 = v5.f695(v8, v9).unwrap();
             v5.f682(v10).unwrap()[0]
@@ -814,15 +1206,36 @@ mod tests {
         let mut v11 = t506::f680(dev());
         let v12 = v11.f681(&v1);
         let v13 = v11.f681(&v2);
-        let v14 = v11.f696(v12, v13, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v14 = v11
+            .f696(
+                v12,
+                v13,
+                None,
+                1,
+                1,
+                3,
+                3,
+                1,
+                1,
+                1,
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                1,
+            )
+            .unwrap();
         let v15 = v11.f681(&vec![0.0f32; 9]);
         let v16 = v11.f695(v14, v15).unwrap();
         v11.f702(v16).unwrap();
         let v17 = v11.f683(v13).unwrap().unwrap();
 
         let v18 = (v3(v2[0] + v0) - v3(v2[0] - v0)) / (2.0 * v0);
-        assert!((v17[0] - v18).abs() < 1e-2,
-            "weight grad: analytical={}, numeric={}", v17[0], v18);
+        assert!(
+            (v17[0] - v18).abs() < 1e-2,
+            "weight grad: analytical={}, numeric={}",
+            v17[0],
+            v18
+        );
     }
 
     #[test]
@@ -837,7 +1250,9 @@ mod tests {
             let mut v7 = t506::f680(dev());
             let v8 = v7.f681(&v6);
             let v9 = v7.f681(&v2);
-            let v10 = v7.f696(v8, v9, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+            let v10 = v7
+                .f696(v8, v9, None, 1, 1, 3, 3, 1, 1, 1, (1, 1), (0, 0), (1, 1), 1)
+                .unwrap();
             let v11 = v7.f681(&vec![0.0f32; 9]);
             let v12 = v7.f695(v10, v11).unwrap();
             v7.f682(v12).unwrap()[0]
@@ -846,7 +1261,24 @@ mod tests {
         let mut v13 = t506::f680(dev());
         let v14 = v13.f681(&v1);
         let v15 = v13.f681(&v2);
-        let v16 = v13.f696(v14, v15, None, 1, 1, 3, 3, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v16 = v13
+            .f696(
+                v14,
+                v15,
+                None,
+                1,
+                1,
+                3,
+                3,
+                1,
+                1,
+                1,
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                1,
+            )
+            .unwrap();
         let v17 = v13.f681(&vec![0.0f32; 9]);
         let v18 = v13.f695(v16, v17).unwrap();
         v13.f702(v18).unwrap();
@@ -854,8 +1286,12 @@ mod tests {
 
         for v20 in 0..9 {
             let v21 = (v3(v1[v20] + v0, v20) - v3(v1[v20] - v0, v20)) / (2.0 * v0);
-            assert!((v19[v20] - v21).abs() < 1e-2,
-                "input grad[{v20}]: analytical={}, numeric={}", v19[v20], v21);
+            assert!(
+                (v19[v20] - v21).abs() < 1e-2,
+                "input grad[{v20}]: analytical={}, numeric={}",
+                v19[v20],
+                v21
+            );
         }
     }
 
@@ -865,7 +1301,24 @@ mod tests {
         let v1 = v0.f681(&[1.0f32, 2.0, 3.0, 4.0]);
         let v2 = v0.f681(&[1.0f32]);
         let v3 = v0.f681(&[0.0f32]);
-        let v4 = v0.f696(v1, v2, Some(v3), 1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap();
+        let v4 = v0
+            .f696(
+                v1,
+                v2,
+                Some(v3),
+                1,
+                1,
+                2,
+                2,
+                1,
+                1,
+                1,
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                1,
+            )
+            .unwrap();
         let v5 = v0.f681(&[0.0f32; 4]);
         let v6 = v0.f695(v4, v5).unwrap();
         v0.f702(v6).unwrap();

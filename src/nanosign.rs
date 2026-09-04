@@ -16,7 +16,10 @@ const SIG_LEN: usize = 4 + 32; // magic + BLAKE3 hash
 #[derive(Debug, PartialEq)]
 pub enum t510 {
     Verified(blake3::Hash),
-    Failed { expected: [u8; 32], actual: blake3::Hash },
+    Failed {
+        expected: [u8; 32],
+        actual: blake3::Hash,
+    },
     Unsigned,
 }
 
@@ -54,7 +57,10 @@ pub fn f742(p0: &[u8]) -> t510 {
     if *v3.as_bytes() == v2 {
         t510::Verified(v3)
     } else {
-        t510::Failed { expected: v2, actual: v3 }
+        t510::Failed {
+            expected: v2,
+            actual: v3,
+        }
     }
 }
 
@@ -95,9 +101,7 @@ pub fn f745(p0: &Path, p1: &[u8]) -> Result<blake3::Hash> {
 pub fn f746(p0: &Path) -> Result<Vec<u8>> {
     let v0 = std::fs::read(p0).with_context(|| format!("read {}", p0.display()))?;
     match f742(&v0) {
-        t510::Verified(_) => {
-            Ok(v0[..v0.len() - SIG_LEN].to_vec())
-        }
+        t510::Verified(_) => Ok(v0[..v0.len() - SIG_LEN].to_vec()),
         t510::Failed { expected, actual } => {
             anyhow::bail!(
                 "NanoSign FAILED for {}: expected {}, got {} — file tampered or corrupted",

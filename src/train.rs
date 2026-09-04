@@ -4,7 +4,7 @@
 // Training loop: forward + backward + optimizer step. One function call, not a framework.
 // t509=StepResult, t550=GpuParams. f730=train_step, f731..f735, f734=train_step_gpu.
 
-use crate::autograd::{t506, t503};
+use crate::autograd::{t503, t506};
 use crate::device::{t500, t501};
 use crate::optim::t507;
 use anyhow::Result;
@@ -36,13 +36,16 @@ pub fn f730(
     v0.f702(v1)?;
 
     // Extract param buffers and grad buffers for optimizer
-    let mut v4: Vec<_> = v2.iter().map(|v5| {
-        v0.f682(*v5).unwrap()
-    }).collect();
+    let mut v4: Vec<_> = v2.iter().map(|v5| v0.f682(*v5).unwrap()).collect();
 
-    let v6: Vec<_> = v2.iter().map(|v7| {
-        v0.f683(*v7).unwrap().unwrap_or_else(|| vec![0.0; v4[0].len()])
-    }).collect();
+    let v6: Vec<_> = v2
+        .iter()
+        .map(|v7| {
+            v0.f683(*v7)
+                .unwrap()
+                .unwrap_or_else(|| vec![0.0; v4[0].len()])
+        })
+        .collect();
 
     // Upload params as mutable GPU buffers and grads as read-only
     let mut v8: Vec<_> = v4.iter().map(|v9| p0.f502(v9)).collect();
@@ -112,11 +115,15 @@ pub fn f734(
     v0.f702(v3)?;
 
     // Collect grad buffers by reference — no CPU readback
-    let v5: Vec<t501> = v1.iter().enumerate().map(|(v6, v7)| {
-        v0.f684r(*v7)
-            .cloned()
-            .unwrap_or_else(|| p0.f503(p2.params[v6].s507))
-    }).collect();
+    let v5: Vec<t501> = v1
+        .iter()
+        .enumerate()
+        .map(|(v6, v7)| {
+            v0.f684r(*v7)
+                .cloned()
+                .unwrap_or_else(|| p0.f503(p2.params[v6].s507))
+        })
+        .collect();
 
     // Optimizer updates p2.params in-place on GPU; grad clone is cheap (Arc)
     p1.f721(p0, &mut p2.params, &v5)?;
@@ -129,7 +136,9 @@ mod tests {
     use super::*;
     use crate::ops::f544;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f730_linear_regression() {
@@ -178,7 +187,10 @@ mod tests {
             v3[0] -= 0.01 * v25;
 
             if v6 % 10 == 0 {
-                assert!(v21 < v5 || v6 == 0, "loss should decrease: step {v6} loss {v21} >= prev {v5}");
+                assert!(
+                    v21 < v5 || v6 == 0,
+                    "loss should decrease: step {v6} loss {v21} >= prev {v5}"
+                );
             }
             v5 = v21;
 
@@ -186,8 +198,16 @@ mod tests {
             let _ = (v12, v13);
         }
 
-        assert!((v2[0] - 2.0).abs() < 0.5, "w should be near 2.0, got {}", v2[0]);
-        assert!((v3[0] - 1.0).abs() < 0.5, "b should be near 1.0, got {}", v3[0]);
+        assert!(
+            (v2[0] - 2.0).abs() < 0.5,
+            "w should be near 2.0, got {}",
+            v2[0]
+        );
+        assert!(
+            (v3[0] - 1.0).abs() < 0.5,
+            "b should be near 1.0, got {}",
+            v3[0]
+        );
     }
 
     #[test]
@@ -213,15 +233,19 @@ mod tests {
             f734(dev(), &mut v1, &mut v0, v2, |v3, v4| {
                 let v5 = v3.f681(&[1.0f32, 1.0, 1.0]);
                 let v6 = v3.f681(&[0.5f32, 0.5, 0.5]);
-                let v7 = v3.f688(v4[0], v5)?;   // pred = params * inputs
-                v3.f695(v7, v6)                  // MSE(pred, targets)
-            }).unwrap();
+                let v7 = v3.f688(v4[0], v5)?; // pred = params * inputs
+                v3.f695(v7, v6) // MSE(pred, targets)
+            })
+            .unwrap();
         }
 
         // Single checkpoint at the end — params never touched CPU during the loop
         let v3 = v0.f732(dev()).unwrap();
         for v4 in &v3[0] {
-            assert!((*v4 - 0.5).abs() < 0.1, "param should be near 0.5, got {v4}");
+            assert!(
+                (*v4 - 0.5).abs() < 0.1,
+                "param should be near 0.5, got {v4}"
+            );
         }
     }
 
@@ -242,12 +266,17 @@ mod tests {
                 let v8 = v5.f681(&[0.5f32, 0.5, 0.5]);
                 let v9 = v5.f688(v6[0], v7)?;
                 v5.f695(v9, v8)
-            }).unwrap();
-            if v3 == 0 { v_init = v4.loss; }
+            })
+            .unwrap();
+            if v3 == 0 {
+                v_init = v4.loss;
+            }
             v2 = v4.loss;
         }
-        assert!(v2 < v_init * 0.01,
-            "loss should converge: final={v2} initial={v_init}");
+        assert!(
+            v2 < v_init * 0.01,
+            "loss should converge: final={v2} initial={v_init}"
+        );
     }
 
     #[test]

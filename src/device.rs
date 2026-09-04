@@ -4,9 +4,9 @@
 // Token-Optimized Code Representation per docs/compression_map.md.
 // t500 = GpuDevice. t501 = GpuBuffer. t540 = GpuBufferF16. f500..f508, f771..f772.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher, DefaultHasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
@@ -148,14 +148,19 @@ impl t500 {
                             force_fallback_adapter: true,
                         })
                         .await
-                        .context("no GPU found (tried hardware, low-power, and software fallback)")?,
+                        .context(
+                            "no GPU found (tried hardware, low-power, and software fallback)",
+                        )?,
                 }
             }
         };
 
         let v2 = v1.get_info();
         #[cfg(not(target_arch = "wasm32"))]
-        eprintln!("  any-gpu: {} ({:?}, {:?})", v2.name, v2.device_type, v2.backend);
+        eprintln!(
+            "  any-gpu: {} ({:?}, {:?})",
+            v2.name, v2.device_type, v2.backend
+        );
 
         // Use the adapter's actual limits — not Limits::default() which can
         // request capabilities the driver doesn't support (SIGSEGV on RADV/RDNA1).
@@ -164,8 +169,12 @@ impl t500 {
         let has_f16 = v5.contains(wgpu::Features::SHADER_F16);
         let has_sg = v5.contains(wgpu::Features::SUBGROUP);
         let mut v6 = wgpu::Features::empty();
-        if has_f16 { v6 |= wgpu::Features::SHADER_F16; }
-        if has_sg  { v6 |= wgpu::Features::SUBGROUP; }
+        if has_f16 {
+            v6 |= wgpu::Features::SHADER_F16;
+        }
+        if has_sg {
+            v6 |= wgpu::Features::SUBGROUP;
+        }
 
         let (v3, v4) = v1
             .request_device(
@@ -196,13 +205,15 @@ impl t500 {
     /// in compute shaders.
     pub fn f502(&self, p0: &[f32]) -> t501 {
         let v0 = bytemuck::cast_slice(p0);
-        let v1 = self.s500.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: v0,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
+        let v1 = self
+            .s500
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: v0,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            });
         t501 {
             s506: v0.len() as u64,
             s507: p0.len(),
@@ -326,18 +337,23 @@ impl t500 {
             return Arc::clone(v3);
         }
 
-        let v4 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: p1,
-            source: wgpu::ShaderSource::Wgsl(p0.into()),
-        });
-        let v5 = Arc::new(self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: p1,
-            layout: None,
-            module: &v4,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        }));
+        let v4 = self
+            .s500
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: p1,
+                source: wgpu::ShaderSource::Wgsl(p0.into()),
+            });
+        let v5 = Arc::new(
+            self.s500
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: p1,
+                    layout: None,
+                    module: &v4,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+        );
         v2.insert(v1, Arc::clone(&v5));
         v5
     }
@@ -353,9 +369,15 @@ impl t500 {
     /// Call f511 (sync) or f510 (execute) on the returned t549 to flush.
     /// Dropping t549 without calling either auto-submits without polling.
     pub fn f509(&self) -> t549<'_> {
-        let enc = self.s500.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("batch") });
-        *self.s508.lock().unwrap() = Some(t549State { enc, keep: Vec::new() });
+        let enc = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("batch"),
+            });
+        *self.s508.lock().unwrap() = Some(t549State {
+            enc,
+            keep: Vec::new(),
+        });
         t549(self)
     }
 
@@ -365,16 +387,24 @@ impl t500 {
     pub fn f771(&self, p0: &[u16]) -> t540 {
         // Pad to even length so every u32 in the buffer is fully initialised.
         let mut v0 = p0.to_vec();
-        if v0.len() % 2 != 0 { v0.push(0); }
+        if v0.len() % 2 != 0 {
+            v0.push(0);
+        }
         let v1: &[u8] = bytemuck::cast_slice(&v0);
-        let v2 = self.s500.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: v1,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
-        t540 { s522: v2, s523: v1.len() as u64, s524: p0.len() }
+        let v2 = self
+            .s500
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: v1,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+        t540 {
+            s522: v2,
+            s523: v1.len() as u64,
+            s524: p0.len(),
+        }
     }
 
     /// alloc_f16. Allocate a zero-filled f16 VRAM buffer for `p0` f16 elements.
@@ -391,11 +421,16 @@ impl t500 {
             mapped_at_creation: false,
         });
         // Zero-fill so the padding u16 (odd p0) is 0x0000 = f16(+0.0).
-        let mut v2 = self.s500.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: None });
+        let mut v2 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         v2.clear_buffer(&v1, 0, None);
         self.s501.submit(Some(v2.finish()));
-        t540 { s522: v1, s523: v0, s524: p0 }
+        t540 {
+            s522: v1,
+            s523: v0,
+            s524: p0,
+        }
     }
 
     /// f772 = f16_to_f32. GPU kernel: expand a packed-f16 buffer (t540) into a new f32
@@ -421,7 +456,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }";
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct F16P { n: u32, _p: [u32; 3] }
+        struct F16P {
+            n: u32,
+            _p: [u32; 3],
+        }
 
         let n = p0.s524 as u32;
         let n_pairs = (n + 1) / 2;
@@ -432,18 +470,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             label: None,
             layout: &v2.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: v1.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p0.s522.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: v0.s505.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: v1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: p0.s522.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v0.s505.as_entire_binding(),
+                },
             ],
         });
         let wg = n_pairs.div_ceil(256);
-        let (wg_x, wg_y) = if wg <= 65535 { (wg, 1) } else { (65535, wg.div_ceil(65535)) };
-        let mut v4 = self.s500.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: None });
+        let (wg_x, wg_y) = if wg <= 65535 {
+            (wg, 1)
+        } else {
+            (65535, wg.div_ceil(65535))
+        };
+        let mut v4 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut v5 = v4.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None, timestamp_writes: None });
+                label: None,
+                timestamp_writes: None,
+            });
             v5.set_pipeline(&v2);
             v5.set_bind_group(0, &v3, &[]);
             v5.dispatch_workgroups(wg_x, wg_y, 1);
@@ -457,7 +511,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 mod tests {
     use super::*;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f500_init() {
@@ -472,7 +528,8 @@ mod tests {
     #[test]
     fn f771_f772_roundtrip() {
         let f32_vals: [f32; 6] = [1.0, -1.0, 0.5, 2.0, 0.0, -0.25];
-        let f16_bits: Vec<u16> = f32_vals.iter()
+        let f16_bits: Vec<u16> = f32_vals
+            .iter()
             .map(|&v| half::f16::from_f32(v).to_bits())
             .collect();
         let buf = dev().f771(&f16_bits);
@@ -490,7 +547,8 @@ mod tests {
     #[test]
     fn f771_f772_odd_count() {
         let f32_vals: [f32; 5] = [1.0, -1.0, 0.5, 2.0, 0.0];
-        let f16_bits: Vec<u16> = f32_vals.iter()
+        let f16_bits: Vec<u16> = f32_vals
+            .iter()
             .map(|&v| half::f16::from_f32(v).to_bits())
             .collect();
         let buf = dev().f771(&f16_bits);
@@ -560,7 +618,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }";
         let v0 = dev().f507(SRC, None);
         let v1 = dev().f507(SRC, None);
-        assert!(Arc::ptr_eq(&v0, &v1), "same shader src must return the same Arc");
+        assert!(
+            Arc::ptr_eq(&v0, &v1),
+            "same shader src must return the same Arc"
+        );
     }
 
     #[test]
@@ -587,7 +648,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }";
         let v0 = dev().f507(SRC_A, None);
         let v1 = dev().f507(SRC_B, None);
-        assert!(!Arc::ptr_eq(&v0, &v1), "different shaders must produce different pipeline entries");
+        assert!(
+            !Arc::ptr_eq(&v0, &v1),
+            "different shaders must produce different pipeline entries"
+        );
     }
 
     #[test]
@@ -607,8 +671,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }";
         let v0 = dev().f507(SRC, None);
         let v1 = dev().f507(SRC, None);
-        assert!(Arc::ptr_eq(&v0, &v1),
-            "same shader source must return the same cached Arc<ComputePipeline>");
+        assert!(
+            Arc::ptr_eq(&v0, &v1),
+            "same shader source must return the same cached Arc<ComputePipeline>"
+        );
     }
 
     #[test]
@@ -631,7 +697,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let v1 = dev().f502(&v0);
         let v2 = dev().f504(&v1).unwrap();
         for (v3, (v4, v5)) in v2.iter().zip(v0.iter()).enumerate() {
-            assert!((v4 - v5).abs() < 1e-7, "index {v3}: got {v4}, expected {v5}");
+            assert!(
+                (v4 - v5).abs() < 1e-7,
+                "index {v3}: got {v4}, expected {v5}"
+            );
         }
     }
 }

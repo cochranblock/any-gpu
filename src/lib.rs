@@ -16,27 +16,27 @@ mod tensor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod autograd;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod nanosign;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod safetensors;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod pager;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod optim;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod train;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tokenizer;
+pub mod lm;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod module;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod lm;
+pub mod nanosign;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod optim;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pager;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod safetensors;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tokenizer;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod train;
 
 pub use device::{t500, t501, t540, t549};
+pub use lm::{t547, t548, t556};
+pub use module::{t545, t546};
 pub use ops::transformer::{t534, t551};
-pub use pager::{t539, DEFAULT_STAGE_BYTES};
+pub use pager::{DEFAULT_STAGE_BYTES, t539};
 pub use safetensors::t538;
 pub use tensor::t502;
 pub use tokenizer::t544;
-pub use module::{t545, t546};
-pub use lm::{t547, t548, t556};

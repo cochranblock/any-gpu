@@ -14,9 +14,13 @@ fn bench_chain(dev: &t500, size: usize, n_ops: usize) {
 
     // --- Eager: one submit per matmul ---
     let t0 = Instant::now();
-    let mut out = dev.f580(&x, &w, size as u32, size as u32, size as u32).unwrap();
+    let mut out = dev
+        .f580(&x, &w, size as u32, size as u32, size as u32)
+        .unwrap();
     for _ in 1..n_ops {
-        out = dev.f580(&out, &w, size as u32, size as u32, size as u32).unwrap();
+        out = dev
+            .f580(&out, &w, size as u32, size as u32, size as u32)
+            .unwrap();
     }
     let _ = dev.f504(&out).unwrap();
     let eager_ms = t0.elapsed().as_secs_f64() * 1e3;
@@ -24,9 +28,13 @@ fn bench_chain(dev: &t500, size: usize, n_ops: usize) {
     // --- Batched: all ops into one encoder, one submit ---
     let t0 = Instant::now();
     let batch = dev.f509();
-    let mut out = dev.f580(&x, &w, size as u32, size as u32, size as u32).unwrap();
+    let mut out = dev
+        .f580(&x, &w, size as u32, size as u32, size as u32)
+        .unwrap();
     for _ in 1..n_ops {
-        out = dev.f580(&out, &w, size as u32, size as u32, size as u32).unwrap();
+        out = dev
+            .f580(&out, &w, size as u32, size as u32, size as u32)
+            .unwrap();
     }
     batch.f511();
     let _ = dev.f504(&out).unwrap();

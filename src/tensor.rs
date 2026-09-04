@@ -4,7 +4,7 @@
 // t502 = Tensor: shaped view over a t501 (GpuBuffer). Tracks dimensions for op dispatch.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// t502 = Tensor. GPU tensor with shape metadata. Wraps a t501.
 /// Shape is stored inline (max 6 dims covers batch x channel x D x H x W + extra).
@@ -24,23 +24,38 @@ impl t502 {
         ensure!(
             p1.len() == v0 as usize,
             "shape {:?} needs {} elements, got {}",
-            p2, v0, p1.len()
+            p2,
+            v0,
+            p1.len()
         );
         ensure!(p2.len() <= 6, "max 6 dimensions, got {}", p2.len());
         let v1 = p0.f502(p1);
         let mut v2 = [0u32; 6];
         v2[..p2.len()].copy_from_slice(p2);
-        Ok(Self { s508: v1, s509: v2, s510: p2.len() as u8 })
+        Ok(Self {
+            s508: v1,
+            s509: v2,
+            s510: p2.len() as u8,
+        })
     }
 
     /// f521 = Tensor::from_buf. Create a tensor from an existing t501 with the given shape.
     pub fn f521(p0: t501, p1: &[u32]) -> Result<Self> {
         let v0: u32 = p1.iter().product();
-        ensure!(p0.s507 == v0 as usize, "buffer has {} elements, shape needs {}", p0.s507, v0);
+        ensure!(
+            p0.s507 == v0 as usize,
+            "buffer has {} elements, shape needs {}",
+            p0.s507,
+            v0
+        );
         ensure!(p1.len() <= 6, "max 6 dimensions");
         let mut v1 = [0u32; 6];
         v1[..p1.len()].copy_from_slice(p1);
-        Ok(Self { s508: p0, s509: v1, s510: p1.len() as u8 })
+        Ok(Self {
+            s508: p0,
+            s509: v1,
+            s510: p1.len() as u8,
+        })
     }
 
     /// f522 = Tensor::zeros. Create a zero tensor with the given shape.
@@ -50,7 +65,11 @@ impl t502 {
         let v1 = p0.f503(v0 as usize);
         let mut v2 = [0u32; 6];
         v2[..p1.len()].copy_from_slice(p1);
-        Ok(Self { s508: v1, s509: v2, s510: p1.len() as u8 })
+        Ok(Self {
+            s508: v1,
+            s509: v2,
+            s510: p1.len() as u8,
+        })
     }
 
     /// f523 = Tensor::shape. Shape as a slice.
@@ -97,12 +116,18 @@ impl t502 {
         ensure!(
             self.s508.s507 == v0 as usize,
             "reshape: {} elements can't become shape {:?} ({})",
-            self.s508.s507, p0, v0
+            self.s508.s507,
+            p0,
+            v0
         );
         ensure!(p0.len() <= 6, "max 6 dimensions");
         let mut v1 = [0u32; 6];
         v1[..p0.len()].copy_from_slice(p0);
-        Ok(Self { s508: self.s508, s509: v1, s510: p0.len() as u8 })
+        Ok(Self {
+            s508: self.s508,
+            s509: v1,
+            s510: p0.len() as u8,
+        })
     }
 
     /// f530 = Tensor::dim. Get a single dimension size.
@@ -113,12 +138,27 @@ impl t502 {
 
     /// f531 = Tensor::matmul. A[m,k] × B[k,n] = C[m,n]. Both inputs must be 2D.
     pub fn f531(&self, p0: &t500, p1: &t502) -> Result<t502> {
-        ensure!(self.f524() == 2, "matmul: self must be 2D, got {}D", self.f524());
-        ensure!(p1.f524() == 2, "matmul: other must be 2D, got {}D", p1.f524());
-        let v0 = self.f530(0);  // m
-        let v1 = self.f530(1);  // k
-        let v2 = p1.f530(1);    // n
-        ensure!(v1 == p1.f530(0), "matmul: inner dims must match: {}×{} vs {}×{}", v0, v1, p1.f530(0), v2);
+        ensure!(
+            self.f524() == 2,
+            "matmul: self must be 2D, got {}D",
+            self.f524()
+        );
+        ensure!(
+            p1.f524() == 2,
+            "matmul: other must be 2D, got {}D",
+            p1.f524()
+        );
+        let v0 = self.f530(0); // m
+        let v1 = self.f530(1); // k
+        let v2 = p1.f530(1); // n
+        ensure!(
+            v1 == p1.f530(0),
+            "matmul: inner dims must match: {}×{} vs {}×{}",
+            v0,
+            v1,
+            p1.f530(0),
+            v2
+        );
         let v3 = p0.f580(&self.s508, &p1.s508, v0, v2, v1)?;
         t502::f521(v3, &[v0, v2])
     }
@@ -131,15 +171,23 @@ impl t502 {
 
     /// f533 = Tensor::softmax. Softmax along the last dimension. Input must be 2D [rows, cols].
     pub fn f533(&self, p0: &t500) -> Result<t502> {
-        ensure!(self.f524() == 2, "softmax: input must be 2D [rows, cols], got {}D", self.f524());
+        ensure!(
+            self.f524() == 2,
+            "softmax: input must be 2D [rows, cols], got {}D",
+            self.f524()
+        );
         let v0 = p0.f620(&self.s508, self.f530(0), self.f530(1))?;
         t502::f521(v0, self.f523())
     }
 
     /// f534 = Tensor::mse_loss. mean((self − target)²). Returns a scalar tensor with shape [1].
     pub fn f534(&self, p0: &t500, p1: &t502) -> Result<t502> {
-        ensure!(self.f525() == p1.f525(),
-            "mse_loss: size mismatch: {} vs {}", self.f525(), p1.f525());
+        ensure!(
+            self.f525() == p1.f525(),
+            "mse_loss: size mismatch: {} vs {}",
+            self.f525(),
+            p1.f525()
+        );
         let v0 = p0.f622(&self.s508, &p1.s508)?;
         t502::f521(v0, &[1])
     }
@@ -157,20 +205,26 @@ impl t502 {
         p5: (u32, u32),
         p6: u32,
     ) -> Result<t502> {
-        ensure!(self.f524() == 4, "conv2d: input must be 4D [N,C,H,W], got {}D", self.f524());
-        ensure!(p1.f524() == 4, "conv2d: kernel must be 4D [out_c,in_c/g,kH,kW], got {}D", p1.f524());
-        let v0 = self.f530(0);  // N (batch)
-        let v1 = self.f530(1);  // in_c
-        let v2 = self.f530(2);  // in_h
-        let v3 = self.f530(3);  // in_w
-        let v4 = p1.f530(0);   // out_c
-        let v5 = p1.f530(2);   // kH
-        let v6 = p1.f530(3);   // kW
+        ensure!(
+            self.f524() == 4,
+            "conv2d: input must be 4D [N,C,H,W], got {}D",
+            self.f524()
+        );
+        ensure!(
+            p1.f524() == 4,
+            "conv2d: kernel must be 4D [out_c,in_c/g,kH,kW], got {}D",
+            p1.f524()
+        );
+        let v0 = self.f530(0); // N (batch)
+        let v1 = self.f530(1); // in_c
+        let v2 = self.f530(2); // in_h
+        let v3 = self.f530(3); // in_w
+        let v4 = p1.f530(0); // out_c
+        let v5 = p1.f530(2); // kH
+        let v6 = p1.f530(3); // kW
         let v7 = p2.map(|v8| &v8.s508);
         let v9 = p0.f582(
-            &self.s508, &p1.s508, v7,
-            v0, v1, v2, v3, v4, v5, v6,
-            p3, p4, p5, p6,
+            &self.s508, &p1.s508, v7, v0, v1, v2, v3, v4, v5, v6, p3, p4, p5, p6,
         )?;
         let v10 = (v2 + 2 * p4.0 - p5.0 * (v5 - 1) - 1) / p3.0 + 1;
         let v11 = (v3 + 2 * p4.1 - p5.1 * (v6 - 1) - 1) / p3.1 + 1;
@@ -182,7 +236,9 @@ impl t502 {
 mod tests {
     use super::*;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f520_basic() {
@@ -376,9 +432,16 @@ mod tests {
     #[test]
     fn f535_conv2d_identity() {
         // 1x1x3x3 input, 1x1x1x1 identity kernel (value=1), no bias, stride=1, pad=0
-        let v0 = t502::f520(dev(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[1, 1, 3, 3]).unwrap();
+        let v0 = t502::f520(
+            dev(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
         let v1 = t502::f520(dev(), &[1.0], &[1, 1, 1, 1]).unwrap();
-        let v2 = v0.f535(dev(), &v1, None, (1, 1), (0, 0), (1, 1), 1).unwrap();
+        let v2 = v0
+            .f535(dev(), &v1, None, (1, 1), (0, 0), (1, 1), 1)
+            .unwrap();
         assert_eq!(v2.f523(), &[1, 1, 3, 3]);
         let v3 = v2.f526(dev()).unwrap();
         crate::ops::f544(&v3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 1e-5);

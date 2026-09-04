@@ -16,33 +16,41 @@
 
 use anyhow::Result;
 use clap::Parser;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
-use std::collections::VecDeque;
 
-use any_gpu::{t500, t547, t548, t539, DEFAULT_STAGE_BYTES, t538, t544, t556};
+use any_gpu::{DEFAULT_STAGE_BYTES, t500, t538, t539, t544, t547, t548, t556};
 
 #[derive(Parser)]
-#[command(name = "any-gpu-serve", about = "GPU inference server (continuous batching)")]
+#[command(
+    name = "any-gpu-serve",
+    about = "GPU inference server (continuous batching)"
+)]
 struct Cli {
-    #[arg(long)] model:     String,
-    #[arg(long)] config:    String,
-    #[arg(long)] tokenizer: String,
-    #[arg(long, default_value = "8080")] port: u16,
-    #[arg(long)] max_seq:   Option<usize>,
+    #[arg(long)]
+    model: String,
+    #[arg(long)]
+    config: String,
+    #[arg(long)]
+    tokenizer: String,
+    #[arg(long, default_value = "8080")]
+    port: u16,
+    #[arg(long)]
+    max_seq: Option<usize>,
 }
 
 struct PendingReq {
-    stream:     TcpStream,
-    token_ids:  Vec<u32>,
-    max_new:    usize,
+    stream: TcpStream,
+    token_ids: Vec<u32>,
+    max_new: usize,
 }
 
 // Active is dense: active[i].slot.slot == i (pool slot == vec index).
 struct InFlight {
     stream: TcpStream,
-    slot:   t556,
+    slot: t556,
 }
 
 fn main() -> Result<()> {
@@ -55,7 +63,9 @@ fn main() -> Result<()> {
     eprintln!("[any-gpu-serve] loading config {}…", cli.config);
     let cfg_str = std::fs::read_to_string(&cli.config)?;
     let mut cfg = t547::f782(&cfg_str)?;
-    if let Some(ms) = cli.max_seq { cfg.max_seq = ms; }
+    if let Some(ms) = cli.max_seq {
+        cfg.max_seq = ms;
+    }
     let max_batch = cfg.max_batch.max(1);
 
     eprintln!("[any-gpu-serve] loading tokenizer {}…", cli.tokenizer);
@@ -68,7 +78,10 @@ fn main() -> Result<()> {
     let pager = t539::f768(&dev, DEFAULT_STAGE_BYTES);
     let mut lm = t548::f783(&dev, &st, &pager, cfg)?;
 
-    eprintln!("[any-gpu-serve] max_batch={max_batch}, ready — listening on 0.0.0.0:{}", cli.port);
+    eprintln!(
+        "[any-gpu-serve] max_batch={max_batch}, ready — listening on 0.0.0.0:{}",
+        cli.port
+    );
     let listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port))?;
     listener.set_nonblocking(true)?;
 
@@ -85,8 +98,8 @@ fn main() -> Result<()> {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
                     match parse_request(&stream, &tok) {
                         Ok(Some(pr)) => pending.push_back(pr),
-                        Ok(None)     => send_health(&stream, &dev_name, active.len()),
-                        Err(e)       => eprintln!("[serve] parse error: {e}"),
+                        Ok(None) => send_health(&stream, &dev_name, active.len()),
+                        Err(e) => eprintln!("[serve] parse error: {e}"),
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -98,7 +111,10 @@ fn main() -> Result<()> {
         while !pending.is_empty() && active.len() < max_batch {
             let pr = pending.pop_front().unwrap();
             let pool_slot = active.len(); // dense: next slot = current length
-            eprintln!("[serve] prefilling slot {pool_slot}, {} tokens", pr.token_ids.len());
+            eprintln!(
+                "[serve] prefilling slot {pool_slot}, {} tokens",
+                pr.token_ids.len()
+            );
             match lm.f788b(&dev, pool_slot, &pr.token_ids) {
                 Err(e) => {
                     eprintln!("[serve] prefill error: {e}");
@@ -113,12 +129,17 @@ fn main() -> Result<()> {
                         tokens_left: pr.max_new.saturating_sub(1),
                     };
                     if Some(next) == eos || slot_state.tokens_left == 0 {
-                        if Some(next) == eos { slot_state.generated.pop(); }
+                        if Some(next) == eos {
+                            slot_state.generated.pop();
+                        }
                         finish_slot(&tok, &pr.stream, &slot_state.generated)?;
                         lm.batch_kv.iter_mut().for_each(|bkv| bkv.f802(pool_slot));
                         // Slot was never pushed to active, so nothing to compact.
                     } else {
-                        active.push(InFlight { stream: pr.stream, slot: slot_state });
+                        active.push(InFlight {
+                            stream: pr.stream,
+                            slot: slot_state,
+                        });
                     }
                 }
             }
@@ -153,7 +174,9 @@ fn main() -> Result<()> {
                     for &i in completed.iter().rev() {
                         let toks = {
                             let mut t = active[i].slot.generated.clone();
-                            if Some(*t.last().unwrap()) == eos { t.pop(); }
+                            if Some(*t.last().unwrap()) == eos {
+                                t.pop();
+                            }
                             t
                         };
                         let _ = finish_slot(&tok, &active[i].stream, &toks);
@@ -162,7 +185,9 @@ fn main() -> Result<()> {
                         let last = active.len() - 1;
                         if i < last {
                             // Migrate last slot's KV into slot i, then shrink.
-                            lm.batch_kv.iter_mut().for_each(|bkv| bkv.f807(&dev, last, i));
+                            lm.batch_kv
+                                .iter_mut()
+                                .for_each(|bkv| bkv.f807(&dev, last, i));
                             lm.batch_kv.iter_mut().for_each(|bkv| bkv.f802(last));
                             active.swap_remove(i);
                             active[i].slot.slot = i;
@@ -191,7 +216,8 @@ fn greedy_sample(dev: &t500, logits: &any_gpu::t501, vocab_size: u32) -> Result<
 }
 
 fn argmax(row: &[f32]) -> u32 {
-    row.iter().enumerate()
+    row.iter()
+        .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
         .map(|(i, _)| i as u32)
         .unwrap_or(0)
@@ -210,7 +236,8 @@ fn write_err(stream: &TcpStream, msg: &str) -> Result<()> {
 }
 
 fn send_health(stream: &TcpStream, dev_name: &str, active: usize) {
-    let body = serde_json::json!({"status":"ok","device":dev_name,"active_slots":active}).to_string();
+    let body =
+        serde_json::json!({"status":"ok","device":dev_name,"active_slots":active}).to_string();
     let _ = write_response(stream, 200, "OK", &body);
 }
 
@@ -222,16 +249,20 @@ fn parse_request(stream: &TcpStream, tok: &t544) -> Result<Option<PendingReq>> {
     let parts: Vec<&str> = req_line.split_whitespace().collect();
     anyhow::ensure!(parts.len() >= 2, "bad request line");
     let method = parts[0];
-    let path   = parts[1];
+    let path = parts[1];
 
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let trimmed = line.trim();
-        if trimmed.is_empty() { break; }
+        if trimmed.is_empty() {
+            break;
+        }
         if trimmed.to_lowercase().starts_with("content-length:") {
-            content_length = trimmed.split(':').nth(1)
+            content_length = trimmed
+                .split(':')
+                .nth(1)
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
         }
@@ -243,12 +274,18 @@ fn parse_request(stream: &TcpStream, tok: &t544) -> Result<Option<PendingReq>> {
             let mut body = vec![0u8; content_length];
             reader.read_exact(&mut body)?;
             let req: serde_json::Value = serde_json::from_slice(&body)?;
-            let prompt  = req["prompt"].as_str().unwrap_or("").to_string();
+            let prompt = req["prompt"].as_str().unwrap_or("").to_string();
             let max_new = req["max_new_tokens"].as_u64().unwrap_or(128) as usize;
-            eprintln!("[serve] /generate prompt={:?} max_new={max_new}",
-                      &prompt[..prompt.len().min(60)]);
+            eprintln!(
+                "[serve] /generate prompt={:?} max_new={max_new}",
+                &prompt[..prompt.len().min(60)]
+            );
             let token_ids = tok.f776(&prompt, true)?;
-            Ok(Some(PendingReq { stream: stream.try_clone()?, token_ids, max_new }))
+            Ok(Some(PendingReq {
+                stream: stream.try_clone()?,
+                token_ids,
+                max_new,
+            }))
         }
         _ => anyhow::bail!("unknown endpoint: {method} {path}"),
     }

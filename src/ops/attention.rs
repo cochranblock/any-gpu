@@ -5,7 +5,7 @@
 // f623=scaled_dot_product_attention_causal, f624=apply_causal_mask, f625=rope.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 // --- Softmax (two-pass) ---
 
@@ -129,10 +129,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct t542 {
-    n_heads:  u32,
-    seq_len:  u32,
+    n_heads: u32,
+    seq_len: u32,
     head_dim: u32,
-    _pad:     u32,
+    _pad: u32,
 }
 
 /// t543 = RepeatKvParams (private).
@@ -140,9 +140,9 @@ struct t542 {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct t543 {
     n_kv_heads: u32,
-    n_rep:      u32,   // = n_heads / n_kv_heads
-    kv_seq:     u32,
-    head_dim:   u32,
+    n_rep: u32, // = n_heads / n_kv_heads
+    kv_seq: u32,
+    head_dim: u32,
 }
 
 // f627: out[bh*(seq*hd) + s*hd + d] = src[s*(n_heads*hd) + bh*hd + d]
@@ -324,11 +324,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct t541 {
     batch_heads: u32,
-    q_seq:       u32,
-    kv_seq:      u32,
-    head_dim:    u32,
-    scale:       f32,
-    _pad:        [u32; 3],
+    q_seq: u32,
+    kv_seq: u32,
+    head_dim: u32,
+    scale: f32,
+    _pad: [u32; 3],
 }
 
 // Private per-invocation accumulator — lives in VGPRs, not VRAM.
@@ -500,28 +500,28 @@ fn main() {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct t554 {
-    total_q_heads: u32,  // B * Nh
-    num_heads:     u32,  // Nh (per request)
-    num_kv_heads:  u32,  // Nkv (per request)
-    max_kv_seq:    u32,  // stride: positions in KV pool per (slot, head)
-    head_dim:      u32,  // Hd
-    slot_stride:   u32,  // Nkv * max_kv_seq * Hd (elements per slot in K/V buffer)
-    scale:         f32,  // 1/sqrt(Hd)
-    _pad:          u32,
+    total_q_heads: u32, // B * Nh
+    num_heads: u32,     // Nh (per request)
+    num_kv_heads: u32,  // Nkv (per request)
+    max_kv_seq: u32,    // stride: positions in KV pool per (slot, head)
+    head_dim: u32,      // Hd
+    slot_stride: u32,   // Nkv * max_kv_seq * Hd (elements per slot in K/V buffer)
+    scale: f32,         // 1/sqrt(Hd)
+    _pad: u32,
 }
 
 /// t555 = RopeBatchParams.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct t555 {
-    total_heads: u32,  // B * Nh (or B * Nkv for K)
-    num_heads:   u32,  // Nh (used to compute b = bh / num_heads)
-    head_dim:    u32,
-    _pad:        u32,
-    base:        f32,
-    _p1:         u32,
-    _p2:         u32,
-    _p3:         u32,
+    total_heads: u32, // B * Nh (or B * Nkv for K)
+    num_heads: u32,   // Nh (used to compute b = bh / num_heads)
+    head_dim: u32,
+    _pad: u32,
+    base: f32,
+    _p1: u32,
+    _p2: u32,
+    _p3: u32,
 }
 
 // Wave64 path: one 64-thread workgroup per query row (bq = b*Nh + h_q).
@@ -703,22 +703,40 @@ impl t500 {
     pub fn f620(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2) as usize);
 
-        let v0 = t514 { rows: p1, cols: p2, _pad: [0; 2] };
+        let v0 = t514 {
+            rows: p1,
+            cols: p2,
+            _pad: [0; 2],
+        };
 
         if self.s509 {
             // Fused path: one workgroup per row, subgroupMax/subgroupAdd for reductions.
             // Overflow: wg.x + wg.y * 65535 encodes row when p1 > 65535.
             let v1 = self.f503((p1 * p2) as usize);
-            let (vx, vy) = if p1 <= 65535 { (p1, 1) } else { (65535, p1.div_ceil(65535)) };
-            self.f543(SHADER_SOFTMAX_FUSED, Some("softmax_fused"), &v0, &[p0], &v1, (vx, vy, 1));
+            let (vx, vy) = if p1 <= 65535 {
+                (p1, 1)
+            } else {
+                (65535, p1.div_ceil(65535))
+            };
+            self.f543(
+                SHADER_SOFTMAX_FUSED,
+                Some("softmax_fused"),
+                &v0,
+                &[p0],
+                &v1,
+                (vx, vy, 1),
+            );
             return Ok(v1);
         }
 
         // Two-pass fallback: stats pass then normalize pass.
         let v1 = self.f503((p1 * 2) as usize);
         self.f543(
-            SHADER_SOFTMAX_STATS, Some("softmax_stats"),
-            &v0, &[p0], &v1,
+            SHADER_SOFTMAX_STATS,
+            Some("softmax_stats"),
+            &v0,
+            &[p0],
+            &v1,
             super::f540(p1),
         );
 
@@ -726,30 +744,48 @@ impl t500 {
         let v3 = self.f503(v2 as usize);
 
         let v4 = self.f506(&v0);
-        let v5 = self.s500.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("softmax_apply"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOFTMAX_APPLY.into()),
-        });
-        let v6 = self.s500.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("softmax_apply"),
-            layout: None,
-            module: &v5,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let v5 = self
+            .s500
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("softmax_apply"),
+                source: wgpu::ShaderSource::Wgsl(SHADER_SOFTMAX_APPLY.into()),
+            });
+        let v6 = self
+            .s500
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("softmax_apply"),
+                layout: None,
+                module: &v5,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let v7 = self.s500.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &v6.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: v4.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p0.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: v1.s505.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: v3.s505.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: v4.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: p0.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v1.s505.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: v3.s505.as_entire_binding(),
+                },
             ],
         });
         let (v8, v9, v10) = super::f540(v2);
-        let mut v11 = self.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut v11 = self
+            .s500
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut v12 = v11.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("softmax_apply"),
@@ -766,11 +802,7 @@ impl t500 {
 
     /// f621 = scaled_dot_product_attention. softmax(Q @ K^T / sqrt(d_k)) @ V.
     /// Q,K,V: [batch_heads, seq_len, d_k]. Returns [batch_heads, seq_len, d_k].
-    pub fn f621(
-        &self,
-        p0: &t501, p1: &t501, p2: &t501,
-        p3: u32, p4: u32, p5: u32,
-    ) -> Result<t501> {
+    pub fn f621(&self, p0: &t501, p1: &t501, p2: &t501, p3: u32, p4: u32, p5: u32) -> Result<t501> {
         // 1. K^T: [batch_heads, d_k, seq_len]
         let v0 = self.f641(p1, p3, p4, p5, 1)?;
 
@@ -791,12 +823,28 @@ impl t500 {
     /// f624 = apply_causal_mask. In-place sets `scores[bh, i, j] = -1e30` for j > i + (kv-q).
     /// `scores` shape: [batch_heads, q_seq_len, kv_seq_len]. Requires kv_seq_len >= q_seq_len.
     pub fn f624(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<()> {
-        ensure!(p3 >= p2, "apply_causal_mask: kv_seq_len ({}) must be >= q_seq_len ({})", p3, p2);
-        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "apply_causal_mask: size mismatch");
-        let v0 = t535 { batch_heads: p1, q_seq_len: p2, kv_seq_len: p3, _pad: 0 };
+        ensure!(
+            p3 >= p2,
+            "apply_causal_mask: kv_seq_len ({}) must be >= q_seq_len ({})",
+            p3,
+            p2
+        );
+        ensure!(
+            p0.s507 == (p1 * p2 * p3) as usize,
+            "apply_causal_mask: size mismatch"
+        );
+        let v0 = t535 {
+            batch_heads: p1,
+            q_seq_len: p2,
+            kv_seq_len: p3,
+            _pad: 0,
+        };
         self.f543(
-            SHADER_CAUSAL_MASK, Some("apply_causal_mask"),
-            &v0, &[], p0,
+            SHADER_CAUSAL_MASK,
+            Some("apply_causal_mask"),
+            &v0,
+            &[],
+            p0,
             super::f540(p1 * p2 * p3),
         );
         Ok(())
@@ -808,13 +856,32 @@ impl t500 {
     /// Returns: [batch_heads, q_seq_len, d_k].
     pub fn f623(
         &self,
-        p0: &t501, p1: &t501, p2: &t501,
-        p3: u32, p4: u32, p5: u32, p6: u32,
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
     ) -> Result<t501> {
-        ensure!(p5 >= p4, "causal SDPA: kv_seq_len ({}) must be >= q_seq_len ({})", p5, p4);
-        ensure!(p0.s507 == (p3 * p4 * p6) as usize, "causal SDPA: Q size mismatch");
-        ensure!(p1.s507 == (p3 * p5 * p6) as usize, "causal SDPA: K size mismatch");
-        ensure!(p2.s507 == (p3 * p5 * p6) as usize, "causal SDPA: V size mismatch");
+        ensure!(
+            p5 >= p4,
+            "causal SDPA: kv_seq_len ({}) must be >= q_seq_len ({})",
+            p5,
+            p4
+        );
+        ensure!(
+            p0.s507 == (p3 * p4 * p6) as usize,
+            "causal SDPA: Q size mismatch"
+        );
+        ensure!(
+            p1.s507 == (p3 * p5 * p6) as usize,
+            "causal SDPA: K size mismatch"
+        );
+        ensure!(
+            p2.s507 == (p3 * p5 * p6) as usize,
+            "causal SDPA: V size mismatch"
+        );
 
         // 1. K^T: [batch_heads, d_k, kv_seq_len]
         let v0 = self.f641(p1, p3, p5, p6, 1)?;
@@ -839,46 +906,75 @@ impl t500 {
     /// f625 = rope. Rotary position embeddings on a tensor [batch_heads, seq_len, head_dim].
     /// `head_dim` must be even. `start_pos` shifts absolute position for KV-cache decode.
     /// `base` is the rotation base (Llama/Mistral default: 10000.0).
-    pub fn f625(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32, p5: f32,
-    ) -> Result<t501> {
+    pub fn f625(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32, p5: f32) -> Result<t501> {
         ensure!(p3 % 2 == 0, "rope: head_dim ({}) must be even", p3);
-        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "rope: input size mismatch");
+        ensure!(
+            p0.s507 == (p1 * p2 * p3) as usize,
+            "rope: input size mismatch"
+        );
         ensure!(p5 > 0.0, "rope: base must be positive");
 
         let v0 = p1 * p2 * p3;
         let v1 = self.f503(v0 as usize);
         let v2 = t536 {
-            batch_heads: p1, seq_len: p2, head_dim: p3, start_pos: p4,
-            base: p5, _pad: [0; 3],
+            batch_heads: p1,
+            seq_len: p2,
+            head_dim: p3,
+            start_pos: p4,
+            base: p5,
+            _pad: [0; 3],
         };
-        self.f543(
-            SHADER_ROPE, Some("rope"),
-            &v2, &[p0], &v1,
-            super::f540(v0),
-        );
+        self.f543(SHADER_ROPE, Some("rope"), &v2, &[p0], &v1, super::f540(v0));
         Ok(v1)
     }
 
     /// f627 = split_heads. [seq, n_heads*head_dim] → [n_heads, seq, head_dim].
     /// Prepares Q/K/V output of linear projection for multi-head attention.
     pub fn f627(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<t501> {
-        ensure!(p0.s507 == (p2 * p1 * p3) as usize, "split_heads: size mismatch");
+        ensure!(
+            p0.s507 == (p2 * p1 * p3) as usize,
+            "split_heads: size mismatch"
+        );
         let v0 = self.f503(p0.s507);
-        let v1 = t542 { n_heads: p1, seq_len: p2, head_dim: p3, _pad: 0 };
-        self.f543(SHADER_SPLIT_HEADS, Some("split_heads"), &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        let v1 = t542 {
+            n_heads: p1,
+            seq_len: p2,
+            head_dim: p3,
+            _pad: 0,
+        };
+        self.f543(
+            SHADER_SPLIT_HEADS,
+            Some("split_heads"),
+            &v1,
+            &[p0],
+            &v0,
+            super::f540(p0.s507 as u32),
+        );
         Ok(v0)
     }
 
     /// f628 = merge_heads. [n_heads, seq, head_dim] → [seq, n_heads*head_dim].
     /// Collapses attention output back to the projection input shape.
     pub fn f628(&self, p0: &t501, p1: u32, p2: u32, p3: u32) -> Result<t501> {
-        ensure!(p0.s507 == (p1 * p2 * p3) as usize, "merge_heads: size mismatch");
+        ensure!(
+            p0.s507 == (p1 * p2 * p3) as usize,
+            "merge_heads: size mismatch"
+        );
         let v0 = self.f503(p0.s507);
-        let v1 = t542 { n_heads: p1, seq_len: p2, head_dim: p3, _pad: 0 };
-        self.f543(SHADER_MERGE_HEADS, Some("merge_heads"), &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        let v1 = t542 {
+            n_heads: p1,
+            seq_len: p2,
+            head_dim: p3,
+            _pad: 0,
+        };
+        self.f543(
+            SHADER_MERGE_HEADS,
+            Some("merge_heads"),
+            &v1,
+            &[p0],
+            &v0,
+            super::f540(p0.s507 as u32),
+        );
         Ok(v0)
     }
 
@@ -886,13 +982,33 @@ impl t500 {
     /// Expands GQA key/value heads to match the full query head count.
     /// When n_rep = 1 (MHA), this is a zero-copy clone.
     pub fn f629(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32) -> Result<t501> {
-        ensure!(p2 > 0 && p1 % p2 == 0, "repeat_kv: n_heads ({}) must be divisible by n_kv_heads ({})", p1, p2);
-        ensure!(p0.s507 == (p2 * p3 * p4) as usize, "repeat_kv: size mismatch");
+        ensure!(
+            p2 > 0 && p1 % p2 == 0,
+            "repeat_kv: n_heads ({}) must be divisible by n_kv_heads ({})",
+            p1,
+            p2
+        );
+        ensure!(
+            p0.s507 == (p2 * p3 * p4) as usize,
+            "repeat_kv: size mismatch"
+        );
         let v_rep = p1 / p2;
         let v_out = (p1 * p3 * p4) as usize;
         let v0 = self.f503(v_out);
-        let v1 = t543 { n_kv_heads: p2, n_rep: v_rep, kv_seq: p3, head_dim: p4 };
-        self.f543(SHADER_REPEAT_KV, Some("repeat_kv"), &v1, &[p0], &v0, super::f540((p1 * p3 * p4) as u32));
+        let v1 = t543 {
+            n_kv_heads: p2,
+            n_rep: v_rep,
+            kv_seq: p3,
+            head_dim: p4,
+        };
+        self.f543(
+            SHADER_REPEAT_KV,
+            Some("repeat_kv"),
+            &v1,
+            &[p0],
+            &v0,
+            super::f540((p1 * p3 * p4) as u32),
+        );
         Ok(v0)
     }
 
@@ -903,13 +1019,32 @@ impl t500 {
     /// Requires kv_seq >= q_seq (same as f623). Returns [batch_heads, q_seq, head_dim].
     pub fn f626(
         &self,
-        p0: &t501, p1: &t501, p2: &t501,
-        p3: u32, p4: u32, p5: u32, p6: u32,
+        p0: &t501,
+        p1: &t501,
+        p2: &t501,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
     ) -> Result<t501> {
-        ensure!(p5 >= p4, "fused SDPA: kv_seq ({}) must be >= q_seq ({})", p5, p4);
-        ensure!(p0.s507 == (p3 * p4 * p6) as usize, "fused SDPA: Q size mismatch");
-        ensure!(p1.s507 == (p3 * p5 * p6) as usize, "fused SDPA: K size mismatch");
-        ensure!(p2.s507 == (p3 * p5 * p6) as usize, "fused SDPA: V size mismatch");
+        ensure!(
+            p5 >= p4,
+            "fused SDPA: kv_seq ({}) must be >= q_seq ({})",
+            p5,
+            p4
+        );
+        ensure!(
+            p0.s507 == (p3 * p4 * p6) as usize,
+            "fused SDPA: Q size mismatch"
+        );
+        ensure!(
+            p1.s507 == (p3 * p5 * p6) as usize,
+            "fused SDPA: K size mismatch"
+        );
+        ensure!(
+            p2.s507 == (p3 * p5 * p6) as usize,
+            "fused SDPA: V size mismatch"
+        );
 
         let v0 = self.f503((p3 * p4 * p6) as usize); // output [bh, q_seq, head_dim]
         let v1 = t541 {
@@ -925,10 +1060,28 @@ impl t500 {
         // Falls back to single-thread-per-q-row for non-wave64 or odd head_dim.
         if self.s509 && p6 % 64 == 0 && p6 <= 256 {
             let total = p3 * p4;
-            let (vx, vy) = if total <= 65535 { (total, 1) } else { (65535, total.div_ceil(65535)) };
-            self.f543(SHADER_FUSED_SDPA_W64, Some("fused_sdpa_w64"), &v1, &[p0, p1, p2], &v0, (vx, vy, 1));
+            let (vx, vy) = if total <= 65535 {
+                (total, 1)
+            } else {
+                (65535, total.div_ceil(65535))
+            };
+            self.f543(
+                SHADER_FUSED_SDPA_W64,
+                Some("fused_sdpa_w64"),
+                &v1,
+                &[p0, p1, p2],
+                &v0,
+                (vx, vy, 1),
+            );
         } else {
-            self.f543(SHADER_FUSED_SDPA, Some("fused_sdpa"), &v1, &[p0, p1, p2], &v0, super::f540(p3 * p4));
+            self.f543(
+                SHADER_FUSED_SDPA,
+                Some("fused_sdpa"),
+                &v1,
+                &[p0, p1, p2],
+                &v0,
+                super::f540(p3 * p4),
+            );
         }
         Ok(v0)
     }
@@ -937,12 +1090,11 @@ impl t500 {
     pub fn f622(&self, p0: &t501, p1: &t501) -> Result<t501> {
         ensure!(p0.s507 == p1.s507, "mse: length mismatch");
         let v0 = self.f503(1);
-        let v1 = t513 { n: p0.s507 as u32, _pad: [0; 3] };
-        self.f543(
-            SHADER_MSE_SUM, Some("mse"),
-            &v1, &[p0, p1], &v0,
-            (1, 1, 1),
-        );
+        let v1 = t513 {
+            n: p0.s507 as u32,
+            _pad: [0; 3],
+        };
+        self.f543(SHADER_MSE_SUM, Some("mse"), &v1, &[p0, p1], &v0, (1, 1, 1));
         Ok(v0)
     }
 
@@ -954,37 +1106,71 @@ impl t500 {
     /// Returns: [active_batch * num_heads, head_dim]  (same shape as Q)
     pub fn f630(
         &self,
-        p0: &t501,  // Q
-        p1: &t501,  // K_all (batch KV pool K buffer)
-        p2: &t501,  // V_all (batch KV pool V buffer)
-        p3: &t501,  // kv_lens [active_batch] as f32
-        p4: u32,    // active_batch
-        p5: u32,    // num_heads (Nh, per request)
-        p6: u32,    // num_kv_heads (Nkv, per request)
-        p7: u32,    // max_kv_seq (pool stride per head row)
-        p8: u32,    // head_dim
+        p0: &t501, // Q
+        p1: &t501, // K_all (batch KV pool K buffer)
+        p2: &t501, // V_all (batch KV pool V buffer)
+        p3: &t501, // kv_lens [active_batch] as f32
+        p4: u32,   // active_batch
+        p5: u32,   // num_heads (Nh, per request)
+        p6: u32,   // num_kv_heads (Nkv, per request)
+        p7: u32,   // max_kv_seq (pool stride per head row)
+        p8: u32,   // head_dim
     ) -> Result<t501> {
         let total_q = p4 * p5;
-        ensure!(p0.s507 == (total_q * p8) as usize,
-            "f630: Q size mismatch: got {} want {}", p0.s507, total_q * p8);
-        ensure!(p5 % p6 == 0, "f630: num_heads ({}) not divisible by num_kv_heads ({})", p5, p6);
-        ensure!(p8 % 64 == 0 || p8 <= 128, "f630: head_dim ({}) must be multiple of 64 or ≤128", p8);
+        ensure!(
+            p0.s507 == (total_q * p8) as usize,
+            "f630: Q size mismatch: got {} want {}",
+            p0.s507,
+            total_q * p8
+        );
+        ensure!(
+            p5 % p6 == 0,
+            "f630: num_heads ({}) not divisible by num_kv_heads ({})",
+            p5,
+            p6
+        );
+        ensure!(
+            p8 % 64 == 0 || p8 <= 128,
+            "f630: head_dim ({}) must be multiple of 64 or ≤128",
+            p8
+        );
 
         let slot_stride = p6 * p7 * p8;
         let out = self.f503((total_q * p8) as usize);
         let params = t554 {
-            total_q_heads: total_q, num_heads: p5, num_kv_heads: p6,
-            max_kv_seq: p7, head_dim: p8, slot_stride,
-            scale: 1.0 / (p8 as f32).sqrt(), _pad: 0,
+            total_q_heads: total_q,
+            num_heads: p5,
+            num_kv_heads: p6,
+            max_kv_seq: p7,
+            head_dim: p8,
+            slot_stride,
+            scale: 1.0 / (p8 as f32).sqrt(),
+            _pad: 0,
         };
 
         if self.s509 && p8 % 64 == 0 && p8 <= 256 {
-            let (wx, wy) = if total_q <= 65535 { (total_q, 1) } else { (65535, total_q.div_ceil(65535)) };
-            self.f543(SHADER_FUSED_SDPA_BATCH_DECODE_W64, Some("sdpa_batch_decode_w64"),
-                &params, &[p0, p1, p2, p3], &out, (wx, wy, 1));
+            let (wx, wy) = if total_q <= 65535 {
+                (total_q, 1)
+            } else {
+                (65535, total_q.div_ceil(65535))
+            };
+            self.f543(
+                SHADER_FUSED_SDPA_BATCH_DECODE_W64,
+                Some("sdpa_batch_decode_w64"),
+                &params,
+                &[p0, p1, p2, p3],
+                &out,
+                (wx, wy, 1),
+            );
         } else {
-            self.f543(SHADER_FUSED_SDPA_BATCH_DECODE, Some("sdpa_batch_decode"),
-                &params, &[p0, p1, p2, p3], &out, super::f540(total_q));
+            self.f543(
+                SHADER_FUSED_SDPA_BATCH_DECODE,
+                Some("sdpa_batch_decode"),
+                &params,
+                &[p0, p1, p2, p3],
+                &out,
+                super::f540(total_q),
+            );
         }
         Ok(out)
     }
@@ -996,25 +1182,41 @@ impl t500 {
     /// Returns: [total_heads, head_dim]  (same shape).
     pub fn f631(
         &self,
-        p0: &t501,  // input [total_heads * head_dim]
-        p1: &t501,  // start_pos_buf [active_batch] as f32
-        p2: u32,    // total_heads = active_batch * num_heads
-        p3: u32,    // num_heads per batch element (to compute b = bh / p3)
-        p4: u32,    // head_dim
-        p5: f32,    // rope_base
+        p0: &t501, // input [total_heads * head_dim]
+        p1: &t501, // start_pos_buf [active_batch] as f32
+        p2: u32,   // total_heads = active_batch * num_heads
+        p3: u32,   // num_heads per batch element (to compute b = bh / p3)
+        p4: u32,   // head_dim
+        p5: f32,   // rope_base
     ) -> Result<t501> {
         ensure!(p4 % 2 == 0, "f631: head_dim ({}) must be even", p4);
-        ensure!(p0.s507 == (p2 * p4) as usize,
-            "f631: input size mismatch: got {} want {}", p0.s507, p2 * p4);
+        ensure!(
+            p0.s507 == (p2 * p4) as usize,
+            "f631: input size mismatch: got {} want {}",
+            p0.s507,
+            p2 * p4
+        );
         ensure!(p5 > 0.0, "f631: base must be positive");
 
         let out = self.f503((p2 * p4) as usize);
         let params = t555 {
-            total_heads: p2, num_heads: p3, head_dim: p4, _pad: 0,
-            base: p5, _p1: 0, _p2: 0, _p3: 0,
+            total_heads: p2,
+            num_heads: p3,
+            head_dim: p4,
+            _pad: 0,
+            base: p5,
+            _p1: 0,
+            _p2: 0,
+            _p3: 0,
         };
-        self.f543(SHADER_ROPE_BATCH, Some("rope_batch"),
-            &params, &[p0, p1], &out, super::f540(p2 * p4));
+        self.f543(
+            SHADER_ROPE_BATCH,
+            Some("rope_batch"),
+            &params,
+            &[p0, p1],
+            &out,
+            super::f540(p2 * p4),
+        );
         Ok(out)
     }
 }
@@ -1024,7 +1226,9 @@ mod tests {
     use super::*;
     use crate::ops::f544;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // CPU reference softmax
     fn cpu_softmax(input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
@@ -1047,7 +1251,9 @@ mod tests {
         for i in 0..seq {
             for j in 0..seq {
                 let mut s = 0.0;
-                for d in 0..dk { s += q[i * dk + d] * k[j * dk + d]; }
+                for d in 0..dk {
+                    s += q[i * dk + d] * k[j * dk + d];
+                }
                 scores[i * seq + j] = s * scale;
             }
         }
@@ -1056,7 +1262,9 @@ mod tests {
         for i in 0..seq {
             for d in 0..dk {
                 let mut s = 0.0;
-                for j in 0..seq { s += attn[i * seq + j] * v[j * dk + d]; }
+                for j in 0..seq {
+                    s += attn[i * seq + j] * v[j * dk + d];
+                }
                 out[i * dk + d] = s;
             }
         }
@@ -1067,10 +1275,12 @@ mod tests {
     fn f620_vs_cpu() {
         let v0: Vec<f32> = vec![1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 5.0, 5.0, 5.0];
         let v1 = cpu_softmax(&v0, 3, 3);
-        let v2 = dev().f504(&dev().f620(&dev().f502(&v0), 3, 3).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f620(&dev().f502(&v0), 3, 3).unwrap())
+            .unwrap();
         f544(&v2, &v1, 1e-4);
         for v3 in 0..3 {
-            let v4: f32 = v2[v3*3..(v3+1)*3].iter().sum();
+            let v4: f32 = v2[v3 * 3..(v3 + 1) * 3].iter().sum();
             assert!((v4 - 1.0).abs() < 1e-4, "row {v3} sum = {v4}");
         }
     }
@@ -1079,7 +1289,9 @@ mod tests {
     fn f620_large_values() {
         let v0 = vec![1000.0, 1001.0, 1002.0];
         let v1 = cpu_softmax(&v0, 1, 3);
-        let v2 = dev().f504(&dev().f620(&dev().f502(&v0), 1, 3).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f620(&dev().f502(&v0), 1, 3).unwrap())
+            .unwrap();
         f544(&v2, &v1, 1e-4);
         let v3: f32 = v2.iter().sum();
         assert!((v3 - 1.0).abs() < 1e-4, "sum = {v3}");
@@ -1087,7 +1299,9 @@ mod tests {
 
     #[test]
     fn f620_single_element() {
-        let v0 = dev().f504(&dev().f620(&dev().f502(&[42.0]), 1, 1).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f620(&dev().f502(&[42.0]), 1, 1).unwrap())
+            .unwrap();
         f544(&v0, &[1.0], 1e-5);
     }
 
@@ -1097,9 +1311,20 @@ mod tests {
         let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
         let v3 = cpu_attention(&v0, &v1, &v2, 3, 4);
-        let v4 = dev().f504(&dev().f621(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 3, 4
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f621(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        3,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-3);
     }
 
@@ -1109,9 +1334,20 @@ mod tests {
         let v1 = v0.clone();
         let v2 = vec![0.0, 10.0, 20.0, 30.0];
         let v3 = cpu_attention(&v0, &v1, &v2, 2, 2);
-        let v4 = dev().f504(&dev().f621(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 2, 2
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f621(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        2,
+                        2,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-3);
     }
 
@@ -1119,7 +1355,9 @@ mod tests {
     fn f620_known_uniform_input() {
         // Analytical: softmax over k equal values = uniform 1/k.
         // softmax([0,0,0]) = [1/3, 1/3, 1/3]. Independent of our cpu_softmax helper.
-        let v0 = dev().f504(&dev().f620(&dev().f502(&[0.0f32; 3]), 1, 3).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f620(&dev().f502(&[0.0f32; 3]), 1, 3).unwrap())
+            .unwrap();
         let v1 = 1.0_f32 / 3.0;
         f544(&v0, &[v1, v1, v1], 1e-6);
     }
@@ -1128,7 +1366,9 @@ mod tests {
     fn f620_known_binary_input() {
         // softmax([0, 1]) = [1/(1+e), e/(1+e)]. With e at f64 precision:
         //   1/(1+e) ≈ 0.26894142, e/(1+e) ≈ 0.73105858 (same numbers as sigmoid(1)/sigmoid(-1)).
-        let v0 = dev().f504(&dev().f620(&dev().f502(&[0.0f32, 1.0]), 1, 2).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f620(&dev().f502(&[0.0f32, 1.0]), 1, 2).unwrap())
+            .unwrap();
         f544(&v0, &[0.26894142, 0.73105858], 1e-5);
     }
 
@@ -1140,9 +1380,20 @@ mod tests {
         let v0 = vec![0.0f32; 4]; // [1 head, 2 seq, d_k=2]
         let v1 = v0.clone();
         let v2 = vec![1.0f32, 5.0, 3.0, 7.0];
-        let v3 = dev().f504(&dev().f621(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2), 1, 2, 2,
-        ).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(
+                &dev()
+                    .f621(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        2,
+                        2,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v3, &[2.0, 6.0, 2.0, 6.0], 1e-4);
     }
 
@@ -1150,13 +1401,26 @@ mod tests {
     fn f621_multi_batch() {
         // 3 batch_heads, seq=2, dk=2. Each head is independent.
         // Use zero Q/K → uniform attention → output row = mean(V rows).
-        let bh = 3u32; let seq = 2u32; let dk = 2u32;
+        let bh = 3u32;
+        let seq = 2u32;
+        let dk = 2u32;
         let q = vec![0.0f32; (bh * seq * dk) as usize];
         let k = q.clone();
         let v: Vec<f32> = (0..(bh * seq * dk) as usize).map(|i| i as f32).collect();
-        let got = dev().f504(&dev().f621(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v), bh, seq, dk,
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f621(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         // For each head h: V rows are [h*4, h*4+1, h*4+2, h*4+3].
         // Mean per col: col0 = (h*4 + h*4+2)/2, col1 = (h*4+1 + h*4+3)/2.
         for h in 0..bh as usize {
@@ -1207,7 +1471,13 @@ mod tests {
 
     #[test]
     fn f622_single_element() {
-        let v0 = dev().f504(&dev().f622(&dev().f502(&[5.0]), &dev().f502(&[3.0])).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(
+                &dev()
+                    .f622(&dev().f502(&[5.0]), &dev().f502(&[3.0]))
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v0, &[4.0], 1e-5);
     }
 
@@ -1230,9 +1500,15 @@ mod tests {
         // Row 0: j=0 keep, j=1 masked, j=2 masked
         // Row 1: j=0 keep, j=1 keep, j=2 masked
         // Row 2: j=0 keep, j=1 keep, j=2 keep
-        assert_eq!(v1[0], 0.0);     assert!(v1[1] < -1e29); assert!(v1[2] < -1e29);
-        assert_eq!(v1[3], 0.0);     assert_eq!(v1[4], 0.0); assert!(v1[5] < -1e29);
-        assert_eq!(v1[6], 0.0);     assert_eq!(v1[7], 0.0); assert_eq!(v1[8], 0.0);
+        assert_eq!(v1[0], 0.0);
+        assert!(v1[1] < -1e29);
+        assert!(v1[2] < -1e29);
+        assert_eq!(v1[3], 0.0);
+        assert_eq!(v1[4], 0.0);
+        assert!(v1[5] < -1e29);
+        assert_eq!(v1[6], 0.0);
+        assert_eq!(v1[7], 0.0);
+        assert_eq!(v1[8], 0.0);
     }
 
     #[test]
@@ -1253,8 +1529,14 @@ mod tests {
         let v0 = dev().f502(&[0.0f32; 8]); // 1 head, 2*4 = 8 scores
         dev().f624(&v0, 1, 2, 4).unwrap();
         let v1 = dev().f504(&v0).unwrap();
-        assert_eq!(v1[0], 0.0); assert_eq!(v1[1], 0.0); assert_eq!(v1[2], 0.0); assert!(v1[3] < -1e29);
-        assert_eq!(v1[4], 0.0); assert_eq!(v1[5], 0.0); assert_eq!(v1[6], 0.0); assert_eq!(v1[7], 0.0);
+        assert_eq!(v1[0], 0.0);
+        assert_eq!(v1[1], 0.0);
+        assert_eq!(v1[2], 0.0);
+        assert!(v1[3] < -1e29);
+        assert_eq!(v1[4], 0.0);
+        assert_eq!(v1[5], 0.0);
+        assert_eq!(v1[6], 0.0);
+        assert_eq!(v1[7], 0.0);
     }
 
     #[test]
@@ -1266,7 +1548,14 @@ mod tests {
     // --- f623 = causal SDPA ---
     // CPU reference: scores masked, then softmax + V product.
 
-    fn cpu_causal_attention(q: &[f32], k: &[f32], v: &[f32], q_seq: usize, kv_seq: usize, dk: usize) -> Vec<f32> {
+    fn cpu_causal_attention(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        q_seq: usize,
+        kv_seq: usize,
+        dk: usize,
+    ) -> Vec<f32> {
         let scale = 1.0 / (dk as f32).sqrt();
         let offset = kv_seq - q_seq;
         // scores: [q_seq, kv_seq]
@@ -1274,7 +1563,9 @@ mod tests {
         for i in 0..q_seq {
             for j in 0..kv_seq {
                 let mut s = 0.0;
-                for d in 0..dk { s += q[i * dk + d] * k[j * dk + d]; }
+                for d in 0..dk {
+                    s += q[i * dk + d] * k[j * dk + d];
+                }
                 scores[i * kv_seq + j] = s * scale;
                 if j > i + offset {
                     scores[i * kv_seq + j] = -1.0e30;
@@ -1296,7 +1587,9 @@ mod tests {
         for i in 0..q_seq {
             for d in 0..dk {
                 let mut s = 0.0;
-                for j in 0..kv_seq { s += attn[i * kv_seq + j] * v[j * dk + d]; }
+                for j in 0..kv_seq {
+                    s += attn[i * kv_seq + j] * v[j * dk + d];
+                }
                 out[i * dk + d] = s;
             }
         }
@@ -1310,10 +1603,21 @@ mod tests {
         let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
         let v3 = cpu_causal_attention(&v0, &v1, &v2, 3, 3, 4);
-        let v4 = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 3, 3, 4,
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        3,
+                        3,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-3);
     }
 
@@ -1328,10 +1632,21 @@ mod tests {
         let v2: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.7).collect(); // V [4, 4]
 
         // f623 with q_seq=1, kv_seq=4
-        let v3 = dev().f504(&dev().f623(
-            &dev().f502(&v0_one), &dev().f502(&v1), &dev().f502(&v2),
-            1, 1, 4, 4,
-        ).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0_one),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        1,
+                        4,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         // CPU reference: causal mask with q=1 kv=4 -> no mask
         let v4 = cpu_causal_attention(&v0_one, &v1, &v2, 1, 4, 4);
         f544(&v3, &v4, 1e-3);
@@ -1344,10 +1659,21 @@ mod tests {
         let v1: Vec<f32> = (0..20).map(|i| (i as f32) * 0.04 - 0.2).collect();
         let v2: Vec<f32> = (0..20).map(|i| (i as f32) * 0.11).collect();
         let v3 = cpu_causal_attention(&v0, &v1, &v2, 2, 5, 4);
-        let v4 = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 2, 5, 4,
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        2,
+                        5,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-3);
     }
 
@@ -1355,17 +1681,29 @@ mod tests {
     fn f623_first_row_only_sees_first_kv() {
         // Construct V where each kv position has a one-hot at a unique slot.
         // Row 0 of Q with causal mask sees only kv position 0, so output[0, :] = V[0, :].
-        let v_data: Vec<f32> = (0..16).map(|i| if i < 4 { 100.0 } else { (i as f32) - 4.0 }).collect();
+        let v_data: Vec<f32> = (0..16)
+            .map(|i| if i < 4 { 100.0 } else { (i as f32) - 4.0 })
+            .collect();
         // Q row 0: any vector; doesn't matter for first row's masked attention (only j=0 in distribution)
-        let q_data = vec![1.0f32, 0.5, -0.3, 0.7,
-                          0.0,    0.0, 0.0,  0.0,
-                          0.0,    0.0, 0.0,  0.0,
-                          0.0,    0.0, 0.0,  0.0];
+        let q_data = vec![
+            1.0f32, 0.5, -0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         let k_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
-        let v_out = dev().f504(&dev().f623(
-            &dev().f502(&q_data), &dev().f502(&k_data), &dev().f502(&v_data),
-            1, 4, 4, 4,
-        ).unwrap()).unwrap();
+        let v_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&q_data),
+                        &dev().f502(&k_data),
+                        &dev().f502(&v_data),
+                        1,
+                        4,
+                        4,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         // First row of output (positions [0..4]) must equal V[0, :] (since the mask leaves only j=0)
         f544(&v_out[..4], &v_data[..4], 1e-3);
     }
@@ -1377,9 +1715,9 @@ mod tests {
     fn f625_position_zero_is_identity() {
         // start_pos=0, seq_len=1 -> position 0 -> angle = 0 -> cos=1, sin=0 -> output = input
         let v0 = vec![1.0f32, 2.0, 3.0, 4.0]; // 1 head, 1 seq, head_dim=4
-        let v1 = dev().f504(&dev().f625(
-            &dev().f502(&v0), 1, 1, 4, 0, 10000.0,
-        ).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f625(&dev().f502(&v0), 1, 1, 4, 0, 10000.0).unwrap())
+            .unwrap();
         f544(&v1, &v0, 1e-5);
     }
 
@@ -1391,9 +1729,9 @@ mod tests {
         //   out[0] = 1*cos(1) - 0*sin(1) = cos(1) ≈ 0.5403
         //   out[1] = 1*sin(1) + 0*cos(1) = sin(1) ≈ 0.8415
         let v0 = vec![1.0f32, 0.0];
-        let v1 = dev().f504(&dev().f625(
-            &dev().f502(&v0), 1, 1, 2, 1, 10000.0,
-        ).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f625(&dev().f502(&v0), 1, 1, 2, 1, 10000.0).unwrap())
+            .unwrap();
         f544(&v1, &[0.54030231, 0.84147098], 1e-4);
     }
 
@@ -1401,17 +1739,19 @@ mod tests {
     fn f625_rotation_preserves_norm() {
         // RoPE rotations are orthogonal — input/output norms (per pair) must match.
         let v0: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 - 1.0).collect(); // 1 head, 4 seq, head_dim=8
-        let v1 = dev().f504(&dev().f625(
-            &dev().f502(&v0), 1, 4, 8, 0, 10000.0,
-        ).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f625(&dev().f502(&v0), 1, 4, 8, 0, 10000.0).unwrap())
+            .unwrap();
         // For each (seq, pair), the (x_a, x_b) norm must equal (out_a, out_b) norm.
         for s in 0..4usize {
             for pair in 0..4usize {
                 let base_i = s * 8 + pair * 2;
                 let in_norm_sq = v0[base_i].powi(2) + v0[base_i + 1].powi(2);
                 let out_norm_sq = v1[base_i].powi(2) + v1[base_i + 1].powi(2);
-                assert!((in_norm_sq - out_norm_sq).abs() < 1e-3,
-                    "norm mismatch at s={s} pair={pair}: in={in_norm_sq} out={out_norm_sq}");
+                assert!(
+                    (in_norm_sq - out_norm_sq).abs() < 1e-3,
+                    "norm mismatch at s={s} pair={pair}: in={in_norm_sq} out={out_norm_sq}"
+                );
             }
         }
     }
@@ -1421,23 +1761,34 @@ mod tests {
         // RoPE(input, start_pos=5, seq_len=1) should equal RoPE(input padded by 5 zeros, start_pos=0)[5]
         // Easier: rope at seq position s with start_pos=0 should equal rope at seq position 0 with start_pos=s.
         let v0 = vec![0.7f32, -0.3, 0.5, 0.2]; // [1, 1, 4]
-        let result_a = dev().f504(&dev().f625(
-            &dev().f502(&v0), 1, 1, 4, 5, 10000.0,
-        ).unwrap()).unwrap();
+        let result_a = dev()
+            .f504(&dev().f625(&dev().f502(&v0), 1, 1, 4, 5, 10000.0).unwrap())
+            .unwrap();
 
         // Build a 6-seq input where position 5 is v0, others zero; rope at start_pos=0; take row 5
         let mut padded = vec![0.0f32; 24];
         padded[20..24].copy_from_slice(&v0); // seq=5, head_dim=4
-        let result_b_full = dev().f504(&dev().f625(
-            &dev().f502(&padded), 1, 6, 4, 0, 10000.0,
-        ).unwrap()).unwrap();
+        let result_b_full = dev()
+            .f504(
+                &dev()
+                    .f625(&dev().f502(&padded), 1, 6, 4, 0, 10000.0)
+                    .unwrap(),
+            )
+            .unwrap();
         let result_b = &result_b_full[20..24];
         f544(&result_a, result_b, 1e-4);
     }
 
     // CPU reference RoPE: for each (bh, s, pair_idx): angle = (start_pos + s) / base^(2*pair_idx/head_dim).
     // Rotation: [x0*cos - x1*sin, x0*sin + x1*cos].
-    fn cpu_rope(input: &[f32], batch_heads: usize, seq_len: usize, head_dim: usize, start_pos: usize, base: f32) -> Vec<f32> {
+    fn cpu_rope(
+        input: &[f32],
+        batch_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+        start_pos: usize,
+        base: f32,
+    ) -> Vec<f32> {
         let mut out = vec![0.0f32; batch_heads * seq_len * head_dim];
         for bh in 0..batch_heads {
             for s in 0..seq_len {
@@ -1450,7 +1801,7 @@ mod tests {
                     let base_idx = bh * seq_len * head_dim + s * head_dim + pair_idx * 2;
                     let x0 = input[base_idx];
                     let x1 = input[base_idx + 1];
-                    out[base_idx]     = x0 * cos_a - x1 * sin_a;
+                    out[base_idx] = x0 * cos_a - x1 * sin_a;
                     out[base_idx + 1] = x0 * sin_a + x1 * cos_a;
                 }
             }
@@ -1462,19 +1813,39 @@ mod tests {
     fn f625_multi_position_vs_cpu() {
         // seq_len=4, head_dim=4, batch_heads=2, start_pos=0, theta=10000.
         // Exercises the full multi-position, multi-head RoPE path against a CPU reference.
-        let batch_heads = 2usize; let seq_len = 4usize; let head_dim = 4usize;
-        let start_pos = 0u32; let base = 10000.0f32;
+        let batch_heads = 2usize;
+        let seq_len = 4usize;
+        let head_dim = 4usize;
+        let start_pos = 0u32;
+        let base = 10000.0f32;
 
         let input: Vec<f32> = (0..batch_heads * seq_len * head_dim)
             .map(|i| (i as f32) * 0.1 - 1.5)
             .collect();
 
-        let cpu_out = cpu_rope(&input, batch_heads, seq_len, head_dim, start_pos as usize, base);
+        let cpu_out = cpu_rope(
+            &input,
+            batch_heads,
+            seq_len,
+            head_dim,
+            start_pos as usize,
+            base,
+        );
 
-        let gpu_out = dev().f504(&dev().f625(
-            &dev().f502(&input),
-            batch_heads as u32, seq_len as u32, head_dim as u32, start_pos, base,
-        ).unwrap()).unwrap();
+        let gpu_out = dev()
+            .f504(
+                &dev()
+                    .f625(
+                        &dev().f502(&input),
+                        batch_heads as u32,
+                        seq_len as u32,
+                        head_dim as u32,
+                        start_pos,
+                        base,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&gpu_out, &cpu_out, 1e-4);
     }
@@ -1484,7 +1855,9 @@ mod tests {
         // Verify that RoPE on tokens [0..4] with start_pos=0 produces the same rotations
         // as RoPE on tokens [2..4] with start_pos=2 (the subsequence must match).
         // This tests that the start_pos offset is correctly applied per-sequence-position.
-        let batch_heads = 1usize; let seq_len_full = 4usize; let head_dim = 4usize;
+        let batch_heads = 1usize;
+        let seq_len_full = 4usize;
+        let head_dim = 4usize;
         let base = 10000.0f32;
 
         let input_full: Vec<f32> = (0..batch_heads * seq_len_full * head_dim)
@@ -1492,20 +1865,41 @@ mod tests {
             .collect();
 
         // Full sequence: tokens [0..4], start_pos=0.
-        let full_out = dev().f504(&dev().f625(
-            &dev().f502(&input_full),
-            batch_heads as u32, seq_len_full as u32, head_dim as u32, 0, base,
-        ).unwrap()).unwrap();
+        let full_out = dev()
+            .f504(
+                &dev()
+                    .f625(
+                        &dev().f502(&input_full),
+                        batch_heads as u32,
+                        seq_len_full as u32,
+                        head_dim as u32,
+                        0,
+                        base,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         // Subsequence: tokens [2..4] extracted from the same input, start_pos=2.
         let sub_seq_len = 2usize;
         let sub_start = sub_seq_len * head_dim; // offset of seq position 2 in the flat input
-        let input_sub: Vec<f32> = input_full[sub_start..sub_start + sub_seq_len * head_dim].to_vec();
+        let input_sub: Vec<f32> =
+            input_full[sub_start..sub_start + sub_seq_len * head_dim].to_vec();
 
-        let sub_out = dev().f504(&dev().f625(
-            &dev().f502(&input_sub),
-            batch_heads as u32, sub_seq_len as u32, head_dim as u32, 2, base,
-        ).unwrap()).unwrap();
+        let sub_out = dev()
+            .f504(
+                &dev()
+                    .f625(
+                        &dev().f502(&input_sub),
+                        batch_heads as u32,
+                        sub_seq_len as u32,
+                        head_dim as u32,
+                        2,
+                        base,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         // The last two sequence positions from the full run must equal the subsequence output.
         let full_tail = &full_out[sub_start..sub_start + sub_seq_len * head_dim];
@@ -1532,14 +1926,36 @@ mod tests {
         let v0: Vec<f32> = (0..12).map(|i| (i as f32) * 0.1 - 0.3).collect();
         let v1: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let v2: Vec<f32> = (0..12).map(|i| (i as f32) * 0.2 - 0.5).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 3, 3, 4,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 3, 3, 4,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        3,
+                        3,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        3,
+                        3,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
@@ -1549,46 +1965,105 @@ mod tests {
         let v0 = vec![0.1f32, -0.2, 0.3, -0.4];
         let v1: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let v2: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.7).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 1, 4, 4,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 1, 4, 4,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        1,
+                        4,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        1,
+                        4,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
     // f626: first output row must attend only to V[0] (causal mask eliminates all j>0).
     #[test]
     fn f626_first_row_is_v0() {
-        let v_data: Vec<f32> = (0..16).map(|i| if i < 4 { 100.0 } else { i as f32 }).collect();
+        let v_data: Vec<f32> = (0..16)
+            .map(|i| if i < 4 { 100.0 } else { i as f32 })
+            .collect();
         let q_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
         let k_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&q_data), &dev().f502(&k_data), &dev().f502(&v_data),
-            1, 4, 4, 4,
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&q_data),
+                        &dev().f502(&k_data),
+                        &dev().f502(&v_data),
+                        1,
+                        4,
+                        4,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got[..4], &v_data[..4], 1e-3);
     }
 
     // f626: multiple heads — each head must produce the same result as f623.
     #[test]
     fn f626_multi_head_matches_f623() {
-        let bh = 2u32; let seq = 3u32; let dk = 4u32;
+        let bh = 2u32;
+        let seq = 3u32;
+        let dk = 4u32;
         let n = (bh * seq * dk) as usize;
         let v0: Vec<f32> = (0..n).map(|i| (i as f32) * 0.07 - 0.5).collect();
         let v1: Vec<f32> = (0..n).map(|i| (i as f32) * 0.03 + 0.2).collect();
         let v2: Vec<f32> = (0..n).map(|i| (i as f32) * 0.11 - 0.3).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
@@ -1598,14 +2073,36 @@ mod tests {
         let v0: Vec<f32> = (0..8).map(|i| (i as f32) * 0.07).collect();
         let v1: Vec<f32> = (0..20).map(|i| (i as f32) * 0.04 - 0.2).collect();
         let v2: Vec<f32> = (0..20).map(|i| (i as f32) * 0.11).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 2, 5, 4,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&v0), &dev().f502(&v1), &dev().f502(&v2),
-            1, 2, 5, 4,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        2,
+                        5,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        &dev().f502(&v2),
+                        1,
+                        2,
+                        5,
+                        4,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
@@ -1619,57 +2116,135 @@ mod tests {
     // f626 wave64 path: head_dim=64, prefill — exercises dpl=1, single-element-per-lane.
     #[test]
     fn f626_w64_hd64_matches_f623() {
-        let bh = 2u32; let seq = 4u32; let dk = 64u32;
+        let bh = 2u32;
+        let seq = 4u32;
+        let dk = 64u32;
         let n = (bh * seq * dk) as usize;
         let nkv = (bh * seq * dk) as usize;
         let q: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01 - 0.5).collect();
         let k: Vec<f32> = (0..nkv).map(|i| (i as f32) * 0.007 + 0.1).collect();
         let v: Vec<f32> = (0..nkv).map(|i| (i as f32) * 0.013 - 0.3).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
     // f626 wave64 path: head_dim=128, decode (q_seq=1, kv_seq=16).
     #[test]
     fn f626_w64_hd128_decode_matches_f623() {
-        let bh = 4u32; let kv = 16u32; let dk = 128u32;
-        let q: Vec<f32> = (0..(bh * 1 * dk) as usize).map(|i| (i as f32) * 0.005 - 0.3).collect();
-        let k: Vec<f32> = (0..(bh * kv * dk) as usize).map(|i| (i as f32) * 0.003 + 0.1).collect();
-        let v: Vec<f32> = (0..(bh * kv * dk) as usize).map(|i| (i as f32) * 0.007 - 0.2).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, 1, kv, dk,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, 1, kv, dk,
-        ).unwrap()).unwrap();
+        let bh = 4u32;
+        let kv = 16u32;
+        let dk = 128u32;
+        let q: Vec<f32> = (0..(bh * 1 * dk) as usize)
+            .map(|i| (i as f32) * 0.005 - 0.3)
+            .collect();
+        let k: Vec<f32> = (0..(bh * kv * dk) as usize)
+            .map(|i| (i as f32) * 0.003 + 0.1)
+            .collect();
+        let v: Vec<f32> = (0..(bh * kv * dk) as usize)
+            .map(|i| (i as f32) * 0.007 - 0.2)
+            .collect();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        1,
+                        kv,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        1,
+                        kv,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
     // f626 wave64 path: head_dim=128, large prefill — 32 heads, 64 queries, 64 KV.
     #[test]
     fn f626_w64_hd128_prefill_matches_f623() {
-        let bh = 32u32; let seq = 64u32; let dk = 128u32;
+        let bh = 32u32;
+        let seq = 64u32;
+        let dk = 128u32;
         let n = (bh * seq * dk) as usize;
         let q: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 0.5).collect();
         let k: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0008 + 0.05).collect();
         let v: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0012 - 0.1).collect();
-        let ref_out = dev().f504(&dev().f623(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
-        let got = dev().f504(&dev().f626(
-            &dev().f502(&q), &dev().f502(&k), &dev().f502(&v),
-            bh, seq, seq, dk,
-        ).unwrap()).unwrap();
+        let ref_out = dev()
+            .f504(
+                &dev()
+                    .f623(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f626(
+                        &dev().f502(&q),
+                        &dev().f502(&k),
+                        &dev().f502(&v),
+                        bh,
+                        seq,
+                        seq,
+                        dk,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_out, 1e-3);
     }
 
@@ -1678,7 +2253,9 @@ mod tests {
     // split_heads then merge_heads must be the identity.
     #[test]
     fn f627_f628_roundtrip() {
-        let n_heads = 2u32; let seq = 3u32; let hd = 4u32;
+        let n_heads = 2u32;
+        let seq = 3u32;
+        let hd = 4u32;
         let v0: Vec<f32> = (0..(seq * n_heads * hd)).map(|i| i as f32).collect(); // [seq, n*hd]
         let split = dev().f627(&dev().f502(&v0), n_heads, seq, hd).unwrap();
         let merged = dev().f628(&split, n_heads, seq, hd).unwrap();
@@ -1694,14 +2271,14 @@ mod tests {
         // split output layout [n_heads, seq, head_dim]:
         //   head 0: [input[0,0..3], input[1,0..3]] = [[0,1,2],[10,11,12]]
         //   head 1: [input[0,3..6], input[1,3..6]] = [[3,4,5],[13,14,15]]
-        let v0 = vec![0.0f32,1.,2.,3.,4.,5., 10.,11.,12.,13.,14.,15.];
+        let v0 = vec![0.0f32, 1., 2., 3., 4., 5., 10., 11., 12., 13., 14., 15.];
         let split = dev().f627(&dev().f502(&v0), 2, 2, 3).unwrap();
         let got = dev().f504(&split).unwrap();
         // [head0_seq0, head0_seq1, head1_seq0, head1_seq1] each of len 3
-        assert_eq!(got[0..3], [0.0,1.,2.]);     // head 0, seq 0
-        assert_eq!(got[3..6], [10.,11.,12.]);    // head 0, seq 1
-        assert_eq!(got[6..9], [3.,4.,5.]);       // head 1, seq 0
-        assert_eq!(got[9..12], [13.,14.,15.]);   // head 1, seq 1
+        assert_eq!(got[0..3], [0.0, 1., 2.]); // head 0, seq 0
+        assert_eq!(got[3..6], [10., 11., 12.]); // head 0, seq 1
+        assert_eq!(got[6..9], [3., 4., 5.]); // head 1, seq 0
+        assert_eq!(got[9..12], [13., 14., 15.]); // head 1, seq 1
     }
 
     // --- f628 = merge_heads dedicated tests ---
@@ -1711,10 +2288,12 @@ mod tests {
         // Inverse of f627_known_index: input is [n_heads, seq, head_dim], output is [seq, n*hd].
         // n_heads=2, seq=2, head_dim=3.
         // head 0: seq0=[0,1,2], seq1=[10,11,12]. head 1: seq0=[3,4,5], seq1=[13,14,15].
-        let v0 = vec![0.0f32,1.,2., 10.,11.,12., 3.,4.,5., 13.,14.,15.]; // [2,2,3]
-        let got = dev().f504(&dev().f628(&dev().f502(&v0), 2, 2, 3).unwrap()).unwrap();
+        let v0 = vec![0.0f32, 1., 2., 10., 11., 12., 3., 4., 5., 13., 14., 15.]; // [2,2,3]
+        let got = dev()
+            .f504(&dev().f628(&dev().f502(&v0), 2, 2, 3).unwrap())
+            .unwrap();
         // Output [seq, n*hd] = [2, 6]: row0=[0,1,2,3,4,5], row1=[10,11,12,13,14,15]
-        assert_eq!(got[0..6],  [0.0, 1., 2., 3., 4., 5.]);
+        assert_eq!(got[0..6], [0.0, 1., 2., 3., 4., 5.]);
         assert_eq!(got[6..12], [10., 11., 12., 13., 14., 15.]);
     }
 
@@ -1753,27 +2332,54 @@ mod tests {
         // Two batch elements (B=2), num_heads=2, head_dim=4.
         // Element 0 start_pos=3, element 1 start_pos=7.
         // Compare f631 output to running f625 twice with respective start_pos.
-        let nh = 2u32; let hd = 4u32; let b = 2u32; let base = 10000.0f32;
+        let nh = 2u32;
+        let hd = 4u32;
+        let b = 2u32;
+        let base = 10000.0f32;
         let input: Vec<f32> = (0..(b * nh * hd) as usize)
             .map(|i| (i as f32) * 0.13 - 1.0)
             .collect();
         let start_pos_buf = dev().f502(&[3.0f32, 7.0]);
 
-        let batch_out = dev().f504(&dev().f631(
-            &dev().f502(&input), &start_pos_buf, b * nh, nh, hd, base,
-        ).unwrap()).unwrap();
+        let batch_out = dev()
+            .f504(
+                &dev()
+                    .f631(&dev().f502(&input), &start_pos_buf, b * nh, nh, hd, base)
+                    .unwrap(),
+            )
+            .unwrap();
 
         // Serial reference: run f625 for each batch element's heads separately.
         // Batch element 0: heads 0..nh → input[0..nh*hd], start_pos=3
-        let serial_0 = dev().f504(&dev().f625(
-            &dev().f502(&input[..(nh * hd) as usize]),
-            nh, 1, hd, 3, base,
-        ).unwrap()).unwrap();
+        let serial_0 = dev()
+            .f504(
+                &dev()
+                    .f625(
+                        &dev().f502(&input[..(nh * hd) as usize]),
+                        nh,
+                        1,
+                        hd,
+                        3,
+                        base,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         // Batch element 1: heads nh..2nh → input[nh*hd..2nh*hd], start_pos=7
-        let serial_1 = dev().f504(&dev().f625(
-            &dev().f502(&input[(nh * hd) as usize..]),
-            nh, 1, hd, 7, base,
-        ).unwrap()).unwrap();
+        let serial_1 = dev()
+            .f504(
+                &dev()
+                    .f625(
+                        &dev().f502(&input[(nh * hd) as usize..]),
+                        nh,
+                        1,
+                        hd,
+                        7,
+                        base,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         let (lo, hi) = batch_out.split_at((nh * hd) as usize);
         f544(lo, &serial_0, 1e-4);
@@ -1783,10 +2389,20 @@ mod tests {
     #[test]
     fn f631_position_zero_is_identity() {
         // start_pos=0 for all → RoPE at position 0 is identity.
-        let nh = 2u32; let hd = 4u32; let b = 2u32;
-        let input: Vec<f32> = (0..(b * nh * hd) as usize).map(|i| i as f32 * 0.1).collect();
+        let nh = 2u32;
+        let hd = 4u32;
+        let b = 2u32;
+        let input: Vec<f32> = (0..(b * nh * hd) as usize)
+            .map(|i| i as f32 * 0.1)
+            .collect();
         let sp = dev().f502(&[0.0f32, 0.0]);
-        let out = dev().f504(&dev().f631(&dev().f502(&input), &sp, b*nh, nh, hd, 10000.0).unwrap()).unwrap();
+        let out = dev()
+            .f504(
+                &dev()
+                    .f631(&dev().f502(&input), &sp, b * nh, nh, hd, 10000.0)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&out, &input, 1e-5);
     }
 
@@ -1794,9 +2410,15 @@ mod tests {
 
     // CPU reference for batch decode SDPA: for each (b, h_q), full attention over kv_len positions.
     fn cpu_batch_decode_sdpa(
-        q: &[f32], k_all: &[f32], v_all: &[f32], kv_lens: &[u32],
-        active_batch: usize, num_heads: usize, num_kv_heads: usize,
-        max_kv_seq: usize, head_dim: usize,
+        q: &[f32],
+        k_all: &[f32],
+        v_all: &[f32],
+        kv_lens: &[u32],
+        active_batch: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        max_kv_seq: usize,
+        head_dim: usize,
     ) -> Vec<f32> {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let n_rep = num_heads / num_kv_heads;
@@ -1808,19 +2430,26 @@ mod tests {
                 let h_kv = h_q / n_rep;
                 let q_base = (b * num_heads + h_q) * head_dim;
                 let kv_base = b * slot_stride + h_kv * max_kv_seq * head_dim;
-                let mut scores: Vec<f32> = (0..kv_len).map(|j| {
-                    let k_row = kv_base + j * head_dim;
-                    (0..head_dim).map(|d| q[q_base + d] * k_all[k_row + d]).sum::<f32>() * scale
-                }).collect();
+                let mut scores: Vec<f32> = (0..kv_len)
+                    .map(|j| {
+                        let k_row = kv_base + j * head_dim;
+                        (0..head_dim)
+                            .map(|d| q[q_base + d] * k_all[k_row + d])
+                            .sum::<f32>()
+                            * scale
+                    })
+                    .collect();
                 let mx = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let sum: f32 = scores.iter().map(|&s| (s - mx).exp()).sum();
                 let attn: Vec<f32> = scores.iter().map(|&s| (s - mx).exp() / sum).collect();
                 let out_base = (b * num_heads + h_q) * head_dim;
                 for d in 0..head_dim {
-                    out[out_base + d] = (0..kv_len).map(|j| {
-                        let v_row = kv_base + j * head_dim;
-                        attn[j] * v_all[v_row + d]
-                    }).sum();
+                    out[out_base + d] = (0..kv_len)
+                        .map(|j| {
+                            let v_row = kv_base + j * head_dim;
+                            attn[j] * v_all[v_row + d]
+                        })
+                        .sum();
                 }
             }
         }
@@ -1834,18 +2463,34 @@ mod tests {
         let (b, nh, nkv, mkv, hd) = (2usize, 2usize, 2usize, 8usize, 64usize);
         let total_q = b * nh;
         let slot_stride = nkv * mkv * hd;
-        let q: Vec<f32>     = (0..total_q * hd).map(|i| (i as f32) * 0.01 - 0.5).collect();
-        let k_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.005 - 0.3).collect();
-        let v_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.007 + 0.1).collect();
+        let q: Vec<f32> = (0..total_q * hd).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let k_all: Vec<f32> = (0..b * slot_stride)
+            .map(|i| (i as f32) * 0.005 - 0.3)
+            .collect();
+        let v_all: Vec<f32> = (0..b * slot_stride)
+            .map(|i| (i as f32) * 0.007 + 0.1)
+            .collect();
         let kv_lens_cpu = vec![3u32, 5u32];
         let kv_lens_f32 = vec![3.0f32, 5.0];
 
         let cpu_out = cpu_batch_decode_sdpa(&q, &k_all, &v_all, &kv_lens_cpu, b, nh, nkv, mkv, hd);
-        let gpu_out = dev().f504(&dev().f630(
-            &dev().f502(&q), &dev().f502(&k_all), &dev().f502(&v_all),
-            &dev().f502(&kv_lens_f32),
-            b as u32, nh as u32, nkv as u32, mkv as u32, hd as u32,
-        ).unwrap()).unwrap();
+        let gpu_out = dev()
+            .f504(
+                &dev()
+                    .f630(
+                        &dev().f502(&q),
+                        &dev().f502(&k_all),
+                        &dev().f502(&v_all),
+                        &dev().f502(&kv_lens_f32),
+                        b as u32,
+                        nh as u32,
+                        nkv as u32,
+                        mkv as u32,
+                        hd as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&gpu_out, &cpu_out, 1e-2);
     }
@@ -1857,18 +2502,34 @@ mod tests {
         let (b, nh, nkv, mkv, hd) = (2usize, 4usize, 2usize, 6usize, 64usize);
         let total_q = b * nh;
         let slot_stride = nkv * mkv * hd;
-        let q:     Vec<f32> = (0..total_q * hd).map(|i| (i as f32) * 0.02 - 1.0).collect();
-        let k_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.01 - 0.4).collect();
-        let v_all: Vec<f32> = (0..b * slot_stride).map(|i| (i as f32) * 0.015 + 0.2).collect();
+        let q: Vec<f32> = (0..total_q * hd).map(|i| (i as f32) * 0.02 - 1.0).collect();
+        let k_all: Vec<f32> = (0..b * slot_stride)
+            .map(|i| (i as f32) * 0.01 - 0.4)
+            .collect();
+        let v_all: Vec<f32> = (0..b * slot_stride)
+            .map(|i| (i as f32) * 0.015 + 0.2)
+            .collect();
         let kv_lens_cpu = vec![4u32, 2u32];
         let kv_lens_f32 = vec![4.0f32, 2.0];
 
         let cpu_out = cpu_batch_decode_sdpa(&q, &k_all, &v_all, &kv_lens_cpu, b, nh, nkv, mkv, hd);
-        let gpu_out = dev().f504(&dev().f630(
-            &dev().f502(&q), &dev().f502(&k_all), &dev().f502(&v_all),
-            &dev().f502(&kv_lens_f32),
-            b as u32, nh as u32, nkv as u32, mkv as u32, hd as u32,
-        ).unwrap()).unwrap();
+        let gpu_out = dev()
+            .f504(
+                &dev()
+                    .f630(
+                        &dev().f502(&q),
+                        &dev().f502(&k_all),
+                        &dev().f502(&v_all),
+                        &dev().f502(&kv_lens_f32),
+                        b as u32,
+                        nh as u32,
+                        nkv as u32,
+                        mkv as u32,
+                        hd as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&gpu_out, &cpu_out, 1e-2);
     }

@@ -5,7 +5,7 @@
 // f644=sum_inner, f645=add_per_col, f646=sum_rows.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 // --- Concat ---
 
@@ -225,19 +225,23 @@ impl t500 {
     /// f640 = concat. Two buffers along a given axis.
     /// `p2` = product of dims before concat axis. `p3` = a's size along concat axis * product of dims after.
     /// `p4` = same for b.
-    pub fn f640(
-        &self,
-        p0: &t501, p1: &t501,
-        p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
+    pub fn f640(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
         ensure!(p0.s507 == (p2 * p3) as usize);
         ensure!(p1.s507 == (p2 * p4) as usize);
         let v0 = p2 * (p3 + p4);
         let v1 = self.f503(v0 as usize);
-        let v2 = t515 { n: v0, outer: p2, a_inner: p3, b_inner: p4 };
+        let v2 = t515 {
+            n: v0,
+            outer: p2,
+            a_inner: p3,
+            b_inner: p4,
+        };
         self.f543(
-            SHADER_CONCAT, Some("concat"),
-            &v2, &[p0, p1], &v1,
+            SHADER_CONCAT,
+            Some("concat"),
+            &v2,
+            &[p0, p1],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
@@ -245,21 +249,24 @@ impl t500 {
 
     /// f641 = transpose. Swap two dimensions of a tensor.
     /// Shape is [..., d0, d1, ...inner_dims]. `p1` = outer_size, `p4` = inner.
-    pub fn f641(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
+    pub fn f641(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32) -> Result<t501> {
         let v0 = p1 * p2 * p3 * p4;
         ensure!(p0.s507 == v0 as usize);
         let v1 = self.f503(v0 as usize);
         let v2 = t521 {
-            n: v0, d0: p2, d1: p3, inner: p4,
-            outer_stride: p2 * p3 * p4, _pad: [0; 3],
+            n: v0,
+            d0: p2,
+            d1: p3,
+            inner: p4,
+            outer_stride: p2 * p3 * p4,
+            _pad: [0; 3],
         };
         self.f543(
-            SHADER_TRANSPOSE, Some("transpose"),
-            &v2, &[p0], &v1,
+            SHADER_TRANSPOSE,
+            Some("transpose"),
+            &v2,
+            &[p0],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
@@ -267,93 +274,111 @@ impl t500 {
 
     /// f643 = slice_per_block. Extract a contiguous slice from each outer block.
     /// Used for concat backward.
-    pub(crate) fn f643(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
+    pub(crate) fn f643(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p4) as usize);
         ensure!(p3 + p2 <= p4);
         let v0 = p1 * p2;
         let v1 = self.f503(v0 as usize);
         let v2 = t516 {
-            n: v0, outer: p1, slice_size: p2, slice_offset: p3, combined: p4, _pad: [0; 3],
+            n: v0,
+            outer: p1,
+            slice_size: p2,
+            slice_offset: p3,
+            combined: p4,
+            _pad: [0; 3],
         };
         self.f543(
-            SHADER_SLICE, Some("slice"),
-            &v2, &[p0], &v1,
+            SHADER_SLICE,
+            Some("slice"),
+            &v2,
+            &[p0],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
     }
 
     /// f642 = add_broadcast. out[outer, inner] = a[outer, inner] + b[outer].
-    pub fn f642(
-        &self,
-        p0: &t501, p1: &t501,
-        p2: u32, p3: u32,
-    ) -> Result<t501> {
+    pub fn f642(&self, p0: &t501, p1: &t501, p2: u32, p3: u32) -> Result<t501> {
         ensure!(p0.s507 == (p2 * p3) as usize);
         ensure!(p1.s507 == p2 as usize);
         let v0 = p2 * p3;
         let v1 = self.f503(v0 as usize);
-        let v2 = t517 { n: v0, outer: p2, inner: p3, _pad: 0 };
+        let v2 = t517 {
+            n: v0,
+            outer: p2,
+            inner: p3,
+            _pad: 0,
+        };
         self.f543(
-            SHADER_BROADCAST_ADD, Some("bcast_add"),
-            &v2, &[p0, p1], &v1,
+            SHADER_BROADCAST_ADD,
+            Some("bcast_add"),
+            &v2,
+            &[p0, p1],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
     }
 
     /// f644 = sum_inner. out[o] = sum_i(src[o, i]).
-    pub(crate) fn f644(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32,
-    ) -> Result<t501> {
+    pub(crate) fn f644(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2) as usize);
         let v0 = self.f503(p1 as usize);
-        let v1 = t518 { outer: p1, inner: p2, _pad: [0; 2] };
+        let v1 = t518 {
+            outer: p1,
+            inner: p2,
+            _pad: [0; 2],
+        };
         self.f543(
-            SHADER_SUM_INNER, Some("sum_inner"),
-            &v1, &[p0], &v0,
+            SHADER_SUM_INNER,
+            Some("sum_inner"),
+            &v1,
+            &[p0],
+            &v0,
             super::f540(p1),
         );
         Ok(v0)
     }
 
     /// f645 = add_per_col. out[rows, cols] = a[rows, cols] + b[cols]. Linear bias.
-    pub fn f645(
-        &self,
-        p0: &t501, p1: &t501,
-        p2: u32, p3: u32,
-    ) -> Result<t501> {
+    pub fn f645(&self, p0: &t501, p1: &t501, p2: u32, p3: u32) -> Result<t501> {
         ensure!(p0.s507 == (p2 * p3) as usize);
         ensure!(p1.s507 == p3 as usize);
         let v0 = p2 * p3;
         let v1 = self.f503(v0 as usize);
-        let v2 = t519 { n: v0, rows: p2, cols: p3, _pad: 0 };
+        let v2 = t519 {
+            n: v0,
+            rows: p2,
+            cols: p3,
+            _pad: 0,
+        };
         self.f543(
-            SHADER_ADD_PER_COL, Some("add_per_col"),
-            &v2, &[p0, p1], &v1,
+            SHADER_ADD_PER_COL,
+            Some("add_per_col"),
+            &v2,
+            &[p0, p1],
+            &v1,
             super::f540(v0),
         );
         Ok(v1)
     }
 
     /// f646 = sum_rows. out[c] = sum_r(src[r*cols + c]).
-    pub(crate) fn f646(
-        &self,
-        p0: &t501,
-        p1: u32, p2: u32,
-    ) -> Result<t501> {
+    pub(crate) fn f646(&self, p0: &t501, p1: u32, p2: u32) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2) as usize);
         let v0 = self.f503(p2 as usize);
-        let v1 = t520 { rows: p1, cols: p2, _pad: [0; 2] };
+        let v1 = t520 {
+            rows: p1,
+            cols: p2,
+            _pad: [0; 2],
+        };
         self.f543(
-            SHADER_SUM_ROWS, Some("sum_rows"),
-            &v1, &[p0], &v0,
+            SHADER_SUM_ROWS,
+            Some("sum_rows"),
+            &v1,
+            &[p0],
+            &v0,
             super::f540(p2),
         );
         Ok(v0)
@@ -363,11 +388,25 @@ impl t500 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f640_flat() {
-        let v0 = dev().f504(&dev().f640(&dev().f502(&[1.0, 2.0, 3.0]), &dev().f502(&[4.0, 5.0, 6.0]), 1, 3, 3).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(
+                &dev()
+                    .f640(
+                        &dev().f502(&[1.0, 2.0, 3.0]),
+                        &dev().f502(&[4.0, 5.0, 6.0]),
+                        1,
+                        3,
+                        3,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v0, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
@@ -384,7 +423,12 @@ mod tests {
         let v0 = dev().f502(&[10.0, 20.0, 30.0, 40.0]);
         let v1 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let v2 = dev().f504(&dev().f640(&v0, &v1, 2, 2, 4).unwrap()).unwrap();
-        assert_eq!(v2, vec![10.0, 20.0, 1.0, 2.0, 3.0, 4.0, 30.0, 40.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(
+            v2,
+            vec![
+                10.0, 20.0, 1.0, 2.0, 3.0, 4.0, 30.0, 40.0, 5.0, 6.0, 7.0, 8.0
+            ]
+        );
     }
 
     #[test]
@@ -404,14 +448,15 @@ mod tests {
     #[test]
     fn f641_batched() {
         let v0 = dev().f502(&[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ]);
         let v1 = dev().f504(&dev().f641(&v0, 2, 2, 3, 1).unwrap()).unwrap();
-        assert_eq!(v1, vec![
-            1.0, 4.0, 2.0, 5.0, 3.0, 6.0,
-            7.0, 10.0, 8.0, 11.0, 9.0, 12.0,
-        ]);
+        assert_eq!(
+            v1,
+            vec![
+                1.0, 4.0, 2.0, 5.0, 3.0, 6.0, 7.0, 10.0, 8.0, 11.0, 9.0, 12.0,
+            ]
+        );
     }
 
     #[test]
@@ -481,7 +526,9 @@ mod tests {
     fn f645_zero_bias() {
         let v0: Vec<f32> = (1..=8).map(|x| x as f32).collect();
         let v1 = dev().f502(&[0.0f32; 4]);
-        let v2 = dev().f504(&dev().f645(&dev().f502(&v0), &v1, 2, 4).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f645(&dev().f502(&v0), &v1, 2, 4).unwrap())
+            .unwrap();
         assert_eq!(v2, v0);
     }
 
@@ -512,7 +559,9 @@ mod tests {
         // rows: [0..5],[6..11],[12..17]
         // expected: [4,5, 10,11, 16,17]
         let v0: Vec<f32> = (0..18).map(|i| i as f32).collect();
-        let v1 = dev().f504(&dev().f643(&dev().f502(&v0), 3, 2, 4, 6).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(&dev().f643(&dev().f502(&v0), 3, 2, 4, 6).unwrap())
+            .unwrap();
         assert_eq!(v1, vec![4.0, 5.0, 10.0, 11.0, 16.0, 17.0]);
     }
 

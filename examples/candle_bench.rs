@@ -23,7 +23,13 @@ fn bench_matmul(dev: &Device, size: usize, warmup: usize, iters: usize) {
     for _ in 0..iters {
         let c = a.matmul(&b).unwrap();
         // Force sync by reading one element
-        let _ = c.flatten_all().unwrap().get(0).unwrap().to_scalar::<f32>().unwrap();
+        let _ = c
+            .flatten_all()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
     }
     let elapsed = t0.elapsed();
     let avg_ms = elapsed.as_secs_f64() * 1e3 / iters as f64;
@@ -62,7 +68,13 @@ fn main() {
     println!("===================================\n");
 
     for &size in &[128, 256, 512, 1024] {
-        let iters = if size <= 256 { 100 } else if size <= 512 { 50 } else { 20 };
+        let iters = if size <= 256 {
+            100
+        } else if size <= 512 {
+            50
+        } else {
+            20
+        };
         bench_matmul(&dev, size, 3, iters);
     }
 }

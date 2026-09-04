@@ -5,7 +5,7 @@
 // t507=AdamW, t508=AdamWParams (private). f720=AdamW::new, f721=AdamW::step.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// t508 = AdamWParams. WGSL uniform; field names map to shader struct.
 #[repr(C)]
@@ -118,15 +118,32 @@ impl t507 {
                 label: None,
                 layout: &v13.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: v12.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: v6.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: v7.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: v9.s505.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: v10.s505.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: v12.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: v6.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: v7.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: v9.s505.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: v10.s505.as_entire_binding(),
+                    },
                 ],
             });
             let (v15, v16, v17) = crate::ops::f540(v8);
-            let mut v18 = p0.s500.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let mut v18 = p0
+                .s500
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             {
                 let mut v19 = v18.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("adamw"),
@@ -147,7 +164,9 @@ mod tests {
     use super::*;
     use crate::ops::f544;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     #[test]
     fn f721_basic() {
@@ -156,7 +175,12 @@ mod tests {
 
         let mut v2 = t507::f720(0.01);
         v2.weight_decay = 0.0;
-        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        v2.f721(
+            dev(),
+            std::slice::from_mut(&mut v0),
+            std::slice::from_ref(&v1),
+        )
+        .unwrap();
 
         let v3 = dev().f504(&v0).unwrap();
         assert!(v3[0] < 1.0, "param[0] should decrease, got {}", v3[0]);
@@ -173,11 +197,20 @@ mod tests {
         v2.weight_decay = 0.0;
 
         for _ in 0..10 {
-            v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+            v2.f721(
+                dev(),
+                std::slice::from_mut(&mut v0),
+                std::slice::from_ref(&v1),
+            )
+            .unwrap();
         }
 
         let v3 = dev().f504(&v0).unwrap();
-        assert!(v3[0] < 10.0, "after 10 steps param should decrease, got {}", v3[0]);
+        assert!(
+            v3[0] < 10.0,
+            "after 10 steps param should decrease, got {}",
+            v3[0]
+        );
     }
 
     #[test]
@@ -188,7 +221,12 @@ mod tests {
         let mut v2 = t507::f720(0.01);
         v2.weight_decay = 0.1;
 
-        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        v2.f721(
+            dev(),
+            std::slice::from_mut(&mut v0),
+            std::slice::from_ref(&v1),
+        )
+        .unwrap();
 
         let v3 = dev().f504(&v0).unwrap();
         f544(&v3, &[9.99], 1e-3);
@@ -208,7 +246,14 @@ mod tests {
         let mut v0 = dev().f502(&[1.0, 2.0, 3.0]);
         let v1 = dev().f502(&[0.1, 0.2]);
         let mut v2 = t507::f720(0.01);
-        assert!(v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).is_err());
+        assert!(
+            v2.f721(
+                dev(),
+                std::slice::from_mut(&mut v0),
+                std::slice::from_ref(&v1)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -217,9 +262,18 @@ mod tests {
         let v1 = dev().f502(&[-1.0]);
         let mut v2 = t507::f720(0.01);
         v2.weight_decay = 0.0;
-        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        v2.f721(
+            dev(),
+            std::slice::from_mut(&mut v0),
+            std::slice::from_ref(&v1),
+        )
+        .unwrap();
         let v3 = dev().f504(&v0).unwrap();
-        assert!(v3[0] > 5.0, "negative grad should increase param, got {}", v3[0]);
+        assert!(
+            v3[0] > 5.0,
+            "negative grad should increase param, got {}",
+            v3[0]
+        );
     }
 
     #[test]
@@ -228,7 +282,12 @@ mod tests {
         let v1 = dev().f502(&[100.0]);
         let mut v2 = t507::f720(0.0);
         v2.weight_decay = 0.0;
-        v2.f721(dev(), std::slice::from_mut(&mut v0), std::slice::from_ref(&v1)).unwrap();
+        v2.f721(
+            dev(),
+            std::slice::from_mut(&mut v0),
+            std::slice::from_ref(&v1),
+        )
+        .unwrap();
         let v3 = dev().f504(&v0).unwrap();
         f544(&v3, &[10.0], 1e-5);
     }

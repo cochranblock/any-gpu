@@ -5,7 +5,7 @@
 // f584=conv2d_grad_weight, f585=conv2d_grad_bias.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 // --- Matmul ---
 
@@ -58,7 +58,7 @@ struct t528g2 {
 // At each k step: w[k*N + n_base..n_base+63] = 256 B contiguous = one DRAM burst.
 // x[k] is scalar broadcast; 16 KB total, L2-resident throughout.
 
-const K_CHUNK: u32 = 256;  // K-elements per workgroup
+const K_CHUNK: u32 = 256; // K-elements per workgroup
 
 // Pass 1: partial dot products. Writes partial[p * N + n].
 const SHADER_GEMV_P1: &str = "
@@ -603,19 +603,65 @@ impl t500 {
     /// Dispatches SHADER_GEMV when m==1 (decode): one thread per output element,
     /// 64-wide coalesced B reads across the wave, x stays in L2 as scalar broadcast.
     pub fn f580(&self, p0: &t501, p1: &t501, p2: u32, p3: u32, p4: u32) -> Result<t501> {
-        ensure!(p0.s507 == (p2 * p4) as usize, "matmul: A has {} elems, expected {}", p0.s507, p2 * p4);
-        ensure!(p1.s507 == (p4 * p3) as usize, "matmul: B has {} elems, expected {}", p1.s507, p4 * p3);
+        ensure!(
+            p0.s507 == (p2 * p4) as usize,
+            "matmul: A has {} elems, expected {}",
+            p0.s507,
+            p2 * p4
+        );
+        ensure!(
+            p1.s507 == (p4 * p3) as usize,
+            "matmul: B has {} elems, expected {}",
+            p1.s507,
+            p4 * p3
+        );
         let v0 = self.f503((p2 * p3) as usize);
         if p2 == 1 {
             let p_splits = p4.div_ceil(K_CHUNK);
             let v_part = self.f503((p_splits * p3) as usize);
-            let v1 = t528g1 { n: p3, k: p4, k_chunk: K_CHUNK, _pad: 0 };
-            self.f543(SHADER_GEMV_P1, Some("gemv_p1"), &v1, &[p0, p1], &v_part, (p3.div_ceil(64), p_splits, 1));
-            let v2 = t528g2 { n: p3, p: p_splits, _pad0: 0, _pad1: 0 };
-            self.f543(SHADER_GEMV_P2, Some("gemv_p2"), &v2, &[&v_part], &v0, super::f540(p3));
+            let v1 = t528g1 {
+                n: p3,
+                k: p4,
+                k_chunk: K_CHUNK,
+                _pad: 0,
+            };
+            self.f543(
+                SHADER_GEMV_P1,
+                Some("gemv_p1"),
+                &v1,
+                &[p0, p1],
+                &v_part,
+                (p3.div_ceil(64), p_splits, 1),
+            );
+            let v2 = t528g2 {
+                n: p3,
+                p: p_splits,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            self.f543(
+                SHADER_GEMV_P2,
+                Some("gemv_p2"),
+                &v2,
+                &[&v_part],
+                &v0,
+                super::f540(p3),
+            );
         } else {
-            let v1 = t528 { m: p2, n: p3, k: p4, _pad: 0 };
-            self.f543(SHADER_MATMUL, Some("matmul"), &v1, &[p0, p1], &v0, (p2.div_ceil(32), p3.div_ceil(32), 1));
+            let v1 = t528 {
+                m: p2,
+                n: p3,
+                k: p4,
+                _pad: 0,
+            };
+            self.f543(
+                SHADER_MATMUL,
+                Some("matmul"),
+                &v1,
+                &[p0, p1],
+                &v0,
+                (p2.div_ceil(32), p3.div_ceil(32), 1),
+            );
         }
         Ok(v0)
     }
@@ -625,8 +671,20 @@ impl t500 {
         ensure!(p0.s507 == (p2 * p3 * p5) as usize);
         ensure!(p1.s507 == (p2 * p5 * p4) as usize);
         let v0 = self.f503((p2 * p3 * p4) as usize);
-        let v1 = t529 { batch: p2, m: p3, n: p4, k: p5 };
-        self.f543(SHADER_BATCH_MATMUL, Some("batch_matmul"), &v1, &[p0, p1], &v0, (p3.div_ceil(32), p4.div_ceil(32), p2));
+        let v1 = t529 {
+            batch: p2,
+            m: p3,
+            n: p4,
+            k: p5,
+        };
+        self.f543(
+            SHADER_BATCH_MATMUL,
+            Some("batch_matmul"),
+            &v1,
+            &[p0, p1],
+            &v0,
+            (p3.div_ceil(32), p4.div_ceil(32), p2),
+        );
         Ok(v0)
     }
 
@@ -637,10 +695,17 @@ impl t500 {
         p0: &t501,
         p1: &t501,
         p2: Option<&t501>,
-        p3: u32, p4: u32, p5: u32, p6: u32,
-        p7: u32, p8: u32, p9: u32,
-        p10: (u32, u32), p11: (u32, u32),
-        p12: (u32, u32), p13: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
+        p7: u32,
+        p8: u32,
+        p9: u32,
+        p10: (u32, u32),
+        p11: (u32, u32),
+        p12: (u32, u32),
+        p13: u32,
     ) -> Result<t501> {
         let v0 = (p5 + 2 * p11.0 - p12.0 * (p8 - 1) - 1) / p10.0 + 1;
         let v1 = (p6 + 2 * p11.1 - p12.1 * (p9 - 1) - 1) / p10.1 + 1;
@@ -663,15 +728,30 @@ impl t500 {
 
         let v6 = self.f503(v2 as usize);
         let v7 = t530 {
-            batch: p3, in_c: p4, out_c: p7, in_h: p5, in_w: p6, out_h: v0, out_w: v1,
-            kh: p8, kw: p9, stride_h: p10.0, stride_w: p10.1,
-            pad_h: p11.0, pad_w: p11.1,
-            dilation_h: p12.0, dilation_w: p12.1, groups: p13,
+            batch: p3,
+            in_c: p4,
+            out_c: p7,
+            in_h: p5,
+            in_w: p6,
+            out_h: v0,
+            out_w: v1,
+            kh: p8,
+            kw: p9,
+            stride_h: p10.0,
+            stride_w: p10.1,
+            pad_h: p11.0,
+            pad_w: p11.1,
+            dilation_h: p12.0,
+            dilation_w: p12.1,
+            groups: p13,
         };
 
         self.f543(
-            SHADER_CONV2D, Some("conv2d"),
-            &v7, &[p0, p1, v4], &v6,
+            SHADER_CONV2D,
+            Some("conv2d"),
+            &v7,
+            &[p0, p1, v4],
+            &v6,
             super::f540(v2),
         );
         Ok(v6)
@@ -684,11 +764,18 @@ impl t500 {
         p0: &t501,
         p1: &t501,
         p2: Option<&t501>,
-        p3: u32, p4: u32, p5: u32, p6: u32,
-        p7: u32, p8: u32, p9: u32,
-        p10: (u32, u32), p11: (u32, u32),
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
+        p7: u32,
+        p8: u32,
+        p9: u32,
+        p10: (u32, u32),
+        p11: (u32, u32),
         p12: (u32, u32),
-        p13: (u32, u32), p14: u32,
+        p13: (u32, u32),
+        p14: u32,
     ) -> Result<t501> {
         let v0 = (p5 - 1) * p10.0 - 2 * p11.0 + p13.0 * (p8 - 1) + p12.0 + 1;
         let v1 = (p6 - 1) * p10.1 - 2 * p11.1 + p13.1 * (p9 - 1) + p12.1 + 1;
@@ -711,15 +798,30 @@ impl t500 {
 
         let v6 = self.f503(v2 as usize);
         let v7 = t531 {
-            batch: p3, in_c: p4, out_c: p7, in_h: p5, in_w: p6, out_h: v0, out_w: v1,
-            kh: p8, kw: p9, stride_h: p10.0, stride_w: p10.1,
-            pad_h: p11.0, pad_w: p11.1,
-            dilation_h: p13.0, dilation_w: p13.1, groups: p14,
+            batch: p3,
+            in_c: p4,
+            out_c: p7,
+            in_h: p5,
+            in_w: p6,
+            out_h: v0,
+            out_w: v1,
+            kh: p8,
+            kw: p9,
+            stride_h: p10.0,
+            stride_w: p10.1,
+            pad_h: p11.0,
+            pad_w: p11.1,
+            dilation_h: p13.0,
+            dilation_w: p13.1,
+            groups: p14,
         };
 
         self.f543(
-            SHADER_CONV_TRANSPOSE2D, Some("conv_transpose2d"),
-            &v7, &[p0, p1, v4], &v6,
+            SHADER_CONV_TRANSPOSE2D,
+            Some("conv_transpose2d"),
+            &v7,
+            &[p0, p1, v4],
+            &v6,
             super::f540(v2),
         );
         Ok(v6)
@@ -727,38 +829,73 @@ impl t500 {
 
     /// f584 = conv2d_grad_weight. Backward gradient w.r.t. conv2d weights.
     pub(crate) fn f584(
-        &self, p0: &t501, p1: &t501,
-        p2: u32, p3: u32, p4: u32, p5: u32,
-        p6: u32, p7: u32, p8: u32, p9: u32, p10: u32,
-        p11: u32, p12: u32, p13: u32, p14: u32,
-        p15: u32, p16: u32, p17: u32,
+        &self,
+        p0: &t501,
+        p1: &t501,
+        p2: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
+        p7: u32,
+        p8: u32,
+        p9: u32,
+        p10: u32,
+        p11: u32,
+        p12: u32,
+        p13: u32,
+        p14: u32,
+        p15: u32,
+        p16: u32,
+        p17: u32,
     ) -> Result<t501> {
         let v0 = p3 / p17;
         let v1 = p6 * v0 * p9 * p10;
         let v2 = self.f503(v1 as usize);
         let v3 = t532 {
-            batch: p2, in_c: p3, out_c: p6, in_h: p4, in_w: p5, out_h: p7, out_w: p8,
-            kh: p9, kw: p10, stride_h: p11, stride_w: p12, pad_h: p13, pad_w: p14,
-            dilation_h: p15, dilation_w: p16, groups: p17,
+            batch: p2,
+            in_c: p3,
+            out_c: p6,
+            in_h: p4,
+            in_w: p5,
+            out_h: p7,
+            out_w: p8,
+            kh: p9,
+            kw: p10,
+            stride_h: p11,
+            stride_w: p12,
+            pad_h: p13,
+            pad_w: p14,
+            dilation_h: p15,
+            dilation_w: p16,
+            groups: p17,
         };
         self.f543(
-            SHADER_CONV2D_GRAD_WEIGHT, Some("conv2d_grad_weight"),
-            &v3, &[p0, p1], &v2,
+            SHADER_CONV2D_GRAD_WEIGHT,
+            Some("conv2d_grad_weight"),
+            &v3,
+            &[p0, p1],
+            &v2,
             super::f540(v1),
         );
         Ok(v2)
     }
 
     /// f585 = conv2d_grad_bias. Backward gradient w.r.t. conv2d bias.
-    pub(crate) fn f585(
-        &self, p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-    ) -> Result<t501> {
+    pub(crate) fn f585(&self, p0: &t501, p1: u32, p2: u32, p3: u32, p4: u32) -> Result<t501> {
         let v0 = self.f503(p2 as usize);
-        let v1 = t533 { batch: p1, out_c: p2, out_h: p3, out_w: p4 };
+        let v1 = t533 {
+            batch: p1,
+            out_c: p2,
+            out_h: p3,
+            out_w: p4,
+        };
         self.f543(
-            SHADER_CONV2D_GRAD_BIAS, Some("conv2d_grad_bias"),
-            &v1, &[p0], &v0,
+            SHADER_CONV2D_GRAD_BIAS,
+            Some("conv2d_grad_bias"),
+            &v1,
+            &[p0],
+            &v0,
             super::f540(p2),
         );
         Ok(v0)
@@ -770,7 +907,9 @@ mod tests {
     use super::*;
     use crate::ops::f544;
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // CPU reference matmul for cross-validation
     fn cpu_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
@@ -778,7 +917,9 @@ mod tests {
         for row in 0..m {
             for col in 0..n {
                 let mut sum = 0.0;
-                for i in 0..k { sum += a[row * k + i] * b[i * n + col]; }
+                for i in 0..k {
+                    sum += a[row * k + i] * b[i * n + col];
+                }
                 out[row * n + col] = sum;
             }
         }
@@ -787,10 +928,19 @@ mod tests {
 
     // CPU reference conv2d for cross-validation
     fn cpu_conv2d(
-        input: &[f32], weight: &[f32], bias: &[f32],
-        batch: usize, in_c: usize, in_h: usize, in_w: usize,
-        out_c: usize, kh: usize, kw: usize,
-        stride: (usize, usize), padding: (usize, usize), groups: usize,
+        input: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        batch: usize,
+        in_c: usize,
+        in_h: usize,
+        in_w: usize,
+        out_c: usize,
+        kh: usize,
+        kw: usize,
+        stride: (usize, usize),
+        padding: (usize, usize),
+        groups: usize,
     ) -> Vec<f32> {
         let out_h = (in_h + 2 * padding.0 - kh) / stride.0 + 1;
         let out_w = (in_w + 2 * padding.1 - kw) / stride.1 + 1;
@@ -810,11 +960,17 @@ mod tests {
                                     let iw = ow * stride.1 + kc;
                                     let ih = ih as isize - padding.0 as isize;
                                     let iw = iw as isize - padding.1 as isize;
-                                    if ih >= 0 && ih < in_h as isize && iw >= 0 && iw < in_w as isize {
+                                    if ih >= 0
+                                        && ih < in_h as isize
+                                        && iw >= 0
+                                        && iw < in_w as isize
+                                    {
                                         let in_idx = n * in_c * in_h * in_w
                                             + (g * group_in + ic) * in_h * in_w
-                                            + ih as usize * in_w + iw as usize;
-                                        let w_idx = oc * group_in * kh * kw + ic * kh * kw + kr * kw + kc;
+                                            + ih as usize * in_w
+                                            + iw as usize;
+                                        let w_idx =
+                                            oc * group_in * kh * kw + ic * kh * kw + kr * kw + kc;
                                         sum += input[in_idx] * weight[w_idx];
                                     }
                                 }
@@ -844,13 +1000,25 @@ mod tests {
         let v0: Vec<f32> = (1..=12).map(|x| x as f32).collect();
         let v1: Vec<f32> = (1..=8).map(|x| x as f32 * 0.1).collect();
         let v2 = cpu_matmul(&v0, &v1, 3, 2, 4);
-        let v3 = dev().f504(&dev().f580(&dev().f502(&v0), &dev().f502(&v1), 3, 2, 4).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(
+                &dev()
+                    .f580(&dev().f502(&v0), &dev().f502(&v1), 3, 2, 4)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v3, &v2, 1e-4);
     }
 
     #[test]
     fn f580_1x1() {
-        let v0 = dev().f504(&dev().f580(&dev().f502(&[3.0]), &dev().f502(&[7.0]), 1, 1, 1).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(
+                &dev()
+                    .f580(&dev().f502(&[3.0]), &dev().f502(&[7.0]), 1, 1, 1)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v0, vec![21.0]);
     }
 
@@ -860,59 +1028,99 @@ mod tests {
         let x: Vec<f32> = (0..8).map(|i| (i as f32) * 0.1 + 0.05).collect();
         let w: Vec<f32> = (0..48).map(|i| (i as f32) * 0.07 - 0.3).collect();
         let ref_ = cpu_matmul(&x, &w, 1, 6, 8);
-        let got = dev().f504(&dev().f580(&dev().f502(&x), &dev().f502(&w), 1, 6, 8).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f580(&dev().f502(&x), &dev().f502(&w), 1, 6, 8)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_, 1e-4);
     }
 
     // f580 GEMV path: square [1×64 @ 64×64].
     #[test]
     fn f580_gemv_square_vs_cpu() {
-        let k = 64usize; let n = 64usize;
+        let k = 64usize;
+        let n = 64usize;
         let x: Vec<f32> = (0..k).map(|i| (i as f32) * 0.01 - 0.3).collect();
         let w: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.005 - 0.15).collect();
         let ref_ = cpu_matmul(&x, &w, 1, n, k);
-        let got = dev().f504(&dev().f580(
-            &dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f580(&dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_, 1e-3);
     }
 
     // f580 GEMV path: non-square [1×128 @ 128×64].
     #[test]
     fn f580_gemv_nonsquare_vs_cpu() {
-        let k = 128usize; let n = 64usize;
+        let k = 128usize;
+        let n = 64usize;
         let x: Vec<f32> = (0..k).map(|i| (i as f32) * 0.007 - 0.4).collect();
         let w: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.003 + 0.01).collect();
         let ref_ = cpu_matmul(&x, &w, 1, n, k);
-        let got = dev().f504(&dev().f580(
-            &dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f580(&dev().f502(&x), &dev().f502(&w), 1, n as u32, k as u32)
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &ref_, 1e-3);
     }
 
     #[test]
     fn f580_17x13_vs_cpu() {
         // Odd dims that don't align to 16x16 workgroup
-        let v0 = 17; let v1 = 13; let v2 = 11;
-        let v3: Vec<f32> = (0..v0*v2).map(|i| (i as f32 * 0.01) - 0.5).collect();
-        let v4: Vec<f32> = (0..v2*v1).map(|i| (i as f32 * 0.01) - 0.3).collect();
+        let v0 = 17;
+        let v1 = 13;
+        let v2 = 11;
+        let v3: Vec<f32> = (0..v0 * v2).map(|i| (i as f32 * 0.01) - 0.5).collect();
+        let v4: Vec<f32> = (0..v2 * v1).map(|i| (i as f32 * 0.01) - 0.3).collect();
         let v5 = cpu_matmul(&v3, &v4, v0, v1, v2);
-        let v6 = dev().f504(&dev().f580(
-            &dev().f502(&v3), &dev().f502(&v4), v0 as u32, v1 as u32, v2 as u32
-        ).unwrap()).unwrap();
+        let v6 = dev()
+            .f504(
+                &dev()
+                    .f580(
+                        &dev().f502(&v3),
+                        &dev().f502(&v4),
+                        v0 as u32,
+                        v1 as u32,
+                        v2 as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v6, &v5, 1e-3);
     }
 
     #[test]
     fn f580_tile_boundary() {
         // 33×33×33: crosses the 32-element tile boundary on all three dims.
-        let v0 = 33; let v1 = 33; let v2 = 33;
-        let v3: Vec<f32> = (0..v0*v2).map(|i| (i as f32) * 0.005 - 0.5).collect();
-        let v4: Vec<f32> = (0..v2*v1).map(|i| (i as f32) * 0.007 - 0.3).collect();
+        let v0 = 33;
+        let v1 = 33;
+        let v2 = 33;
+        let v3: Vec<f32> = (0..v0 * v2).map(|i| (i as f32) * 0.005 - 0.5).collect();
+        let v4: Vec<f32> = (0..v2 * v1).map(|i| (i as f32) * 0.007 - 0.3).collect();
         let v5 = cpu_matmul(&v3, &v4, v0, v1, v2);
-        let v6 = dev().f504(&dev().f580(
-            &dev().f502(&v3), &dev().f502(&v4), v0 as u32, v1 as u32, v2 as u32
-        ).unwrap()).unwrap();
+        let v6 = dev()
+            .f504(
+                &dev()
+                    .f580(
+                        &dev().f502(&v3),
+                        &dev().f502(&v4),
+                        v0 as u32,
+                        v1 as u32,
+                        v2 as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v6, &v5, 1e-2);
     }
 
@@ -922,7 +1130,9 @@ mod tests {
     fn f581_basic() {
         let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let v1 = dev().f502(&[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0]);
-        let v2 = dev().f504(&dev().f581(&v0, &v1, 2, 2, 2, 2).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f581(&v0, &v1, 2, 2, 2, 2).unwrap())
+            .unwrap();
         assert_eq!(v2, vec![1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0]);
     }
 
@@ -931,7 +1141,9 @@ mod tests {
         // batch=1, 2x3 @ 3x1 = 2x1
         let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let v1 = dev().f502(&[1.0, 1.0, 1.0]);
-        let v2 = dev().f504(&dev().f581(&v0, &v1, 1, 2, 1, 3).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f581(&v0, &v1, 1, 2, 1, 3).unwrap())
+            .unwrap();
         assert_eq!(v2, vec![6.0, 15.0]);
     }
 
@@ -943,11 +1155,29 @@ mod tests {
         let v0: Vec<f32> = (1..=16).map(|x| x as f32).collect();
         let v1 = vec![1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, -1.0];
         let v2 = vec![0.0];
-        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), 1);
-        let v4 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&v1), Some(&dev().f502(&v2)),
-            1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1
-        ).unwrap()).unwrap();
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 4, 4, 1, 3, 3, (1, 1), (0, 0), 1);
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        Some(&dev().f502(&v2)),
+                        1,
+                        1,
+                        4,
+                        4,
+                        1,
+                        3,
+                        3,
+                        (1, 1),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-5);
     }
 
@@ -959,8 +1189,28 @@ mod tests {
         // weight[out_c, in_c, 1, 1]: 3 output channels, 2 input channels
         let v1 = dev().f502(&[1.0, 0.5, 0.0, 1.0, -1.0, 2.0]);
         let v2 = dev().f502(&[0.0, 0.0, 0.0]);
-        let v3 = dev().f504(&dev().f582(&v0, &v1, Some(&v2),
-            1, 2, 2, 2, 3, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &v0,
+                        &v1,
+                        Some(&v2),
+                        1,
+                        2,
+                        2,
+                        2,
+                        3,
+                        1,
+                        1,
+                        (1, 1),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         // out_c=0: 1.0*in0 + 0.5*in1
         f544(&v3[0..4], &[6.0, 12.0, 18.0, 24.0], 1e-5);
         // out_c=1: 0.0*in0 + 1.0*in1
@@ -972,21 +1222,57 @@ mod tests {
         let v0: Vec<f32> = (1..=9).map(|x| x as f32).collect();
         let v1 = vec![1.0; 9];
         let v2 = vec![0.0];
-        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), 1);
-        let v4 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&v1), None,
-            1, 1, 3, 3, 1, 3, 3, (1,1), (1,1), (1,1), 1
-        ).unwrap()).unwrap();
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 3, 3, 1, 3, 3, (1, 1), (1, 1), 1);
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        None,
+                        1,
+                        1,
+                        3,
+                        3,
+                        1,
+                        3,
+                        3,
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-5);
     }
 
     #[test]
     fn f582_stride2() {
         let v0: Vec<f32> = (1..=16).map(|x| x as f32).collect();
-        let v1 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&[1.0]), None,
-            1, 1, 4, 4, 1, 1, 1, (2,2), (0,0), (1,1), 1
-        ).unwrap()).unwrap();
+        let v1 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&[1.0]),
+                        None,
+                        1,
+                        1,
+                        4,
+                        4,
+                        1,
+                        1,
+                        1,
+                        (2, 2),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v1, vec![1.0, 3.0, 9.0, 11.0]);
     }
 
@@ -996,9 +1282,13 @@ mod tests {
         // batch=1, in_c=3, out_c=3, in_h=4, in_w=4, kh=3, kw=3, stride=(1,1), pad=(1,1), groups=3
         // weight shape [out_c, in_c/groups, kh, kw] = [3, 1, 3, 3]
         // Identity kernels (center=1, rest=0) → output should match input spatially
-        let batch = 1usize; let in_c = 3usize; let out_c = 3usize;
-        let in_h = 4usize; let in_w = 4usize;
-        let kh = 3usize; let kw = 3usize;
+        let batch = 1usize;
+        let in_c = 3usize;
+        let out_c = 3usize;
+        let in_h = 4usize;
+        let in_w = 4usize;
+        let kh = 3usize;
+        let kw = 3usize;
         let groups = 3usize;
 
         // Input: each channel has distinct values so cross-channel contamination is detectable
@@ -1016,15 +1306,45 @@ mod tests {
         let v2 = vec![0.0f32; out_c];
 
         // CPU reference
-        let v3 = cpu_conv2d(&v0, &v1, &v2, batch, in_c, in_h, in_w, out_c, kh, kw, (1, 1), (1, 1), groups);
+        let v3 = cpu_conv2d(
+            &v0,
+            &v1,
+            &v2,
+            batch,
+            in_c,
+            in_h,
+            in_w,
+            out_c,
+            kh,
+            kw,
+            (1, 1),
+            (1, 1),
+            groups,
+        );
 
         // GPU
-        let v4 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&v1), Some(&dev().f502(&v2)),
-            batch as u32, in_c as u32, in_h as u32, in_w as u32,
-            out_c as u32, kh as u32, kw as u32,
-            (1, 1), (1, 1), (1, 1), groups as u32,
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        Some(&dev().f502(&v2)),
+                        batch as u32,
+                        in_c as u32,
+                        in_h as u32,
+                        in_w as u32,
+                        out_c as u32,
+                        kh as u32,
+                        kw as u32,
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        groups as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         // Cross-validate GPU vs CPU
         f544(&v4, &v3, 1e-4);
@@ -1037,9 +1357,13 @@ mod tests {
     fn f582_stride2_pad1() {
         // backlog #17 companion: stride=(2,2), pad=(1,1), 3×3 kernel, vs CPU reference
         // batch=1, in_c=2, out_c=2, in_h=5, in_w=5, kh=3, kw=3, stride=(2,2), pad=(1,1), groups=1
-        let batch = 1usize; let in_c = 2usize; let out_c = 2usize;
-        let in_h = 5usize; let in_w = 5usize;
-        let kh = 3usize; let kw = 3usize;
+        let batch = 1usize;
+        let in_c = 2usize;
+        let out_c = 2usize;
+        let in_h = 5usize;
+        let in_w = 5usize;
+        let kh = 3usize;
+        let kw = 3usize;
 
         // Input: index-based values
         let v0: Vec<f32> = (0..batch * in_c * in_h * in_w)
@@ -1054,15 +1378,45 @@ mod tests {
         let v2 = vec![0.0f32; out_c];
 
         // CPU reference
-        let v3 = cpu_conv2d(&v0, &v1, &v2, batch, in_c, in_h, in_w, out_c, kh, kw, (2, 2), (1, 1), 1);
+        let v3 = cpu_conv2d(
+            &v0,
+            &v1,
+            &v2,
+            batch,
+            in_c,
+            in_h,
+            in_w,
+            out_c,
+            kh,
+            kw,
+            (2, 2),
+            (1, 1),
+            1,
+        );
 
         // GPU
-        let v4 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&v1), Some(&dev().f502(&v2)),
-            batch as u32, in_c as u32, in_h as u32, in_w as u32,
-            out_c as u32, kh as u32, kw as u32,
-            (2, 2), (1, 1), (1, 1), 1,
-        ).unwrap()).unwrap();
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        Some(&dev().f502(&v2)),
+                        batch as u32,
+                        in_c as u32,
+                        in_h as u32,
+                        in_w as u32,
+                        out_c as u32,
+                        kh as u32,
+                        kw as u32,
+                        (2, 2),
+                        (1, 1),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&v4, &v3, 1e-4);
     }
@@ -1073,26 +1427,70 @@ mod tests {
         let v0: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
         let v1: Vec<f32> = (0..25).map(|i| if i == 12 { 1.0 } else { 0.0 }).collect();
         let v2 = vec![0.0];
-        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), 1);
-        let v4 = dev().f504(&dev().f582(
-            &dev().f502(&v0), &dev().f502(&v1), None,
-            1, 1, 8, 8, 1, 5, 5, (1,1), (2,2), (1,1), 1
-        ).unwrap()).unwrap();
+        let v3 = cpu_conv2d(&v0, &v1, &v2, 1, 1, 8, 8, 1, 5, 5, (1, 1), (2, 2), 1);
+        let v4 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v0),
+                        &dev().f502(&v1),
+                        None,
+                        1,
+                        1,
+                        8,
+                        8,
+                        1,
+                        5,
+                        5,
+                        (1, 1),
+                        (2, 2),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v4, &v3, 1e-4);
     }
 
     #[test]
     fn f582_multichannel_vs_cpu() {
         // batch=2, in_c=3, out_c=2, 4x4, 3x3 kernel, padding=1
-        let v0 = 2; let v1 = 3; let v2 = 2; let v3 = 4; let v4 = 4;
-        let v5: Vec<f32> = (0..v0*v1*v3*v4).map(|i| (i as f32) * 0.01 - 0.5).collect();
-        let v6: Vec<f32> = (0..v2*v1*3*3).map(|i| (i as f32) * 0.02 - 0.3).collect();
+        let v0 = 2;
+        let v1 = 3;
+        let v2 = 2;
+        let v3 = 4;
+        let v4 = 4;
+        let v5: Vec<f32> = (0..v0 * v1 * v3 * v4)
+            .map(|i| (i as f32) * 0.01 - 0.5)
+            .collect();
+        let v6: Vec<f32> = (0..v2 * v1 * 3 * 3)
+            .map(|i| (i as f32) * 0.02 - 0.3)
+            .collect();
         let v7 = vec![0.1, -0.2];
-        let v8 = cpu_conv2d(&v5, &v6, &v7, v0, v1, v3, v4, v2, 3, 3, (1,1), (1,1), 1);
-        let v9 = dev().f504(&dev().f582(
-            &dev().f502(&v5), &dev().f502(&v6), Some(&dev().f502(&v7)),
-            v0 as u32, v1 as u32, v3 as u32, v4 as u32, v2 as u32, 3, 3, (1,1), (1,1), (1,1), 1
-        ).unwrap()).unwrap();
+        let v8 = cpu_conv2d(&v5, &v6, &v7, v0, v1, v3, v4, v2, 3, 3, (1, 1), (1, 1), 1);
+        let v9 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &dev().f502(&v5),
+                        &dev().f502(&v6),
+                        Some(&dev().f502(&v7)),
+                        v0 as u32,
+                        v1 as u32,
+                        v3 as u32,
+                        v4 as u32,
+                        v2 as u32,
+                        3,
+                        3,
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v9, &v8, 1e-3);
     }
 
@@ -1102,8 +1500,28 @@ mod tests {
         let v0 = dev().f502(&[0.0; 4]);
         let v1 = dev().f502(&[0.0]);
         let v2 = dev().f502(&[42.0]);
-        let v3 = dev().f504(&dev().f582(&v0, &v1, Some(&v2),
-            1, 1, 2, 2, 1, 1, 1, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(
+                &dev()
+                    .f582(
+                        &v0,
+                        &v1,
+                        Some(&v2),
+                        1,
+                        1,
+                        2,
+                        2,
+                        1,
+                        1,
+                        1,
+                        (1, 1),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v3, vec![42.0, 42.0, 42.0, 42.0]);
     }
 
@@ -1113,8 +1531,29 @@ mod tests {
     fn f583_stride2() {
         let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
         let v1 = dev().f502(&[1.0]);
-        let v2 = dev().f504(&dev().f583(&v0, &v1, None,
-            1, 1, 2, 2, 1, 1, 1, (2,2), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f583(
+                        &v0,
+                        &v1,
+                        None,
+                        1,
+                        1,
+                        2,
+                        2,
+                        1,
+                        1,
+                        1,
+                        (2, 2),
+                        (0, 0),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2.len(), 9);
         f544(&v2, &[1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0], 1e-5);
     }
@@ -1123,8 +1562,29 @@ mod tests {
     fn f583_3x3_kernel() {
         let v0 = dev().f502(&[5.0]);
         let v1 = dev().f502(&[1.0; 9]);
-        let v2 = dev().f504(&dev().f583(&v0, &v1, None,
-            1, 1, 1, 1, 1, 3, 3, (1,1), (0,0), (0,0), (1,1), 1).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(
+                &dev()
+                    .f583(
+                        &v0,
+                        &v1,
+                        None,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        3,
+                        3,
+                        (1, 1),
+                        (0, 0),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v2.len(), 9);
         f544(&v2, &[5.0; 9], 1e-5);
     }
@@ -1134,15 +1594,24 @@ mod tests {
     // that map to it. Input pixel (ih, iw, ic) contributes via kernel position (kh, kw) when
     // oh = ih * stride_h + kh * dilation_h  and  ow = iw * stride_w + kw * dilation_w  (before padding).
     fn cpu_conv_transpose2d(
-        input: &[f32], weight: &[f32], bias: &[f32],
-        batch: usize, in_c: usize, in_h: usize, in_w: usize,
-        out_c: usize, kh: usize, kw: usize,
-        stride: (usize, usize), pad: (usize, usize), dilation: (usize, usize),
+        input: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        batch: usize,
+        in_c: usize,
+        in_h: usize,
+        in_w: usize,
+        out_c: usize,
+        kh: usize,
+        kw: usize,
+        stride: (usize, usize),
+        pad: (usize, usize),
+        dilation: (usize, usize),
         groups: usize,
     ) -> Vec<f32> {
         let out_h = (in_h - 1) * stride.0 + dilation.0 * (kh - 1) + 1 - 2 * pad.0;
         let out_w = (in_w - 1) * stride.1 + dilation.1 * (kw - 1) + 1 - 2 * pad.1;
-        let group_in  = in_c  / groups;
+        let group_in = in_c / groups;
         let group_out = out_c / groups;
         let mut out = vec![0.0f32; batch * out_c * out_h * out_w];
         // Initialise bias
@@ -1150,7 +1619,8 @@ mod tests {
             for oc in 0..out_c {
                 for oh in 0..out_h {
                     for ow in 0..out_w {
-                        out[n * out_c * out_h * out_w + oc * out_h * out_w + oh * out_w + ow] = bias[oc];
+                        out[n * out_c * out_h * out_w + oc * out_h * out_w + oh * out_w + ow] =
+                            bias[oc];
                     }
                 }
             }
@@ -1163,25 +1633,32 @@ mod tests {
                 let ic_local = ic % group_in;
                 for ih in 0..in_h {
                     for iw in 0..in_w {
-                        let in_val = input[n * in_c * in_h * in_w + ic * in_h * in_w + ih * in_w + iw];
+                        let in_val =
+                            input[n * in_c * in_h * in_w + ic * in_h * in_w + ih * in_w + iw];
                         for kr in 0..kh {
                             for kc in 0..kw {
                                 // Output position before padding subtraction
                                 let oh_unpad = ih * stride.0 + kr * dilation.0;
                                 let ow_unpad = iw * stride.1 + kc * dilation.1;
-                                if oh_unpad < pad.0 || ow_unpad < pad.1 { continue; }
+                                if oh_unpad < pad.0 || ow_unpad < pad.1 {
+                                    continue;
+                                }
                                 let oh = oh_unpad - pad.0;
                                 let ow = ow_unpad - pad.1;
-                                if oh >= out_h || ow >= out_w { continue; }
+                                if oh >= out_h || ow >= out_w {
+                                    continue;
+                                }
                                 // weight layout: [in_c, out_c/groups, kh, kw]
                                 for oc_local in 0..group_out {
                                     let oc = g * group_out + oc_local;
                                     let w_idx = (g * group_in + ic_local) * (group_out * kh * kw)
                                         + oc_local * (kh * kw)
-                                        + kr * kw + kc;
+                                        + kr * kw
+                                        + kc;
                                     out[n * out_c * out_h * out_w
                                         + oc * out_h * out_w
-                                        + oh * out_w + ow] += in_val * weight[w_idx];
+                                        + oh * out_w
+                                        + ow] += in_val * weight[w_idx];
                                 }
                             }
                         }
@@ -1197,9 +1674,13 @@ mod tests {
         // batch=1, in_c=2, out_c=2, in_h=3, in_w=3, kh=2, kw=2, stride=(1,1), pad=(0,0), dilation=(1,1).
         // Exercises the multi-channel path of conv_transpose2d.
         // Weight layout: [in_c, out_c, kh, kw] = [2, 2, 2, 2] = 16 elements.
-        let batch = 1usize; let in_c = 2usize; let out_c = 2usize;
-        let in_h = 3usize; let in_w = 3usize;
-        let kh = 2usize; let kw = 2usize;
+        let batch = 1usize;
+        let in_c = 2usize;
+        let out_c = 2usize;
+        let in_h = 3usize;
+        let in_w = 3usize;
+        let kh = 2usize;
+        let kw = 2usize;
 
         // Input: index-based, distinct per channel so cross-channel contamination is detectable.
         let input: Vec<f32> = (0..batch * in_c * in_h * in_w)
@@ -1214,17 +1695,45 @@ mod tests {
         let bias = vec![0.0f32; out_c];
 
         let cpu_out = cpu_conv_transpose2d(
-            &input, &weight, &bias,
-            batch, in_c, in_h, in_w, out_c, kh, kw,
-            (1, 1), (0, 0), (1, 1), 1,
+            &input,
+            &weight,
+            &bias,
+            batch,
+            in_c,
+            in_h,
+            in_w,
+            out_c,
+            kh,
+            kw,
+            (1, 1),
+            (0, 0),
+            (1, 1),
+            1,
         );
 
-        let gpu_out = dev().f504(&dev().f583(
-            &dev().f502(&input), &dev().f502(&weight), None,
-            batch as u32, in_c as u32, in_h as u32, in_w as u32,
-            out_c as u32, kh as u32, kw as u32,
-            (1, 1), (0, 0), (0, 0), (1, 1), 1,
-        ).unwrap()).unwrap();
+        let gpu_out = dev()
+            .f504(
+                &dev()
+                    .f583(
+                        &dev().f502(&input),
+                        &dev().f502(&weight),
+                        None,
+                        batch as u32,
+                        in_c as u32,
+                        in_h as u32,
+                        in_w as u32,
+                        out_c as u32,
+                        kh as u32,
+                        kw as u32,
+                        (1, 1),
+                        (0, 0),
+                        (0, 0),
+                        (1, 1),
+                        1,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
 
         f544(&gpu_out, &cpu_out, 1e-3);
     }
@@ -1249,14 +1758,52 @@ mod tests {
     fn f582_input_size_mismatch() {
         let v0 = dev().f502(&[1.0; 10]);
         let v1 = dev().f502(&[1.0; 9]);
-        assert!(dev().f582(&v0, &v1, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+        assert!(
+            dev()
+                .f582(
+                    &v0,
+                    &v1,
+                    None,
+                    1,
+                    1,
+                    4,
+                    4,
+                    1,
+                    3,
+                    3,
+                    (1, 1),
+                    (0, 0),
+                    (1, 1),
+                    1
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn f582_weight_size_mismatch() {
         let v0 = dev().f502(&[1.0; 16]);
         let v1 = dev().f502(&[1.0; 5]);
-        assert!(dev().f582(&v0, &v1, None, 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+        assert!(
+            dev()
+                .f582(
+                    &v0,
+                    &v1,
+                    None,
+                    1,
+                    1,
+                    4,
+                    4,
+                    1,
+                    3,
+                    3,
+                    (1, 1),
+                    (0, 0),
+                    (1, 1),
+                    1
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1264,73 +1811,138 @@ mod tests {
         let v0 = dev().f502(&[1.0; 16]);
         let v1 = dev().f502(&[1.0; 9]);
         let v2 = dev().f502(&[1.0, 2.0]);
-        assert!(dev().f582(&v0, &v1, Some(&v2), 1, 1, 4, 4, 1, 3, 3, (1,1), (0,0), (1,1), 1).is_err());
+        assert!(
+            dev()
+                .f582(
+                    &v0,
+                    &v1,
+                    Some(&v2),
+                    1,
+                    1,
+                    4,
+                    4,
+                    1,
+                    3,
+                    3,
+                    (1, 1),
+                    (0, 0),
+                    (1, 1),
+                    1
+                )
+                .is_err()
+        );
     }
 
     // --- CPU cross-validation for batch_matmul ---
 
     #[test]
     fn f581_vs_cpu() {
-        let v0 = 3; let v1 = 4; let v2 = 3; let v3 = 5;
-        let v4: Vec<f32> = (0..v0*v1*v3).map(|i| (i as f32) * 0.01 - 0.3).collect();
-        let v5: Vec<f32> = (0..v0*v3*v2).map(|i| (i as f32) * 0.02 - 0.1).collect();
+        let v0 = 3;
+        let v1 = 4;
+        let v2 = 3;
+        let v3 = 5;
+        let v4: Vec<f32> = (0..v0 * v1 * v3).map(|i| (i as f32) * 0.01 - 0.3).collect();
+        let v5: Vec<f32> = (0..v0 * v3 * v2).map(|i| (i as f32) * 0.02 - 0.1).collect();
         let mut v6 = vec![0.0f32; v0 * v1 * v2];
         for bat in 0..v0 {
             for row in 0..v1 {
                 for col in 0..v2 {
                     let mut sum = 0.0;
                     for i in 0..v3 {
-                        sum += v4[bat*v1*v3 + row*v3 + i] * v5[bat*v3*v2 + i*v2 + col];
+                        sum += v4[bat * v1 * v3 + row * v3 + i] * v5[bat * v3 * v2 + i * v2 + col];
                     }
-                    v6[bat*v1*v2 + row*v2 + col] = sum;
+                    v6[bat * v1 * v2 + row * v2 + col] = sum;
                 }
             }
         }
-        let v7 = dev().f504(&dev().f581(
-            &dev().f502(&v4), &dev().f502(&v5), v0 as u32, v1 as u32, v2 as u32, v3 as u32
-        ).unwrap()).unwrap();
+        let v7 = dev()
+            .f504(
+                &dev()
+                    .f581(
+                        &dev().f502(&v4),
+                        &dev().f502(&v5),
+                        v0 as u32,
+                        v1 as u32,
+                        v2 as u32,
+                        v3 as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&v7, &v6, 1e-3);
     }
 
     #[test]
     fn f581_tile_boundary() {
         // m=33, n=33, k=33: each dim crosses a 32-element tile boundary.
-        let bat = 2usize; let m = 33usize; let n = 33usize; let k = 33usize;
-        let a: Vec<f32> = (0..bat*m*k).map(|i| (i as f32) * 0.01 - 1.0).collect();
-        let b: Vec<f32> = (0..bat*k*n).map(|i| (i as f32) * 0.01 - 0.5).collect();
+        let bat = 2usize;
+        let m = 33usize;
+        let n = 33usize;
+        let k = 33usize;
+        let a: Vec<f32> = (0..bat * m * k).map(|i| (i as f32) * 0.01 - 1.0).collect();
+        let b: Vec<f32> = (0..bat * k * n).map(|i| (i as f32) * 0.01 - 0.5).collect();
         let mut expected = vec![0.0f32; bat * m * n];
         for bt in 0..bat {
             for r in 0..m {
                 for c in 0..n {
                     let mut s = 0.0f32;
-                    for ki in 0..k { s += a[bt*m*k + r*k + ki] * b[bt*k*n + ki*n + c]; }
-                    expected[bt*m*n + r*n + c] = s;
+                    for ki in 0..k {
+                        s += a[bt * m * k + r * k + ki] * b[bt * k * n + ki * n + c];
+                    }
+                    expected[bt * m * n + r * n + c] = s;
                 }
             }
         }
-        let got = dev().f504(&dev().f581(
-            &dev().f502(&a), &dev().f502(&b),
-            bat as u32, m as u32, n as u32, k as u32,
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f581(
+                        &dev().f502(&a),
+                        &dev().f502(&b),
+                        bat as u32,
+                        m as u32,
+                        n as u32,
+                        k as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &expected, 1e-2);
     }
 
     #[test]
     fn f581_square_64() {
         // 64×64 matrices, single batch: exactly 2 tiles on each axis.
-        let m = 64usize; let n = 64usize; let k = 64usize;
-        let a: Vec<f32> = (0..m*k).map(|i| ((i as f32) * 0.005 - 0.5).sin()).collect();
-        let b: Vec<f32> = (0..k*n).map(|i| ((i as f32) * 0.007 - 0.3).cos()).collect();
+        let m = 64usize;
+        let n = 64usize;
+        let k = 64usize;
+        let a: Vec<f32> = (0..m * k)
+            .map(|i| ((i as f32) * 0.005 - 0.5).sin())
+            .collect();
+        let b: Vec<f32> = (0..k * n)
+            .map(|i| ((i as f32) * 0.007 - 0.3).cos())
+            .collect();
         let mut expected = vec![0.0f32; m * n];
         for r in 0..m {
             for c in 0..n {
-                let s: f32 = (0..k).map(|ki| a[r*k + ki] * b[ki*n + c]).sum();
-                expected[r*n + c] = s;
+                let s: f32 = (0..k).map(|ki| a[r * k + ki] * b[ki * n + c]).sum();
+                expected[r * n + c] = s;
             }
         }
-        let got = dev().f504(&dev().f581(
-            &dev().f502(&a), &dev().f502(&b), 1, m as u32, n as u32, k as u32,
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f581(
+                        &dev().f502(&a),
+                        &dev().f502(&b),
+                        1,
+                        m as u32,
+                        n as u32,
+                        k as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         f544(&got, &expected, 1e-2);
     }
 
@@ -1346,10 +1958,29 @@ mod tests {
         // Compute analytical grad_weight
         let v3 = dev().f502(&v0);
         let v4 = dev().f502(&v1);
-        let v5 = dev().f582(&v3, &v4, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap();
+        let v5 = dev()
+            .f582(
+                &v3,
+                &v4,
+                None,
+                1,
+                1,
+                4,
+                4,
+                1,
+                2,
+                2,
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                1,
+            )
+            .unwrap();
         let v6 = vec![1.0f32; 9];
         let v7 = dev().f502(&v6);
-        let v8 = dev().f584(&v3, &v7, 1, 1, 4, 4, 1, 3, 3, 2, 2, 1, 1, 0, 0, 1, 1, 1).unwrap();
+        let v8 = dev()
+            .f584(&v3, &v7, 1, 1, 4, 4, 1, 3, 3, 2, 2, 1, 1, 0, 0, 1, 1, 1)
+            .unwrap();
         let v9 = dev().f504(&v8).unwrap();
 
         // Numeric gradient check
@@ -1360,11 +1991,57 @@ mod tests {
             v12[v10] -= v2;
             let v13 = dev().f502(&v11);
             let v14 = dev().f502(&v12);
-            let v15 = dev().f504(&dev().f582(&v3, &v13, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
-            let v16 = dev().f504(&dev().f582(&v3, &v14, None, 1, 1, 4, 4, 1, 2, 2, (1,1), (0,0), (1,1), 1).unwrap()).unwrap();
+            let v15 = dev()
+                .f504(
+                    &dev()
+                        .f582(
+                            &v3,
+                            &v13,
+                            None,
+                            1,
+                            1,
+                            4,
+                            4,
+                            1,
+                            2,
+                            2,
+                            (1, 1),
+                            (0, 0),
+                            (1, 1),
+                            1,
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+            let v16 = dev()
+                .f504(
+                    &dev()
+                        .f582(
+                            &v3,
+                            &v14,
+                            None,
+                            1,
+                            1,
+                            4,
+                            4,
+                            1,
+                            2,
+                            2,
+                            (1, 1),
+                            (0, 0),
+                            (1, 1),
+                            1,
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
             let v17: f32 = (v15.iter().sum::<f32>() - v16.iter().sum::<f32>()) / (2.0 * v2);
-            assert!((v9[v10] - v17).abs() < 1e-2,
-                "grad_w[{v10}]: analytical={}, numeric={}", v9[v10], v17);
+            assert!(
+                (v9[v10] - v17).abs() < 1e-2,
+                "grad_w[{v10}]: analytical={}, numeric={}",
+                v9[v10],
+                v17
+            );
         }
         let _ = v5;
     }
@@ -1379,7 +2056,8 @@ mod tests {
         let v2 = 1e-3f32;
 
         // out_h = out_w = 2
-        let out_h = 2u32; let out_w = 2u32;
+        let out_h = 2u32;
+        let out_w = 2u32;
 
         // Compute analytical grad_weight via f584
         // f584(input, grad_out, batch, in_c, in_h, in_w, out_c, out_h, out_w,
@@ -1387,14 +2065,14 @@ mod tests {
         let v3 = dev().f502(&v0);
         let v4_grad_out = vec![1.0f32; (out_h * out_w) as usize];
         let v5 = dev().f502(&v4_grad_out);
-        let v6 = dev().f584(
-            &v3, &v5,
-            1, 1, 4, 4, 1, out_h, out_w, 2, 2,
-            2, 2, // stride=(2,2)
-            0, 0, // pad=(0,0)
-            1, 1, // dilation=(1,1)
-            1,    // groups=1
-        ).unwrap();
+        let v6 = dev()
+            .f584(
+                &v3, &v5, 1, 1, 4, 4, 1, out_h, out_w, 2, 2, 2, 2, // stride=(2,2)
+                0, 0, // pad=(0,0)
+                1, 1, // dilation=(1,1)
+                1, // groups=1
+            )
+            .unwrap();
         let v7 = dev().f504(&v6).unwrap();
 
         // Numeric gradient check via finite differences on the conv2d forward pass
@@ -1406,19 +2084,57 @@ mod tests {
             let v11 = dev().f502(&v9);
             let v12 = dev().f502(&v10);
             // Forward with stride=2
-            let v13 = dev().f504(&dev().f582(
-                &v3, &v11, None,
-                1, 1, 4, 4, 1, 2, 2, (2, 2), (0, 0), (1, 1), 1,
-            ).unwrap()).unwrap();
-            let v14 = dev().f504(&dev().f582(
-                &v3, &v12, None,
-                1, 1, 4, 4, 1, 2, 2, (2, 2), (0, 0), (1, 1), 1,
-            ).unwrap()).unwrap();
+            let v13 = dev()
+                .f504(
+                    &dev()
+                        .f582(
+                            &v3,
+                            &v11,
+                            None,
+                            1,
+                            1,
+                            4,
+                            4,
+                            1,
+                            2,
+                            2,
+                            (2, 2),
+                            (0, 0),
+                            (1, 1),
+                            1,
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+            let v14 = dev()
+                .f504(
+                    &dev()
+                        .f582(
+                            &v3,
+                            &v12,
+                            None,
+                            1,
+                            1,
+                            4,
+                            4,
+                            1,
+                            2,
+                            2,
+                            (2, 2),
+                            (0, 0),
+                            (1, 1),
+                            1,
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
             // Numeric grad: d(sum(output)) / d(weight[i]) ≈ (f(w+e) - f(w-e)) / 2e
             let v15: f32 = (v13.iter().sum::<f32>() - v14.iter().sum::<f32>()) / (2.0 * v2);
             assert!(
                 (v7[v8] - v15).abs() < 1e-2,
-                "f584_stride2: grad_w[{v8}]: analytical={}, numeric={}", v7[v8], v15
+                "f584_stride2: grad_w[{v8}]: analytical={}, numeric={}",
+                v7[v8],
+                v15
             );
         }
     }

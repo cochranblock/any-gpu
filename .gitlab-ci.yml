@@ -1,0 +1,101 @@
+# GitLab CI for any-gpu.
+#
+# Stages:
+#   check   - formatting and lint gates
+#   test    - unit tests. The whole suite runs on a GPU: every test shares a
+#             single TEST_DEV LazyLock (see docs/src/hardware.md), so the
+#             runner needs a Vulkan-capable GPU — /dev/dri passed through and
+#             libvulkan1 + mesa-vulkan-drivers installed on the host.
+#   build   - release binaries (any-gpu, any-gpu-serve)
+#   release - packaged artifact, runs only on tag pushes
+#
+# The image is pinned to the highest rust-version declared by any locked
+# dependency (image = 1.88, see Cargo.lock); edition 2024 requires 1.85+.
+# Bump it in lockstep when the dependency tree's MSRV moves. The full (not
+# -slim) image is used because aws-lc-rs/ring need a C compiler.
+#
+# any-gpu-test (the exopack TRIPLE SIMS gate) is intentionally not built or
+# shipped here: it is feature-gated behind `tests` and needs a real GPU.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - check
+  - test
+  - build
+  - release
+
+default:
+  image: rust:1.88
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - target/debug/.fingerprint
+      - target/debug/incremental
+      - target/debug/deps
+      - target/debug/build
+      - target/release/.fingerprint
+      - target/release/incremental
+      - target/release/deps
+      - target/release/build
+    policy: pull-push
+
+fmt:
+  stage: check
+  script:
+    - cargo fmt --all --check
+
+clippy:
+  stage: check
+  # Hard gate (-D warnings) is deferred: the codebase carries 88 pre-existing
+  # lints — mostly clippy::too_many_arguments on the wide f-numbered op APIs,
+  # plus mechanical lints (useless_vec, excessive_precision, approx_constant,
+  # identity_op, ...) in the CPU reference and test code. Re-enable:
+  #   cargo clippy --workspace --all-targets -- -D warnings
+  # once those are cleaned up.
+  script:
+    - cargo clippy --workspace --all-targets
+
+test:
+  stage: test
+  script:
+    - WGPU_BACKEND=vulkan cargo test --release --workspace
+
+build:
+  stage: build
+  script:
+    - cargo build --release --workspace
+  artifacts:
+    paths:
+      - target/release/any-gpu
+      - target/release/any-gpu-serve
+    expire_in: 1 week
+
+release:
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - cargo build --release --workspace
+    - VERSION="${CI_COMMIT_TAG#v}"
+    - ARCH="$(uname -m)"
+    - PKG="any-gpu-${VERSION}-${ARCH}"
+    - mkdir -p "dist/${PKG}/bin"
+    - install -Dm755 target/release/any-gpu "dist/${PKG}/bin/any-gpu"
+    - install -Dm755 target/release/any-gpu-serve "dist/${PKG}/bin/any-gpu-serve"
+    - install -m644 UNLICENSE "dist/${PKG}/UNLICENSE"
+    - install -m644 README.md "dist/${PKG}/README.md"
+    - (cd dist && sha256sum "${PKG}/bin/any-gpu" "${PKG}/bin/any-gpu-serve" > "${PKG}.sha256")
+    - tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}" "${PKG}.sha256"
+  artifacts:
+    paths:
+      - dist/*.tar.gz
+      - dist/*.sha256
+    expire_in: 1 year

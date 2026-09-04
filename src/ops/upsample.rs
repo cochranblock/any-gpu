@@ -5,7 +5,7 @@
 // f660=upsample_nearest2d, f661=upsample_nearest2d_backward.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// t526 = UpsampleParams.
 #[repr(C)]
@@ -95,18 +95,33 @@ impl t500 {
     pub fn f660(
         &self,
         p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-        p5: u32, p6: u32,
+        p1: u32,
+        p2: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
     ) -> Result<t501> {
         ensure!(p0.s507 == (p1 * p2 * p3 * p4) as usize);
         let v0 = p3 * p5;
         let v1 = p4 * p6;
         let v2 = p1 * p2 * v0 * v1;
         let v3 = self.f503(v2 as usize);
-        let v4 = t526 { batch: p1, channels: p2, in_h: p3, in_w: p4, out_h: v0, out_w: v1, _pad: [0; 2] };
+        let v4 = t526 {
+            batch: p1,
+            channels: p2,
+            in_h: p3,
+            in_w: p4,
+            out_h: v0,
+            out_w: v1,
+            _pad: [0; 2],
+        };
         self.f543(
-            SHADER_UPSAMPLE_NEAREST, Some("upsample"),
-            &v4, &[p0], &v3,
+            SHADER_UPSAMPLE_NEAREST,
+            Some("upsample"),
+            &v4,
+            &[p0],
+            &v3,
             super::f540(v2),
         );
         Ok(v3)
@@ -117,8 +132,12 @@ impl t500 {
     pub fn f661(
         &self,
         p0: &t501,
-        p1: u32, p2: u32, p3: u32, p4: u32,
-        p5: u32, p6: u32,
+        p1: u32,
+        p2: u32,
+        p3: u32,
+        p4: u32,
+        p5: u32,
+        p6: u32,
     ) -> Result<t501> {
         let v0 = p3 * p5;
         let v1 = p4 * p6;
@@ -126,11 +145,21 @@ impl t500 {
         let v2 = p1 * p2 * p3 * p4;
         let v3 = self.f503(v2 as usize);
         let v4 = t527 {
-            batch: p1, channels: p2, in_h: p3, in_w: p4, out_h: v0, out_w: v1, scale_h: p5, scale_w: p6,
+            batch: p1,
+            channels: p2,
+            in_h: p3,
+            in_w: p4,
+            out_h: v0,
+            out_w: v1,
+            scale_h: p5,
+            scale_w: p6,
         };
         self.f543(
-            SHADER_UPSAMPLE_NEAREST_BACKWARD, Some("upsample_back"),
-            &v4, &[p0], &v3,
+            SHADER_UPSAMPLE_NEAREST_BACKWARD,
+            Some("upsample_back"),
+            &v4,
+            &[p0],
+            &v3,
             super::f540(v2),
         );
         Ok(v3)
@@ -140,18 +169,31 @@ impl t500 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // CPU reference upsample
-    fn cpu_upsample(input: &[f32], batch: usize, ch: usize, h: usize, w: usize, sh: usize, sw: usize) -> Vec<f32> {
-        let oh = h * sh; let ow = w * sw;
+    fn cpu_upsample(
+        input: &[f32],
+        batch: usize,
+        ch: usize,
+        h: usize,
+        w: usize,
+        sh: usize,
+        sw: usize,
+    ) -> Vec<f32> {
+        let oh = h * sh;
+        let ow = w * sw;
         let mut out = vec![0.0f32; batch * ch * oh * ow];
         for n in 0..batch {
             for c in 0..ch {
                 for y in 0..oh {
                     for x in 0..ow {
-                        let iy = y * h / oh; let ix = x * w / ow;
-                        out[n*ch*oh*ow + c*oh*ow + y*ow + x] = input[n*ch*h*w + c*h*w + iy*w + ix];
+                        let iy = y * h / oh;
+                        let ix = x * w / ow;
+                        out[n * ch * oh * ow + c * oh * ow + y * ow + x] =
+                            input[n * ch * h * w + c * h * w + iy * w + ix];
                     }
                 }
             }
@@ -162,20 +204,24 @@ mod tests {
     #[test]
     fn f660_2x() {
         let v0 = dev().f502(&[1.0, 2.0, 3.0, 4.0]);
-        let v1 = dev().f504(&dev().f660(&v0, 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
-        assert_eq!(v1, vec![
-            1.0, 1.0, 2.0, 2.0,
-            1.0, 1.0, 2.0, 2.0,
-            3.0, 3.0, 4.0, 4.0,
-            3.0, 3.0, 4.0, 4.0,
-        ]);
+        let v1 = dev()
+            .f504(&dev().f660(&v0, 1, 1, 2, 2, 2, 2).unwrap())
+            .unwrap();
+        assert_eq!(
+            v1,
+            vec![
+                1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0,
+            ]
+        );
     }
 
     #[test]
     fn f660_3x_vs_cpu() {
         let v0: Vec<f32> = (1..=6).map(|x| x as f32).collect();
         let v1 = cpu_upsample(&v0, 1, 1, 2, 3, 3, 3);
-        let v2 = dev().f504(&dev().f660(&dev().f502(&v0), 1, 1, 2, 3, 3, 3).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f660(&dev().f502(&v0), 1, 1, 2, 3, 3, 3).unwrap())
+            .unwrap();
         assert_eq!(v2, v1);
     }
 
@@ -183,28 +229,42 @@ mod tests {
     fn f660_batched_multichannel_vs_cpu() {
         let v0: Vec<f32> = (0..24).map(|i| i as f32).collect();
         let v1 = cpu_upsample(&v0, 2, 3, 2, 2, 2, 2);
-        let v2 = dev().f504(&dev().f660(&dev().f502(&v0), 2, 3, 2, 2, 2, 2).unwrap()).unwrap();
+        let v2 = dev()
+            .f504(&dev().f660(&dev().f502(&v0), 2, 3, 2, 2, 2, 2).unwrap())
+            .unwrap();
         assert_eq!(v2, v1);
     }
 
     #[test]
     fn f660_1x1() {
-        let v0 = dev().f504(&dev().f660(&dev().f502(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f660(&dev().f502(&[7.0]), 1, 1, 1, 1, 3, 3).unwrap())
+            .unwrap();
         assert_eq!(v0, vec![7.0; 9]);
     }
 
     // --- f661 = upsample_nearest_backward ---
     // CPU reference: accumulate grad contributions from each output pixel into input pixel.
-    fn cpu_upsample_backward(grad: &[f32], batch: usize, ch: usize, in_h: usize, in_w: usize, sh: usize, sw: usize) -> Vec<f32> {
-        let oh = in_h * sh; let ow = in_w * sw;
+    fn cpu_upsample_backward(
+        grad: &[f32],
+        batch: usize,
+        ch: usize,
+        in_h: usize,
+        in_w: usize,
+        sh: usize,
+        sw: usize,
+    ) -> Vec<f32> {
+        let oh = in_h * sh;
+        let ow = in_w * sw;
         let mut out = vec![0.0f32; batch * ch * in_h * in_w];
         for n in 0..batch {
             for c in 0..ch {
                 for oy in 0..oh {
                     for ox in 0..ow {
-                        let iy = oy / sh; let ix = ox / sw;
-                        out[n*ch*in_h*in_w + c*in_h*in_w + iy*in_w + ix] +=
-                            grad[n*ch*oh*ow + c*oh*ow + oy*ow + ox];
+                        let iy = oy / sh;
+                        let ix = ox / sw;
+                        out[n * ch * in_h * in_w + c * in_h * in_w + iy * in_w + ix] +=
+                            grad[n * ch * oh * ow + c * oh * ow + oy * ow + ox];
                     }
                 }
             }
@@ -217,20 +277,40 @@ mod tests {
         // 1ch 2×2 input, 2× upsample → 4×4 grad_out, grad_in should sum 4 contributions per cell.
         // grad_out = all 1s → each in pixel gets 4.
         let grad = vec![1.0f32; 16]; // [1,1,4,4]
-        let got = dev().f504(&dev().f661(&dev().f502(&grad), 1, 1, 2, 2, 2, 2).unwrap()).unwrap();
+        let got = dev()
+            .f504(&dev().f661(&dev().f502(&grad), 1, 1, 2, 2, 2, 2).unwrap())
+            .unwrap();
         assert_eq!(got, vec![4.0, 4.0, 4.0, 4.0]);
     }
 
     #[test]
     fn f661_vs_cpu() {
         // 2 batch, 2 ch, 2×3 input, scale 2×2 → 4×6 grad_out.
-        let batch=2; let ch=2; let h=2; let w=3; let sh=2; let sw=2;
-        let oh=h*sh; let ow=w*sw;
-        let grad: Vec<f32> = (0..batch*ch*oh*ow).map(|i| i as f32 * 0.1).collect();
+        let batch = 2;
+        let ch = 2;
+        let h = 2;
+        let w = 3;
+        let sh = 2;
+        let sw = 2;
+        let oh = h * sh;
+        let ow = w * sw;
+        let grad: Vec<f32> = (0..batch * ch * oh * ow).map(|i| i as f32 * 0.1).collect();
         let expected = cpu_upsample_backward(&grad, batch, ch, h, w, sh, sw);
-        let got = dev().f504(&dev().f661(
-            &dev().f502(&grad), batch as u32, ch as u32, h as u32, w as u32, sh as u32, sw as u32,
-        ).unwrap()).unwrap();
+        let got = dev()
+            .f504(
+                &dev()
+                    .f661(
+                        &dev().f502(&grad),
+                        batch as u32,
+                        ch as u32,
+                        h as u32,
+                        w as u32,
+                        sh as u32,
+                        sw as u32,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
         for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
             assert!((g - e).abs() < 1e-4, "index {i}: got {g}, want {e}");
         }

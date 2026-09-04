@@ -30,14 +30,17 @@ impl t544 {
     /// f776 = Tokenizer::encode. Text → token IDs.
     /// `add_special`: whether to add BOS/EOS tokens per the tokenizer config.
     pub fn f776(&self, text: &str, add_special: bool) -> Result<Vec<u32>> {
-        let enc = self.0.encode(text, add_special)
+        let enc = self
+            .0
+            .encode(text, add_special)
             .map_err(|e| anyhow::anyhow!("encode failed: {e}"))?;
         Ok(enc.get_ids().to_vec())
     }
 
     /// f777 = Tokenizer::decode. Token IDs → text, skipping special tokens.
     pub fn f777(&self, ids: &[u32]) -> Result<String> {
-        self.0.decode(ids, true)
+        self.0
+            .decode(ids, true)
             .map_err(|e| anyhow::anyhow!("decode failed: {e}"))
     }
 
@@ -49,7 +52,14 @@ impl t544 {
     /// f779 = Tokenizer::eos_id. Returns the EOS token id if registered.
     /// Checks common EOS names across model families.
     pub fn f779(&self) -> Option<u32> {
-        for name in &["</s>", "<eos>", "<|endoftext|>", "<|im_end|>", "[EOS]", "<EOS>"] {
+        for name in &[
+            "</s>",
+            "<eos>",
+            "<|endoftext|>",
+            "<|im_end|>",
+            "[EOS]",
+            "<EOS>",
+        ] {
             if let Some(id) = self.0.token_to_id(name) {
                 return Some(id);
             }
@@ -72,8 +82,11 @@ mod tests {
     fn make_tok() -> t544 {
         // WordLevel::builder().vocab() requires AHashMap; collect via from_iter.
         let pairs: Vec<(String, u32)> = vec![
-            ("<unk>".into(), 0), ("</s>".into(), 1), ("hello".into(), 2),
-            ("world".into(), 3), ("foo".into(), 4),
+            ("<unk>".into(), 0),
+            ("</s>".into(), 1),
+            ("hello".into(), 2),
+            ("world".into(), 3),
+            ("foo".into(), 4),
         ];
         let vocab = pairs.into_iter().collect();
         let model = WordLevel::builder()

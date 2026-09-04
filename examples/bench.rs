@@ -66,11 +66,24 @@ fn bench_size(dev: &t500, size: usize) {
     let gpu_gflops_compute = flops / gpu_compute.as_secs_f64() / 1e9;
 
     println!("matmul {m}x{k} * {k}x{n}:");
-    println!("  CPU:              {:>8.2} ms  ({:.2} GFLOPS)", cpu_time.as_secs_f64() * 1e3, cpu_gflops);
-    println!("  GPU (w/ transfer):{:>8.2} ms  ({:.2} GFLOPS)", gpu_total.as_secs_f64() * 1e3, gpu_gflops_total);
-    println!("  GPU (compute):    {:>8.2} ms  ({:.2} GFLOPS)", gpu_compute.as_secs_f64() * 1e3, gpu_gflops_compute);
+    println!(
+        "  CPU:              {:>8.2} ms  ({:.2} GFLOPS)",
+        cpu_time.as_secs_f64() * 1e3,
+        cpu_gflops
+    );
+    println!(
+        "  GPU (w/ transfer):{:>8.2} ms  ({:.2} GFLOPS)",
+        gpu_total.as_secs_f64() * 1e3,
+        gpu_gflops_total
+    );
+    println!(
+        "  GPU (compute):    {:>8.2} ms  ({:.2} GFLOPS)",
+        gpu_compute.as_secs_f64() * 1e3,
+        gpu_gflops_compute
+    );
     println!("  max error:        {max_err:.6}");
-    println!("  speedup:          {:.1}x (total), {:.1}x (compute)",
+    println!(
+        "  speedup:          {:.1}x (total), {:.1}x (compute)",
         cpu_time.as_secs_f64() / gpu_total.as_secs_f64(),
         cpu_time.as_secs_f64() / gpu_compute.as_secs_f64(),
     );
@@ -82,10 +95,7 @@ fn main() {
     println!("=================\n");
 
     let dev = t500::f500().expect("no GPU available");
-    println!(
-        "device: {} ({})\n",
-        dev.s502, dev.s503
-    );
+    println!("device: {} ({})\n", dev.s502, dev.s503);
 
     for &size in &[64, 128, 256, 512, 1024] {
         bench_size(&dev, size);

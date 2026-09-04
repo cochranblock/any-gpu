@@ -18,18 +18,9 @@ fn main() -> anyhow::Result<()> {
     let mut cache = t534::f672(&dev, max_seq, bh, d_k);
 
     // ----- Prefill: 2 tokens at positions {0, 1} -----
-    let q_prefill = dev.f502(&[
-        0.10, 0.20, 0.30, 0.40,
-        0.50, 0.60, 0.70, 0.80,
-    ]);
-    let k_prefill_raw = dev.f502(&[
-        1.00, 0.00, 0.50, -0.50,
-        0.20, 0.40, -0.30, 0.70,
-    ]);
-    let v_prefill = dev.f502(&[
-        0.90, -0.10, 0.20, 0.30,
-        -0.40, 0.50, 0.60, -0.20,
-    ]);
+    let q_prefill = dev.f502(&[0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]);
+    let k_prefill_raw = dev.f502(&[1.00, 0.00, 0.50, -0.50, 0.20, 0.40, -0.30, 0.70]);
+    let v_prefill = dev.f502(&[0.90, -0.10, 0.20, 0.30, -0.40, 0.50, 0.60, -0.20]);
 
     let q_prefill_rot = dev.f625(&q_prefill, bh, 2, d_k, 0, 10000.0)?;
     let k_prefill_rot = dev.f625(&k_prefill_raw, bh, 2, d_k, 0, 10000.0)?;
@@ -44,8 +35,10 @@ fn main() -> anyhow::Result<()> {
     for row in prefill_vec.chunks(d_k as usize) {
         println!("  {:?}", row);
     }
-    assert!(prefill_vec.iter().all(|x| x.is_finite()),
-        "prefill output must be finite (no NaN/INF from mask leak)");
+    assert!(
+        prefill_vec.iter().all(|x| x.is_finite()),
+        "prefill output must be finite (no NaN/INF from mask leak)"
+    );
 
     // ----- Decode: 1 token at absolute position 2 -----
     let q_decode = dev.f502(&[-0.20, 0.70, 0.40, -0.10]);
@@ -62,8 +55,14 @@ fn main() -> anyhow::Result<()> {
     let decode_out = dev.f623(&q_decode_rot, &k_used, &v_used, bh, 1, kv_len, d_k)?;
     let decode_vec = dev.f504(&decode_out)?;
     println!("decode (kv_len={kv_len}): {:?}", decode_vec);
-    assert!(decode_vec.iter().all(|x| x.is_finite()), "decode output finite");
-    assert!(decode_vec.iter().any(|&x| x.abs() > 0.01), "decode output non-trivial");
+    assert!(
+        decode_vec.iter().all(|x| x.is_finite()),
+        "decode output finite"
+    );
+    assert!(
+        decode_vec.iter().any(|&x| x.abs() > 0.01),
+        "decode output non-trivial"
+    );
 
     // ----- Reset and reuse the cache -----
     cache.f674();

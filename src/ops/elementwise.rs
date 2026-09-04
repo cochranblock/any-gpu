@@ -4,7 +4,7 @@
 // Element-wise ops: f550..f558 forward, f559..f562 backward, f563 = gelu.
 
 use crate::device::{t500, t501};
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 const SHADER_ADD: &str = "
 struct Params { n: u32, _p0: u32, _p1: u32, _p2: u32, }
@@ -205,19 +205,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 impl t500 {
     /// f550 = add. Element-wise add of two equally sized buffers.
     pub fn f550(&self, p0: &t501, p1: &t501) -> Result<t501> {
-        ensure!(p0.s507 == p1.s507, "add: length mismatch ({} vs {})", p0.s507, p1.s507);
+        ensure!(
+            p0.s507 == p1.s507,
+            "add: length mismatch ({} vs {})",
+            p0.s507,
+            p1.s507
+        );
         self.f542(SHADER_ADD, p0, p1)
     }
 
     /// f551 = sub. Element-wise subtraction.
     pub fn f551(&self, p0: &t501, p1: &t501) -> Result<t501> {
-        ensure!(p0.s507 == p1.s507, "sub: length mismatch ({} vs {})", p0.s507, p1.s507);
+        ensure!(
+            p0.s507 == p1.s507,
+            "sub: length mismatch ({} vs {})",
+            p0.s507,
+            p1.s507
+        );
         self.f542(SHADER_SUB, p0, p1)
     }
 
     /// f552 = mul. Element-wise multiply.
     pub fn f552(&self, p0: &t501, p1: &t501) -> Result<t501> {
-        ensure!(p0.s507 == p1.s507, "mul: length mismatch ({} vs {})", p0.s507, p1.s507);
+        ensure!(
+            p0.s507 == p1.s507,
+            "mul: length mismatch ({} vs {})",
+            p0.s507,
+            p1.s507
+        );
         self.f542(SHADER_MUL, p0, p1)
     }
 
@@ -250,8 +265,19 @@ impl t500 {
     /// f553 = scale. out = a * scalar.
     pub fn f553(&self, p0: &t501, p1: f32) -> Result<t501> {
         let v0 = self.f503(p0.s507);
-        let v1 = t512 { n: p0.s507 as u32, scale: p1, _pad: [0; 2] };
-        self.f543(SHADER_SCALE, None, &v1, &[p0], &v0, super::f540(p0.s507 as u32));
+        let v1 = t512 {
+            n: p0.s507 as u32,
+            scale: p1,
+            _pad: [0; 2],
+        };
+        self.f543(
+            SHADER_SCALE,
+            None,
+            &v1,
+            &[p0],
+            &v0,
+            super::f540(p0.s507 as u32),
+        );
         Ok(v0)
     }
 
@@ -286,11 +312,17 @@ impl t500 {
 mod tests {
     use super::*;
     use crate::ops::f544;
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // CPU references for cross-validation
-    fn cpu_sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
-    fn cpu_swish(x: f32) -> f32 { x * cpu_sigmoid(x) }
+    fn cpu_sigmoid(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
+    fn cpu_swish(x: f32) -> f32 {
+        x * cpu_sigmoid(x)
+    }
 
     #[test]
     fn f550_basic() {
@@ -306,13 +338,21 @@ mod tests {
         let v0: Vec<f32> = (0..13).map(|i| i as f32).collect();
         let v1: Vec<f32> = (0..13).map(|i| i as f32 * 10.0).collect();
         let v2: Vec<f32> = v0.iter().zip(&v1).map(|(a, b)| a + b).collect();
-        let v3 = dev().f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap())
+            .unwrap();
         assert_eq!(v3, v2);
     }
 
     #[test]
     fn f550_single_element() {
-        let v0 = dev().f504(&dev().f550(&dev().f502(&[42.0]), &dev().f502(&[-42.0])).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(
+                &dev()
+                    .f550(&dev().f502(&[42.0]), &dev().f502(&[-42.0]))
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(v0, vec![0.0]);
     }
 
@@ -349,7 +389,9 @@ mod tests {
 
     #[test]
     fn f554_all_negative() {
-        let v0 = dev().f504(&dev().f554(&dev().f502(&[-100.0, -0.001, -1e-10])).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f554(&dev().f502(&[-100.0, -0.001, -1e-10])).unwrap())
+            .unwrap();
         assert_eq!(v0, vec![0.0, 0.0, 0.0]);
     }
 
@@ -385,13 +427,13 @@ mod tests {
         // would diverge from these reference values.
         let v0: Vec<f32> = vec![-10.0, -2.0, -1.0, 0.0, 1.0, 2.0, 10.0];
         let v1: Vec<f32> = vec![
-            4.5397868e-5,   // sigmoid(-10)
-            0.11920292,     // sigmoid(-2)
-            0.26894142,     // sigmoid(-1)
-            0.5,            // sigmoid(0)
-            0.73105858,     // sigmoid(1)
-            0.88079708,     // sigmoid(2)
-            0.9999546,      // sigmoid(10)
+            4.5397868e-5, // sigmoid(-10)
+            0.11920292,   // sigmoid(-2)
+            0.26894142,   // sigmoid(-1)
+            0.5,          // sigmoid(0)
+            0.73105858,   // sigmoid(1)
+            0.88079708,   // sigmoid(2)
+            0.9999546,    // sigmoid(10)
         ];
         let v2 = dev().f504(&dev().f555(&dev().f502(&v0)).unwrap()).unwrap();
         f544(&v2, &v1, 1e-5);
@@ -403,11 +445,11 @@ mod tests {
         // of the cpu_swish helper which is the same formula as the shader.
         let v0: Vec<f32> = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
         let v1: Vec<f32> = vec![
-            -0.23840584,    // silu(-2) = -2 * sigmoid(-2)
-            -0.26894142,    // silu(-1)
-             0.0,           // silu(0)
-             0.73105858,    // silu(1)
-             1.76159416,    // silu(2)
+            -0.23840584, // silu(-2) = -2 * sigmoid(-2)
+            -0.26894142, // silu(-1)
+            0.0,         // silu(0)
+            0.73105858,  // silu(1)
+            1.76159416,  // silu(2)
         ];
         let v2 = dev().f504(&dev().f556(&dev().f502(&v0)).unwrap()).unwrap();
         f544(&v2, &v1, 1e-5);
@@ -422,10 +464,10 @@ mod tests {
             -0.04540231,
             -0.15880801,
             -0.15428598,
-             0.0,
-             0.34571400,
-             0.84119199,
-             1.95459769,
+            0.0,
+            0.34571400,
+            0.84119199,
+            1.95459769,
         ];
         let v2 = dev().f504(&dev().f563(&dev().f502(&v0)).unwrap()).unwrap();
         f544(&v2, &v1, 1e-4);
@@ -433,7 +475,9 @@ mod tests {
 
     #[test]
     fn f563_zero_is_zero() {
-        let v0 = dev().f504(&dev().f563(&dev().f502(&[0.0])).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f563(&dev().f502(&[0.0])).unwrap())
+            .unwrap();
         assert!(v0[0].abs() < 1e-6);
     }
 
@@ -455,19 +499,25 @@ mod tests {
 
     #[test]
     fn f553_basic() {
-        let v0 = dev().f504(&dev().f553(&dev().f502(&[1.0, 2.0, 3.0, 4.0]), 0.5).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f553(&dev().f502(&[1.0, 2.0, 3.0, 4.0]), 0.5).unwrap())
+            .unwrap();
         assert_eq!(v0, vec![0.5, 1.0, 1.5, 2.0]);
     }
 
     #[test]
     fn f553_zero() {
-        let v0 = dev().f504(&dev().f553(&dev().f502(&[99.0, -99.0]), 0.0).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f553(&dev().f502(&[99.0, -99.0]), 0.0).unwrap())
+            .unwrap();
         assert_eq!(v0, vec![0.0, 0.0]);
     }
 
     #[test]
     fn f553_negative() {
-        let v0 = dev().f504(&dev().f553(&dev().f502(&[1.0, -2.0, 3.0]), -2.0).unwrap()).unwrap();
+        let v0 = dev()
+            .f504(&dev().f553(&dev().f502(&[1.0, -2.0, 3.0]), -2.0).unwrap())
+            .unwrap();
         assert_eq!(v0, vec![-2.0, 4.0, -6.0]);
     }
 
@@ -501,7 +551,9 @@ mod tests {
         let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3 - 15.0).collect();
         let v1: Vec<f32> = (0..100).map(|i| (i as f32) * -0.2 + 10.0).collect();
         let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x + y).collect();
-        let v3 = dev().f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f550(&dev().f502(&v0), &dev().f502(&v1)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-5);
     }
 
@@ -510,7 +562,9 @@ mod tests {
         let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.7).collect();
         let v1: Vec<f32> = (0..100).map(|i| (i as f32) * 0.3).collect();
         let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x - y).collect();
-        let v3 = dev().f504(&dev().f551(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f551(&dev().f502(&v0), &dev().f502(&v1)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-5);
     }
 
@@ -519,7 +573,9 @@ mod tests {
         let v0: Vec<f32> = (0..100).map(|i| (i as f32) * 0.1 - 5.0).collect();
         let v1: Vec<f32> = (0..100).map(|i| (i as f32) * 0.05 + 0.5).collect();
         let v2: Vec<f32> = v0.iter().zip(&v1).map(|(x, y)| x * y).collect();
-        let v3 = dev().f504(&dev().f552(&dev().f502(&v0), &dev().f502(&v1)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f552(&dev().f502(&v0), &dev().f502(&v1)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-4);
     }
 
@@ -538,7 +594,9 @@ mod tests {
         let v0 = vec![0.5, 0.7311, 0.2689]; // sigmoid outputs
         let v1 = vec![1.0, 1.0, 1.0];
         let v2: Vec<f32> = v0.iter().zip(&v1).map(|(s, g)| g * s * (1.0 - s)).collect();
-        let v3 = dev().f504(&dev().f560(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f560(&dev().f502(&v1), &dev().f502(&v0)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-3);
     }
 
@@ -546,11 +604,16 @@ mod tests {
     fn f561_vs_cpu() {
         let v0 = vec![0.0, 1.0, -1.0, 2.0];
         let v1 = vec![1.0, 1.0, 1.0, 1.0];
-        let v2: Vec<f32> = v0.iter().map(|&x| {
-            let s = 1.0f32 / (1.0f32 + (-(x as f32)).exp());
-            s + x * s * (1.0 - s)
-        }).collect();
-        let v3 = dev().f504(&dev().f561(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        let v2: Vec<f32> = v0
+            .iter()
+            .map(|&x| {
+                let s = 1.0f32 / (1.0f32 + (-(x as f32)).exp());
+                s + x * s * (1.0 - s)
+            })
+            .collect();
+        let v3 = dev()
+            .f504(&dev().f561(&dev().f502(&v1), &dev().f502(&v0)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-3);
     }
 
@@ -559,7 +622,9 @@ mod tests {
         let v0 = vec![0.0, 0.7616, -0.7616, 0.9951]; // tanh outputs
         let v1 = vec![1.0, 1.0, 1.0, 1.0];
         let v2: Vec<f32> = v0.iter().map(|&t| 1.0 - t * t).collect();
-        let v3 = dev().f504(&dev().f562(&dev().f502(&v1), &dev().f502(&v0)).unwrap()).unwrap();
+        let v3 = dev()
+            .f504(&dev().f562(&dev().f502(&v1), &dev().f502(&v0)).unwrap())
+            .unwrap();
         f544(&v3, &v2, 1e-3);
     }
 }

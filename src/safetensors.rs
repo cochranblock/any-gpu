@@ -14,7 +14,7 @@
 //   f766 = bf16_to_f32, f767 = f16_to_f32 (free fns; useful outside this module too)
 
 use crate::device::{t500, t501};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use safetensors::tensor::{Dtype, SafeTensors};
 use std::collections::HashMap;
 use std::path::Path;
@@ -60,37 +60,46 @@ impl t538 {
                     // guaranteed to be 4-byte aligned, so a direct bytemuck cast
                     // can fail on strict-alignment targets.
                     if v6.len() != v8 * 4 {
-                        bail!("safetensors: tensor `{v3}` size mismatch (got {} bytes, expected {})",
-                            v6.len(), v8 * 4);
+                        bail!(
+                            "safetensors: tensor `{v3}` size mismatch (got {} bytes, expected {})",
+                            v6.len(),
+                            v8 * 4
+                        );
                     }
                     (0..v8)
                         .map(|v10| {
                             let v11 = v10 * 4;
-                            f32::from_le_bytes([v6[v11], v6[v11+1], v6[v11+2], v6[v11+3]])
+                            f32::from_le_bytes([v6[v11], v6[v11 + 1], v6[v11 + 2], v6[v11 + 3]])
                         })
                         .collect()
                 }
                 Dtype::BF16 => {
                     if v6.len() != v8 * 2 {
-                        bail!("safetensors: tensor `{v3}` bf16 size mismatch (got {} bytes, expected {})",
-                            v6.len(), v8 * 2);
+                        bail!(
+                            "safetensors: tensor `{v3}` bf16 size mismatch (got {} bytes, expected {})",
+                            v6.len(),
+                            v8 * 2
+                        );
                     }
                     (0..v8)
                         .map(|v10| {
                             let v11 = v10 * 2;
-                            f766(u16::from_le_bytes([v6[v11], v6[v11+1]]))
+                            f766(u16::from_le_bytes([v6[v11], v6[v11 + 1]]))
                         })
                         .collect()
                 }
                 Dtype::F16 => {
                     if v6.len() != v8 * 2 {
-                        bail!("safetensors: tensor `{v3}` f16 size mismatch (got {} bytes, expected {})",
-                            v6.len(), v8 * 2);
+                        bail!(
+                            "safetensors: tensor `{v3}` f16 size mismatch (got {} bytes, expected {})",
+                            v6.len(),
+                            v8 * 2
+                        );
                     }
                     (0..v8)
                         .map(|v10| {
                             let v11 = v10 * 2;
-                            f767(u16::from_le_bytes([v6[v11], v6[v11+1]]))
+                            f767(u16::from_le_bytes([v6[v11], v6[v11 + 1]]))
                         })
                         .collect()
                 }
@@ -125,7 +134,8 @@ impl t538 {
     /// f765 = SafetensorsModel::upload. Upload the named tensor to GPU and return
     /// the resulting buffer. Caller pairs this with `f763` for shape.
     pub fn f765(&self, p0: &t500, p1: &str) -> Result<t501> {
-        let v0 = self.f764(p1)
+        let v0 = self
+            .f764(p1)
             .with_context(|| format!("safetensors: tensor `{p1}` not present in this model"))?;
         Ok(p0.f502(v0))
     }
@@ -142,8 +152,8 @@ pub fn f766(p0: u16) -> f32 {
 /// infinities, and NaNs.
 pub fn f767(p0: u16) -> f32 {
     let v0 = ((p0 as u32) & 0x8000) << 16; // sign bit moved to position 31
-    let v1 = (p0 as u32 >> 10) & 0x1f;     // 5-bit exponent
-    let v2 = (p0 as u32) & 0x3ff;          // 10-bit mantissa
+    let v1 = (p0 as u32 >> 10) & 0x1f; // 5-bit exponent
+    let v2 = (p0 as u32) & 0x3ff; // 10-bit mantissa
 
     let v3: u32 = if v1 == 0 {
         if v2 == 0 {
@@ -174,9 +184,11 @@ pub fn f767(p0: u16) -> f32 {
 mod tests {
     use super::*;
     use crate::ops::f544;
-    use safetensors::tensor::{serialize, TensorView};
+    use safetensors::tensor::{TensorView, serialize};
 
-    fn dev() -> &'static t500 { &crate::ops::TEST_DEV }
+    fn dev() -> &'static t500 {
+        &crate::ops::TEST_DEV
+    }
 
     // --- f766 = bf16_to_f32 (hardcoded reference values) ---
 
@@ -270,7 +282,10 @@ mod tests {
             .iter()
             .map(|(v1, v2, v3)| {
                 let v8: Vec<usize> = v2.iter().map(|&p| p as usize).collect();
-                (v1.as_str(), TensorView::new(Dtype::F32, v8, v3.as_slice()).unwrap())
+                (
+                    v1.as_str(),
+                    TensorView::new(Dtype::F32, v8, v3.as_slice()).unwrap(),
+                )
             })
             .collect();
         serialize(v7, &None).unwrap()
@@ -288,8 +303,8 @@ mod tests {
     fn f761_multi_f32_tensors() {
         let v0 = build_f32_safetensors(&[
             ("embed", vec![10, 4], vec![0.5; 40]),
-            ("ln_w",  vec![4],     vec![1.0, 1.0, 1.0, 1.0]),
-            ("ln_b",  vec![4],     vec![0.0, 0.0, 0.0, 0.0]),
+            ("ln_w", vec![4], vec![1.0, 1.0, 1.0, 1.0]),
+            ("ln_b", vec![4], vec![0.0, 0.0, 0.0, 0.0]),
         ]);
         let v1 = t538::f761(&v0).unwrap();
         let mut v2 = v1.f762();
@@ -306,7 +321,9 @@ mod tests {
         // then load and verify dequant matches f766 directly.
         let v0: Vec<u16> = vec![0x3f80, 0x4000, 0xbf80, 0x0000, 0x3f00]; // 1, 2, -1, 0, 0.5
         let mut v1 = Vec::with_capacity(v0.len() * 2);
-        for &v2 in &v0 { v1.extend_from_slice(&v2.to_le_bytes()); }
+        for &v2 in &v0 {
+            v1.extend_from_slice(&v2.to_le_bytes());
+        }
         let v3 = vec![("w", TensorView::new(Dtype::BF16, vec![5], &v1).unwrap())];
         let v4 = serialize(v3, &None).unwrap();
         let v5 = t538::f761(&v4).unwrap();
@@ -318,7 +335,9 @@ mod tests {
     fn f761_f16_dequantizes_to_f32() {
         let v0: Vec<u16> = vec![0x3c00, 0x4000, 0xbc00, 0x0000, 0x3800]; // 1, 2, -1, 0, 0.5
         let mut v1 = Vec::with_capacity(v0.len() * 2);
-        for &v2 in &v0 { v1.extend_from_slice(&v2.to_le_bytes()); }
+        for &v2 in &v0 {
+            v1.extend_from_slice(&v2.to_le_bytes());
+        }
         let v3 = vec![("w", TensorView::new(Dtype::F16, vec![5], &v1).unwrap())];
         let v4 = serialize(v3, &None).unwrap();
         let v5 = t538::f761(&v4).unwrap();
@@ -339,7 +358,9 @@ mod tests {
         // I32 isn't a transformer-weight dtype we handle in step 3.
         let v0: Vec<i32> = vec![1, 2, 3];
         let mut v1 = Vec::with_capacity(v0.len() * 4);
-        for &v2 in &v0 { v1.extend_from_slice(&v2.to_le_bytes()); }
+        for &v2 in &v0 {
+            v1.extend_from_slice(&v2.to_le_bytes());
+        }
         let v3 = vec![("counts", TensorView::new(Dtype::I32, vec![3], &v1).unwrap())];
         let v4 = serialize(v3, &None).unwrap();
         let v5 = t538::f761(&v4);
@@ -347,7 +368,10 @@ mod tests {
             Err(p) => format!("{p}"),
             Ok(_) => panic!("I32 should fail load"),
         };
-        assert!(v6.contains("unsupported dtype"), "error message should name the issue: {v6}");
+        assert!(
+            v6.contains("unsupported dtype"),
+            "error message should name the issue: {v6}"
+        );
     }
 
     // --- f765 = upload ---
@@ -380,7 +404,11 @@ mod tests {
         std::fs::write(v1.path(), &v0).unwrap();
         let v2 = t538::f760(v1.path()).unwrap();
         assert_eq!(v2.f763("layer.0.weight"), Some(&[2u32, 2][..]));
-        f544(v2.f764("layer.0.weight").unwrap(), &[0.1, 0.2, 0.3, 0.4], 1e-6);
+        f544(
+            v2.f764("layer.0.weight").unwrap(),
+            &[0.1, 0.2, 0.3, 0.4],
+            1e-6,
+        );
     }
 
     #[test]

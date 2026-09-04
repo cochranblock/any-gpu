@@ -10,13 +10,13 @@
 //   cargo run --release --example nanobyte -- --data ... --steps 20000 --save nb.bin
 //   cargo run --release --example nanobyte -- --data ... --resume nb.bin --sample out.png
 
-use anyhow::{bail, Result};
 use any_gpu::{
     autograd::{t503, t506},
     optim::t507,
     t500,
     train::{f734, t550},
 };
+use anyhow::{Result, bail};
 use clap::Parser;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -24,30 +24,41 @@ use std::time::Instant;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const CH: [u32; 3] = [32, 64, 64];  // U-Net channel widths
-const TD: usize = 64;                // time embedding dim
-const DDPM_T: u32 = 1000;           // diffusion timesteps
-const SP: u32 = 32;                  // spatial size
-const IC: u32 = 4;                   // input channels (RGBA)
+const CH: [u32; 3] = [32, 64, 64]; // U-Net channel widths
+const TD: usize = 64; // time embedding dim
+const DDPM_T: u32 = 1000; // diffusion timesteps
+const SP: u32 = 32; // spatial size
+const IC: u32 = 4; // input channels (RGBA)
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "nanobyte", about = "Train NanoUNet on 32×32 pixel art")]
 struct Cli {
-    #[arg(long)]                       data: String,
-    #[arg(long, default_value = "10000")] steps: u32,
-    #[arg(long, default_value = "0.0001")] lr: f32,
-    #[arg(long, default_value = "4")]  batch: u32,
-    #[arg(long)]                       save: Option<String>,
-    #[arg(long)]                       resume: Option<String>,
-    #[arg(long)]                       sample: Option<String>,
-    #[arg(long, default_value = "200")] log_every: u32,
+    #[arg(long)]
+    data: String,
+    #[arg(long, default_value = "10000")]
+    steps: u32,
+    #[arg(long, default_value = "0.0001")]
+    lr: f32,
+    #[arg(long, default_value = "4")]
+    batch: u32,
+    #[arg(long)]
+    save: Option<String>,
+    #[arg(long)]
+    resume: Option<String>,
+    #[arg(long)]
+    sample: Option<String>,
+    #[arg(long, default_value = "200")]
+    log_every: u32,
 }
 
 // ── DDPM noise schedule ───────────────────────────────────────────────────────
 
-struct Sched { alpha_bar: Vec<f32>, sigma: Vec<f32> }
+struct Sched {
+    alpha_bar: Vec<f32>,
+    sigma: Vec<f32>,
+}
 
 fn make_sched() -> Sched {
     let (b0, b1) = (1e-4f32, 0.02f32);
@@ -65,7 +76,10 @@ fn make_sched() -> Sched {
 fn q_sample(x0: &[f32], t: u32, eps: &[f32], s: &Sched) -> Vec<f32> {
     let ab = s.alpha_bar[t as usize];
     let sig = s.sigma[t as usize];
-    x0.iter().zip(eps).map(|(&x, &e)| ab.sqrt() * x + sig * e).collect()
+    x0.iter()
+        .zip(eps)
+        .map(|(&x, &e)| ab.sqrt() * x + sig * e)
+        .collect()
 }
 
 // ── sinusoidal timestep embedding ─────────────────────────────────────────────
@@ -87,28 +101,42 @@ fn timestep_emb(ts: &[u32]) -> Vec<f32> {
 
 fn load_sprites(data_path: &str) -> Result<Vec<Vec<f32>>> {
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() { walk(&p, out); }
-            else if p.extension().and_then(|s| s.to_str()) == Some("png") { out.push(p); }
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("png") {
+                out.push(p);
+            }
         }
     }
     let mut paths = Vec::new();
     walk(std::path::Path::new(data_path), &mut paths);
     let mut sprites = Vec::new();
     for path in &paths {
-        let img = match image::open(path) { Ok(i) => i.into_rgba8(), Err(_) => continue };
-        if img.width() != SP || img.height() != SP { continue; }
+        let img = match image::open(path) {
+            Ok(i) => i.into_rgba8(),
+            Err(_) => continue,
+        };
+        if img.width() != SP || img.height() != SP {
+            continue;
+        }
         let raw = img.as_raw();
         let n = (SP * SP) as usize;
         let mut chw = vec![0.0f32; (IC as usize) * n];
         for i in 0..n {
-            for c in 0..4usize { chw[c * n + i] = raw[4 * i + c] as f32 / 127.5 - 1.0; }
+            for c in 0..4usize {
+                chw[c * n + i] = raw[4 * i + c] as f32 / 127.5 - 1.0;
+            }
         }
         sprites.push(chw);
     }
-    if sprites.is_empty() { bail!("no 32×32 sprites found in {data_path}"); }
+    if sprites.is_empty() {
+        bail!("no 32×32 sprites found in {data_path}");
+    }
     eprintln!("loaded {} sprites", sprites.len());
     Ok(sprites)
 }
@@ -124,82 +152,148 @@ fn randn(rng: &mut impl Rng) -> f32 {
 // ── param layout ─────────────────────────────────────────────────────────────
 
 fn group_count(ch: u32) -> u32 {
-    if ch % 8 == 0 { 8 } else if ch % 4 == 0 { 4 } else { 1 }
+    if ch % 8 == 0 {
+        8
+    } else if ch % 4 == 0 {
+        4
+    } else {
+        1
+    }
 }
 
 fn xavier(n: usize, fan_in: usize, seed: &mut u64) -> Vec<f32> {
     let bound = (6.0 / fan_in.max(1) as f64).sqrt() as f32;
-    (0..n).map(|_| {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * bound
-    }).collect()
+    (0..n)
+        .map(|_| {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * bound
+        })
+        .collect()
 }
 
 #[derive(Clone)]
 struct RbIdx {
-    skip_w: Option<usize>, skip_b: Option<usize>,
-    gn1g: usize, gn1b: usize,
-    c1w: usize,  c1b: usize,
-    tpw:  usize, tpb:  usize,
-    gn2g: usize, gn2b: usize,
-    c2w:  usize, c2b:  usize,
-    in_ch: u32, out_ch: u32,
+    skip_w: Option<usize>,
+    skip_b: Option<usize>,
+    gn1g: usize,
+    gn1b: usize,
+    c1w: usize,
+    c1b: usize,
+    tpw: usize,
+    tpb: usize,
+    gn2g: usize,
+    gn2b: usize,
+    c2w: usize,
+    c2b: usize,
+    in_ch: u32,
+    out_ch: u32,
 }
 
 struct Layout {
-    tl:  [(usize, usize); 2],  // time_lin0, time_lin1 (w, b)
-    ci:  (usize, usize),       // conv_in (w, b)
+    tl: [(usize, usize); 2], // time_lin0, time_lin1 (w, b)
+    ci: (usize, usize),      // conv_in (w, b)
     enc: Vec<[RbIdx; 2]>,
-    dn:  Vec<(usize, usize)>,  // downsample convs
+    dn: Vec<(usize, usize)>, // downsample convs
     mid: [RbIdx; 2],
     dec: Vec<[RbIdx; 2]>,
-    up:  Vec<(usize, usize)>,  // upsample convs
-    gno: (usize, usize),       // gn_out
-    co:  (usize, usize),       // conv_out (w, b)
+    up: Vec<(usize, usize)>, // upsample convs
+    gno: (usize, usize),     // gn_out
+    co: (usize, usize),      // conv_out (w, b)
 }
 
 fn make_rb(ps: &mut Vec<Vec<f32>>, seed: &mut u64, in_ch: u32, out_ch: u32) -> RbIdx {
-    macro_rules! pp { ($e:expr) => {{ let i = ps.len(); ps.push($e); i }} }
+    macro_rules! pp {
+        ($e:expr) => {{
+            let i = ps.len();
+            ps.push($e);
+            i
+        }};
+    }
     let (skip_w, skip_b) = if in_ch != out_ch {
-        (Some(pp!(xavier((out_ch * in_ch) as usize, in_ch as usize, seed))),
-         Some(pp!(vec![0.0f32; out_ch as usize])))
-    } else { (None, None) };
+        (
+            Some(pp!(xavier((out_ch * in_ch) as usize, in_ch as usize, seed))),
+            Some(pp!(vec![0.0f32; out_ch as usize])),
+        )
+    } else {
+        (None, None)
+    };
     let gn1g = pp!(vec![1.0f32; in_ch as usize]);
     let gn1b = pp!(vec![0.0f32; in_ch as usize]);
-    let c1w  = pp!(xavier((out_ch * in_ch * 9) as usize, (in_ch * 9) as usize, seed));
-    let c1b  = pp!(vec![0.0f32; out_ch as usize]);
-    let tpw  = pp!(xavier(TD * out_ch as usize, TD, seed));
-    let tpb  = pp!(vec![0.0f32; out_ch as usize]);
+    let c1w = pp!(xavier(
+        (out_ch * in_ch * 9) as usize,
+        (in_ch * 9) as usize,
+        seed
+    ));
+    let c1b = pp!(vec![0.0f32; out_ch as usize]);
+    let tpw = pp!(xavier(TD * out_ch as usize, TD, seed));
+    let tpb = pp!(vec![0.0f32; out_ch as usize]);
     let gn2g = pp!(vec![1.0f32; out_ch as usize]);
     let gn2b = pp!(vec![0.0f32; out_ch as usize]);
-    let c2w  = pp!(xavier((out_ch * out_ch * 9) as usize, (out_ch * 9) as usize, seed));
-    let c2b  = pp!(vec![0.0f32; out_ch as usize]);
-    RbIdx { skip_w, skip_b, gn1g, gn1b, c1w, c1b, tpw, tpb, gn2g, gn2b, c2w, c2b, in_ch, out_ch }
+    let c2w = pp!(xavier(
+        (out_ch * out_ch * 9) as usize,
+        (out_ch * 9) as usize,
+        seed
+    ));
+    let c2b = pp!(vec![0.0f32; out_ch as usize]);
+    RbIdx {
+        skip_w,
+        skip_b,
+        gn1g,
+        gn1b,
+        c1w,
+        c1b,
+        tpw,
+        tpb,
+        gn2g,
+        gn2b,
+        c2w,
+        c2b,
+        in_ch,
+        out_ch,
+    }
 }
 
 fn init_params() -> (Vec<Vec<f32>>, Layout) {
     let mut ps: Vec<Vec<f32>> = Vec::new();
     let mut seed: u64 = 0xCAFE_BABE_DEAD_BEEF;
-    macro_rules! pp { ($e:expr) => {{ let i = ps.len(); ps.push($e); i }} }
+    macro_rules! pp {
+        ($e:expr) => {{
+            let i = ps.len();
+            ps.push($e);
+            i
+        }};
+    }
 
-    let tl0w = pp!(xavier(TD * TD, TD, &mut seed)); let tl0b = pp!(vec![0.0f32; TD]);
-    let tl1w = pp!(xavier(TD * TD, TD, &mut seed)); let tl1b = pp!(vec![0.0f32; TD]);
+    let tl0w = pp!(xavier(TD * TD, TD, &mut seed));
+    let tl0b = pp!(vec![0.0f32; TD]);
+    let tl1w = pp!(xavier(TD * TD, TD, &mut seed));
+    let tl1b = pp!(vec![0.0f32; TD]);
     let tl = [(tl0w, tl0b), (tl1w, tl1b)];
 
-    let ciw = pp!(xavier((CH[0] * IC * 9) as usize, (IC * 9) as usize, &mut seed));
+    let ciw = pp!(xavier(
+        (CH[0] * IC * 9) as usize,
+        (IC * 9) as usize,
+        &mut seed
+    ));
     let cib = pp!(vec![0.0f32; CH[0] as usize]);
     let ci = (ciw, cib);
 
     // Encoder: 3 levels × 2 ResBlocks; downsamples between levels 0→1 and 1→2
     let mut enc = Vec::new();
-    let mut dn  = Vec::new();
+    let mut dn = Vec::new();
     let mut ch_in = CH[0];
     for (i, &ch_out) in CH.iter().enumerate() {
         let r1 = make_rb(&mut ps, &mut seed, ch_in, ch_out);
         let r2 = make_rb(&mut ps, &mut seed, ch_out, ch_out);
         enc.push([r1, r2]);
         if i < CH.len() - 1 {
-            let dnw = pp!(xavier((ch_out * ch_out * 9) as usize, (ch_out * 9) as usize, &mut seed));
+            let dnw = pp!(xavier(
+                (ch_out * ch_out * 9) as usize,
+                (ch_out * 9) as usize,
+                &mut seed
+            ));
             let dnb = pp!(vec![0.0f32; ch_out as usize]);
             dn.push((dnw, dnb));
         }
@@ -215,15 +309,23 @@ fn init_params() -> (Vec<Vec<f32>>, Layout) {
     // Decoder: reversed levels; upsample convs for levels 1 and 2
     let rev: Vec<u32> = CH.iter().copied().rev().collect();
     let mut dec = Vec::new();
-    let mut up  = Vec::new();
+    let mut up = Vec::new();
     for (i, &ch_out) in rev.iter().enumerate() {
         if i > 0 {
             let prev_ch = rev[i - 1];
-            let upw = pp!(xavier((prev_ch * prev_ch * 9) as usize, (prev_ch * 9) as usize, &mut seed));
+            let upw = pp!(xavier(
+                (prev_ch * prev_ch * 9) as usize,
+                (prev_ch * 9) as usize,
+                &mut seed
+            ));
             let upb = pp!(vec![0.0f32; prev_ch as usize]);
             up.push((upw, upb));
         }
-        let concat_in = if i == 0 { mid_ch + ch_out } else { rev[i - 1] + ch_out };
+        let concat_in = if i == 0 {
+            mid_ch + ch_out
+        } else {
+            rev[i - 1] + ch_out
+        };
         let r1 = make_rb(&mut ps, &mut seed, concat_in, ch_out);
         let r2 = make_rb(&mut ps, &mut seed, ch_out, ch_out);
         dec.push([r1, r2]);
@@ -233,37 +335,98 @@ fn init_params() -> (Vec<Vec<f32>>, Layout) {
     let gnob = pp!(vec![0.0f32; CH[0] as usize]);
     let gno = (gnow, gnob);
 
-    let cow = pp!(xavier((IC * CH[0] * 9) as usize, (CH[0] * 9) as usize, &mut seed));
+    let cow = pp!(xavier(
+        (IC * CH[0] * 9) as usize,
+        (CH[0] * 9) as usize,
+        &mut seed
+    ));
     let cob = pp!(vec![0.0f32; IC as usize]);
     let co = (cow, cob);
 
     let total: usize = ps.iter().map(|v| v.len()).sum();
     eprintln!("NanoUNet: {} params ({} tensors)", total, ps.len());
 
-    let layout = Layout { tl, ci, enc, dn, mid, dec, up, gno, co };
+    let layout = Layout {
+        tl,
+        ci,
+        enc,
+        dn,
+        mid,
+        dec,
+        up,
+        gno,
+        co,
+    };
     (ps, layout)
 }
 
 // ── ResBlock forward ──────────────────────────────────────────────────────────
 
 fn resblock_fwd(
-    tape: &mut t506, ids: &[t503], rb: &RbIdx,
-    x: t503, t_emb: t503, batch: u32, ih: u32, iw: u32,
+    tape: &mut t506,
+    ids: &[t503],
+    rb: &RbIdx,
+    x: t503,
+    t_emb: t503,
+    batch: u32,
+    ih: u32,
+    iw: u32,
 ) -> Result<t503> {
-    let in_ch  = rb.in_ch;
+    let in_ch = rb.in_ch;
     let out_ch = rb.out_ch;
-    let gcin  = group_count(in_ch);
+    let gcin = group_count(in_ch);
     let gcout = group_count(out_ch);
 
     // Skip branch (1×1 conv when channels change)
     let skip = if let (Some(sw), Some(sb)) = (rb.skip_w, rb.skip_b) {
-        tape.f696(x, ids[sw], Some(ids[sb]), batch, in_ch, ih, iw, out_ch, 1, 1, (1,1), (0,0), (1,1), 1)?
-    } else { x };
+        tape.f696(
+            x,
+            ids[sw],
+            Some(ids[sb]),
+            batch,
+            in_ch,
+            ih,
+            iw,
+            out_ch,
+            1,
+            1,
+            (1, 1),
+            (0, 0),
+            (1, 1),
+            1,
+        )?
+    } else {
+        x
+    };
 
     // Main branch: GN → swish → conv1 → time_inject → GN → swish → conv2
-    let h = tape.f698(x, ids[rb.gn1g], ids[rb.gn1b], batch, in_ch, ih * iw, gcin, 1e-5)?;
-    let h = tape.f692(h)?;  // swish
-    let h = tape.f696(h, ids[rb.c1w], Some(ids[rb.c1b]), batch, in_ch, ih, iw, out_ch, 3, 3, (1,1), (1,1), (1,1), 1)?;
+    let h = tape.f698(
+        x,
+        ids[rb.gn1g],
+        ids[rb.gn1b],
+        batch,
+        in_ch,
+        ih * iw,
+        gcin,
+        1e-5,
+    )?;
+    let h = tape.f692(h)?; // swish
+    let h = tape.f696(
+        h,
+        ids[rb.c1w],
+        Some(ids[rb.c1b]),
+        batch,
+        in_ch,
+        ih,
+        iw,
+        out_ch,
+        3,
+        3,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        1,
+    )?;
 
     // Time conditioning: linear(t_emb) → swish → add_broadcast per channel
     let tp = tape.f694(t_emb, ids[rb.tpw], batch, out_ch as u32, TD as u32)?;
@@ -271,9 +434,33 @@ fn resblock_fwd(
     let tp = tape.f692(tp)?;
     let h = tape.f700(h, tp, batch * out_ch, ih * iw)?;
 
-    let h = tape.f698(h, ids[rb.gn2g], ids[rb.gn2b], batch, out_ch, ih * iw, gcout, 1e-5)?;
+    let h = tape.f698(
+        h,
+        ids[rb.gn2g],
+        ids[rb.gn2b],
+        batch,
+        out_ch,
+        ih * iw,
+        gcout,
+        1e-5,
+    )?;
     let h = tape.f692(h)?;
-    let h = tape.f696(h, ids[rb.c2w], Some(ids[rb.c2b]), batch, out_ch, ih, iw, out_ch, 3, 3, (1,1), (1,1), (1,1), 1)?;
+    let h = tape.f696(
+        h,
+        ids[rb.c2w],
+        Some(ids[rb.c2b]),
+        batch,
+        out_ch,
+        ih,
+        iw,
+        out_ch,
+        3,
+        3,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        1,
+    )?;
 
     tape.f686(h, skip)
 }
@@ -281,8 +468,12 @@ fn resblock_fwd(
 // ── NanoUNet forward pass ─────────────────────────────────────────────────────
 
 fn unet_fwd(
-    tape: &mut t506, ids: &[t503], lo: &Layout,
-    x: t503, t_sin: t503, batch: u32,
+    tape: &mut t506,
+    ids: &[t503],
+    lo: &Layout,
+    x: t503,
+    t_sin: t503,
+    batch: u32,
 ) -> Result<t503> {
     // Time MLP: sin_emb → linear → swish → linear → t_emb
     let t = tape.f694(t_sin, ids[lo.tl[0].0], batch, TD as u32, TD as u32)?;
@@ -292,11 +483,25 @@ fn unet_fwd(
     let t_emb = tape.f701(t, ids[lo.tl[1].1], batch, TD as u32)?;
 
     // conv_in: [batch, IC, 32, 32] → [batch, CH[0], 32, 32]
-    let mut h = tape.f696(x, ids[lo.ci.0], Some(ids[lo.ci.1]),
-        batch, IC, SP, SP, CH[0], 3, 3, (1,1), (1,1), (1,1), 1)?;
+    let mut h = tape.f696(
+        x,
+        ids[lo.ci.0],
+        Some(ids[lo.ci.1]),
+        batch,
+        IC,
+        SP,
+        SP,
+        CH[0],
+        3,
+        3,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        1,
+    )?;
 
     // Encoder: 3 levels, 2 ResBlocks each, downsample between
-    let spatials = [SP, SP / 2, SP / 4];   // spatial size at each level
+    let spatials = [SP, SP / 2, SP / 4]; // spatial size at each level
     let mut skips: Vec<(t503, u32, u32)> = Vec::new(); // (id, ch, spatial)
     let mut cur_ch = CH[0];
 
@@ -308,8 +513,22 @@ fn unet_fwd(
         skips.push((h, cur_ch, sp));
         if lv < lo.dn.len() {
             let (dnw, dnb) = lo.dn[lv];
-            h = tape.f696(h, ids[dnw], Some(ids[dnb]),
-                batch, cur_ch, sp, sp, cur_ch, 3, 3, (2,2), (1,1), (1,1), 1)?;
+            h = tape.f696(
+                h,
+                ids[dnw],
+                Some(ids[dnb]),
+                batch,
+                cur_ch,
+                sp,
+                sp,
+                cur_ch,
+                3,
+                3,
+                (2, 2),
+                (1, 1),
+                (1, 1),
+                1,
+            )?;
         }
     }
 
@@ -325,8 +544,22 @@ fn unet_fwd(
             let (upw, upb) = lo.up[i - 1];
             h = tape.f699(h, batch, cur_ch, dec_sp, dec_sp, 2, 2)?;
             dec_sp *= 2;
-            h = tape.f696(h, ids[upw], Some(ids[upb]),
-                batch, cur_ch, dec_sp, dec_sp, cur_ch, 3, 3, (1,1), (1,1), (1,1), 1)?;
+            h = tape.f696(
+                h,
+                ids[upw],
+                Some(ids[upb]),
+                batch,
+                cur_ch,
+                dec_sp,
+                dec_sp,
+                cur_ch,
+                3,
+                3,
+                (1, 1),
+                (1, 1),
+                (1, 1),
+                1,
+            )?;
         }
         let (skip_id, skip_ch, _) = skips[skips.len() - 1 - i];
         let hw = dec_sp * dec_sp;
@@ -341,10 +574,33 @@ fn unet_fwd(
     // Output: GN → swish → conv_out (IC=4 channels)
     let gc_out = group_count(cur_ch);
     let hw = dec_sp * dec_sp;
-    let h = tape.f698(h, ids[lo.gno.0], ids[lo.gno.1], batch, cur_ch, hw, gc_out, 1e-5)?;
+    let h = tape.f698(
+        h,
+        ids[lo.gno.0],
+        ids[lo.gno.1],
+        batch,
+        cur_ch,
+        hw,
+        gc_out,
+        1e-5,
+    )?;
     let h = tape.f692(h)?;
-    tape.f696(h, ids[lo.co.0], Some(ids[lo.co.1]),
-        batch, cur_ch, dec_sp, dec_sp, IC, 3, 3, (1,1), (1,1), (1,1), 1)
+    tape.f696(
+        h,
+        ids[lo.co.0],
+        Some(ids[lo.co.1]),
+        batch,
+        cur_ch,
+        dec_sp,
+        dec_sp,
+        IC,
+        3,
+        3,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        1,
+    )
 }
 
 // ── checkpoint save / load ────────────────────────────────────────────────────
@@ -356,7 +612,9 @@ fn save_model(params: &[Vec<f32>], path: &str) -> Result<()> {
     f.write_all(&(params.len() as u32).to_le_bytes())?;
     for p in params {
         f.write_all(&(p.len() as u32).to_le_bytes())?;
-        for &v in p { f.write_all(&v.to_le_bytes())?; }
+        for &v in p {
+            f.write_all(&v.to_le_bytes())?;
+        }
     }
     eprintln!("saved → {path}");
     Ok(())
@@ -365,15 +623,20 @@ fn save_model(params: &[Vec<f32>], path: &str) -> Result<()> {
 fn load_model(path: &str) -> Result<Vec<Vec<f32>>> {
     let data = std::fs::read(path)?;
     let mut pos = 0;
-    if &data[pos..pos+4] != b"NBYT" { bail!("not a nanobyte checkpoint: {path}"); }
+    if &data[pos..pos + 4] != b"NBYT" {
+        bail!("not a nanobyte checkpoint: {path}");
+    }
     pos += 4;
-    let num = u32::from_le_bytes(data[pos..pos+4].try_into()?) as usize; pos += 4;
+    let num = u32::from_le_bytes(data[pos..pos + 4].try_into()?) as usize;
+    pos += 4;
     let mut params = Vec::with_capacity(num);
     for _ in 0..num {
-        let len = u32::from_le_bytes(data[pos..pos+4].try_into()?) as usize; pos += 4;
+        let len = u32::from_le_bytes(data[pos..pos + 4].try_into()?) as usize;
+        pos += 4;
         let mut p = Vec::with_capacity(len);
         for _ in 0..len {
-            p.push(f32::from_le_bytes(data[pos..pos+4].try_into()?)); pos += 4;
+            p.push(f32::from_le_bytes(data[pos..pos + 4].try_into()?));
+            pos += 4;
         }
         params.push(p);
     }
@@ -383,9 +646,7 @@ fn load_model(path: &str) -> Result<Vec<Vec<f32>>> {
 
 // ── denoising sample (one sprite) ────────────────────────────────────────────
 
-fn sample_one(
-    gpu: &t500, gp: &t550, lo: &Layout, sched: &Sched, path: &str,
-) -> Result<()> {
+fn sample_one(gpu: &t500, gp: &t550, lo: &Layout, sched: &Sched, path: &str) -> Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let n = (IC * SP * SP) as usize;
     let mut x: Vec<f32> = (0..n).map(|_| randn(&mut rng)).collect();
@@ -404,11 +665,19 @@ fn sample_one(
         };
 
         // DDPM reverse step
-        let ab  = sched.alpha_bar[step as usize];
-        let ab1 = if step > 0 { sched.alpha_bar[(step - 1) as usize] } else { 1.0 };
+        let ab = sched.alpha_bar[step as usize];
+        let ab1 = if step > 0 {
+            sched.alpha_bar[(step - 1) as usize]
+        } else {
+            1.0
+        };
         let sig = sched.sigma[step as usize];
         let alpha = ab / ab1;
-        let noise: Vec<f32> = if step > 0 { (0..n).map(|_| randn(&mut rng)).collect() } else { vec![0.0; n] };
+        let noise: Vec<f32> = if step > 0 {
+            (0..n).map(|_| randn(&mut rng)).collect()
+        } else {
+            vec![0.0; n]
+        };
         let sigma_q = ((1.0 - ab1) / (1.0 - ab) * (1.0 - alpha)).sqrt();
 
         for i in 0..n {
@@ -436,8 +705,8 @@ fn sample_one(
 // ── training ─────────────────────────────────────────────────────────────────
 
 fn train(gpu: &t500, cli: &Cli) -> Result<()> {
-    let sched  = make_sched();
-    let data   = load_sprites(&cli.data)?;
+    let sched = make_sched();
+    let data = load_sprites(&cli.data)?;
     let sprite_n = (IC * SP * SP) as usize;
 
     // Init or resume params
@@ -445,7 +714,11 @@ fn train(gpu: &t500, cli: &Cli) -> Result<()> {
     let flat_ps = if let Some(path) = &cli.resume {
         let loaded = load_model(path)?;
         if loaded.len() != init_ps.len() {
-            bail!("checkpoint has {} tensors, model expects {}", loaded.len(), init_ps.len());
+            bail!(
+                "checkpoint has {} tensors, model expects {}",
+                loaded.len(),
+                init_ps.len()
+            );
         }
         loaded
     } else {
@@ -471,31 +744,36 @@ fn train(gpu: &t500, cli: &Cli) -> Result<()> {
 
         // Random timesteps and noise
         let ts: Vec<u32> = (0..batch).map(|_| rng.gen_range(0..DDPM_T)).collect();
-        let eps: Vec<f32> = (0..batch as usize * sprite_n).map(|_| randn(&mut rng)).collect();
+        let eps: Vec<f32> = (0..batch as usize * sprite_n)
+            .map(|_| randn(&mut rng))
+            .collect();
 
         // Noisy images x_t (batch concat)
         let mut xt = vec![0.0f32; batch as usize * sprite_n];
         for b in 0..batch as usize {
             let x0b = &x0[b * sprite_n..(b + 1) * sprite_n];
             let epsb = &eps[b * sprite_n..(b + 1) * sprite_n];
-            let xtb  = q_sample(x0b, ts[b], epsb, &sched);
+            let xtb = q_sample(x0b, ts[b], epsb, &sched);
             xt[b * sprite_n..(b + 1) * sprite_n].copy_from_slice(&xtb);
         }
 
         let t_emb = timestep_emb(&ts);
 
         let result = f734(gpu, &mut opt, &mut gparams, step, |tape, param_ids| {
-            let x_id   = tape.f681(&xt);
-            let t_id   = tape.f681(&t_emb);
+            let x_id = tape.f681(&xt);
+            let t_id = tape.f681(&t_emb);
             let eps_id = tape.f681(&eps);
-            let pred   = unet_fwd(tape, param_ids, &layout, x_id, t_id, batch)?;
+            let pred = unet_fwd(tape, param_ids, &layout, x_id, t_id, batch)?;
             tape.f695(pred, eps_id)
         })?;
 
         if step % cli.log_every == 0 || step == cli.steps - 1 {
             let elapsed = t0.elapsed().as_secs_f64();
             let sps = (step + 1) as f64 / elapsed;
-            eprintln!("step {:>6}/{}: loss={:.4}  {:.1} steps/s", step, cli.steps, result.loss, sps);
+            eprintln!(
+                "step {:>6}/{}: loss={:.4}  {:.1} steps/s",
+                step, cli.steps, result.loss, sps
+            );
         }
     }
 

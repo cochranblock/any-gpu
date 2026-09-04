@@ -17,10 +17,25 @@ const FEATURE_DIM: usize = 256;
 // ── Slop words (P12) ───────────────────────────────────────
 
 const SLOP_WORDS: &[&str] = &[
-    "utilize", "leverage", "optimize", "comprehensive", "robust",
-    "seamlessly", "scalable", "paradigm", "synergy", "cutting-edge",
-    "streamline", "empower", "delve", "foster", "harness",
-    "groundbreaking", "innovative", "transform", "revolutionize",
+    "utilize",
+    "leverage",
+    "optimize",
+    "comprehensive",
+    "robust",
+    "seamlessly",
+    "scalable",
+    "paradigm",
+    "synergy",
+    "cutting-edge",
+    "streamline",
+    "empower",
+    "delve",
+    "foster",
+    "harness",
+    "groundbreaking",
+    "innovative",
+    "transform",
+    "revolutionize",
     "unprecedented",
 ];
 
@@ -40,11 +55,18 @@ const CLEAN: &[&str] = &[
     "Split the function into smaller parts.",
     "Added timeout handling for SSH connections.",
     "The CI pipeline runs clippy and tests.",
-    "cargo build --release", "git commit -m 'fix bug'", "fn main() {}",
-    "let x = 42;", "assert_eq!(result, expected);", "use std::path::Path;",
-    "impl Display for Error {}", "#[test] fn it_works() {}",
-    "pub struct Config { port: u16 }", "Each worker node has its own sled database.",
-    "Run the tests before pushing.", "This module handles HTTP routing.",
+    "cargo build --release",
+    "git commit -m 'fix bug'",
+    "fn main() {}",
+    "let x = 42;",
+    "assert_eq!(result, expected);",
+    "use std::path::Path;",
+    "impl Display for Error {}",
+    "#[test] fn it_works() {}",
+    "pub struct Config { port: u16 }",
+    "Each worker node has its own sled database.",
+    "Run the tests before pushing.",
+    "This module handles HTTP routing.",
 ];
 
 const SLOP_TEMPLATES: &[&str] = &[
@@ -78,7 +100,9 @@ fn featurize(text: &str, dim: usize) -> Vec<f32> {
     }
     let norm: f32 = features.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        for f in &mut features { *f /= norm; }
+        for f in &mut features {
+            *f /= norm;
+        }
     }
     features
 }
@@ -141,11 +165,13 @@ fn train_on_gpu(
             }
             let wt_gpu = gpu.f502(&w_t);
 
-            let logits_gpu = gpu.f580(&x_gpu, &wt_gpu, 1, num_classes as u32, dim as u32)
+            let logits_gpu = gpu
+                .f580(&x_gpu, &wt_gpu, 1, num_classes as u32, dim as u32)
                 .expect("matmul failed");
 
             // Softmax on GPU: [1, nc]
-            let probs_gpu = gpu.f620(&logits_gpu, 1, num_classes as u32)
+            let probs_gpu = gpu
+                .f620(&logits_gpu, 1, num_classes as u32)
                 .expect("softmax failed");
 
             // Download probs for loss computation and gradient.
@@ -153,10 +179,15 @@ fn train_on_gpu(
 
             // Loss.
             total_loss -= probs[target].max(1e-10).ln();
-            let pred = probs.iter().enumerate()
+            let pred = probs
+                .iter()
+                .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(i, _)| i).unwrap_or(0);
-            if pred == target { correct += 1; }
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            if pred == target {
+                correct += 1;
+            }
 
             // Backward: grad = probs - one_hot(target)
             let mut grad = probs.clone();
@@ -165,7 +196,8 @@ fn train_on_gpu(
             // Weight update: W[c][d] -= lr * grad[c] * feat[d]
             // GPU: grad_w = grad^T @ x → [nc, 1] @ [1, dim] = [nc, dim]
             let grad_gpu = gpu.f502(&grad);
-            let grad_w_gpu = gpu.f580(&grad_gpu, &x_gpu, num_classes as u32, dim as u32, 1)
+            let grad_w_gpu = gpu
+                .f580(&grad_gpu, &x_gpu, num_classes as u32, dim as u32, 1)
                 .expect("grad matmul failed");
             let grad_w = gpu.f504(&grad_w_gpu).expect("read grad_w");
 
@@ -179,12 +211,15 @@ fn train_on_gpu(
         }
 
         let acc = correct as f32 / n as f32;
-        if acc > best_acc { best_acc = acc; }
+        if acc > best_acc {
+            best_acc = acc;
+        }
 
         if epoch % 10 == 0 || epoch == epochs - 1 {
             eprintln!(
                 "  [{name}] epoch {}/{}: loss={:.4}, acc={:.1}%",
-                epoch + 1, epochs,
+                epoch + 1,
+                epochs,
                 total_loss / n as f32,
                 acc * 100.0
             );
@@ -195,7 +230,9 @@ fn train_on_gpu(
     let total_params = num_classes * dim + num_classes;
     eprintln!(
         "  [{name}] done: {:.2}s, {} params, {:.1}% accuracy",
-        elapsed.as_secs_f64(), total_params, best_acc * 100.0
+        elapsed.as_secs_f64(),
+        total_params,
+        best_acc * 100.0
     );
 
     (weights, bias, best_acc)
@@ -203,7 +240,13 @@ fn train_on_gpu(
 
 // ── Inference (CPU, microseconds) ──────────────────────────
 
-fn predict(weights: &[f32], bias: &[f32], text: &str, nc: usize, class_names: &[&str]) -> (String, f32) {
+fn predict(
+    weights: &[f32],
+    bias: &[f32],
+    text: &str,
+    nc: usize,
+    class_names: &[&str],
+) -> (String, f32) {
     let feat = featurize(text, FEATURE_DIM);
     let mut logits = vec![0.0f32; nc];
     for c in 0..nc {
@@ -219,8 +262,15 @@ fn predict(weights: &[f32], bias: &[f32], text: &str, nc: usize, class_names: &[
         probs[c] = (logits[c] - max).exp();
         sum += probs[c];
     }
-    for p in &mut probs { *p /= sum; }
-    let pred = probs.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    for p in &mut probs {
+        *p /= sum;
+    }
+    let pred = probs
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
     (class_names[pred].to_string(), probs[pred])
 }
 
@@ -238,8 +288,12 @@ fn save_model(name: &str, weights: &[f32], bias: &[f32], class_names: &[&str], a
 
     let config = format!(
         r#"{{"name":"{}","feature_dim":{},"num_classes":{},"class_names":{:?},"total_params":{},"best_accuracy":{},"architecture":"trigram_hash_linear","trained_on":"AMD Radeon RX 5700 XT via any-gpu Vulkan"}}"#,
-        name, FEATURE_DIM, class_names.len(), class_names,
-        FEATURE_DIM * class_names.len() + class_names.len(), acc
+        name,
+        FEATURE_DIM,
+        class_names.len(),
+        class_names,
+        FEATURE_DIM * class_names.len() + class_names.len(),
+        acc
     );
     std::fs::write(format!("{}/config.json", dir), config).unwrap();
     eprintln!("  [{name}] saved to {dir}/");
@@ -268,40 +322,86 @@ fn main() {
             slop_labels.push(1);
         }
     }
-    eprintln!("  data: {} clean + {} slop = {} total",
-        CLEAN.len(), SLOP_WORDS.len() * SLOP_TEMPLATES.len(), slop_features.len());
+    eprintln!(
+        "  data: {} clean + {} slop = {} total",
+        CLEAN.len(),
+        SLOP_WORDS.len() * SLOP_TEMPLATES.len(),
+        slop_features.len()
+    );
 
-    let (sw, sb, sa) = train_on_gpu(&gpu, "slop_detector", &slop_features, &slop_labels, 2, 50, 0.01);
+    let (sw, sb, sa) = train_on_gpu(
+        &gpu,
+        "slop_detector",
+        &slop_features,
+        &slop_labels,
+        2,
+        50,
+        0.01,
+    );
     save_model("slop_detector", &sw, &sb, &["clean", "slop"], sa);
 
     // Test inference.
     let t = Instant::now();
-    let (cls, conf) = predict(&sw, &sb, "We need to leverage the synergy of our paradigm.", 2, &["clean", "slop"]);
+    let (cls, conf) = predict(
+        &sw,
+        &sb,
+        "We need to leverage the synergy of our paradigm.",
+        2,
+        &["clean", "slop"],
+    );
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us",
+        cls,
+        conf * 100.0,
+        us
+    );
     let t = Instant::now();
-    let (cls, conf) = predict(&sw, &sb, "Fixed the off-by-one error in the parser.", 2, &["clean", "slop"]);
+    let (cls, conf) = predict(
+        &sw,
+        &sb,
+        "Fixed the off-by-one error in the parser.",
+        2,
+        &["clean", "slop"],
+    );
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us\n", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us\n",
+        cls,
+        conf * 100.0,
+        us
+    );
 
     // ── 2. Code vs English (binary: english=0, code=1) ──────
 
     eprintln!("--- Model 2: code_vs_english ---");
     let code_samples = [
-        "fn main() { println!(\"hello\"); }", "let mut v: Vec<i32> = Vec::new();",
-        "impl Display for Error {", "use std::collections::HashMap;",
-        "pub async fn serve(port: u16) -> Result<()> {", "#[derive(Debug, Clone)]",
+        "fn main() { println!(\"hello\"); }",
+        "let mut v: Vec<i32> = Vec::new();",
+        "impl Display for Error {",
+        "use std::collections::HashMap;",
+        "pub async fn serve(port: u16) -> Result<()> {",
+        "#[derive(Debug, Clone)]",
         "match result { Ok(v) => v, Err(e) => return Err(e) }",
-        "for (i, item) in items.iter().enumerate() {", "if let Some(val) = map.get(&key) {",
+        "for (i, item) in items.iter().enumerate() {",
+        "if let Some(val) = map.get(&key) {",
         "type Result<T> = std::result::Result<T, Error>;",
-        "const MAX: u32 = 10;", "struct Config { pub port: u16, pub host: String }",
+        "const MAX: u32 = 10;",
+        "struct Config { pub port: u16, pub host: String }",
         "trait Handler: Send + Sync { fn handle(&self); }",
-        "enum State { Idle, Running, Failed(String) }", "let handle = tokio::spawn(async move {",
-        "#[cfg(test)] mod tests { use super::*; }", "impl From<std::io::Error> for AppError {",
-        "def train(model, data):", "import numpy as np", "function handleClick(event) {",
-        "const express = require('express');", "func main() { fmt.Println(\"hello\") }",
-        "#!/bin/bash\nset -e", "for f in *.rs; do wc -l \"$f\"; done",
-        "SELECT * FROM users WHERE id = ?", "docker run -d -p 8080:8080 myapp",
+        "enum State { Idle, Running, Failed(String) }",
+        "let handle = tokio::spawn(async move {",
+        "#[cfg(test)] mod tests { use super::*; }",
+        "impl From<std::io::Error> for AppError {",
+        "def train(model, data):",
+        "import numpy as np",
+        "function handleClick(event) {",
+        "const express = require('express');",
+        "func main() { fmt.Println(\"hello\") }",
+        "#!/bin/bash\nset -e",
+        "for f in *.rs; do wc -l \"$f\"; done",
+        "SELECT * FROM users WHERE id = ?",
+        "docker run -d -p 8080:8080 myapp",
     ];
     let english_samples = [
         "The project uses a single binary architecture for deployment.",
@@ -334,106 +434,254 @@ fn main() {
 
     let mut cve_features = Vec::new();
     let mut cve_labels = Vec::new();
-    for s in &english_samples { cve_features.push(featurize(s, FEATURE_DIM)); cve_labels.push(0); }
-    for s in &code_samples { cve_features.push(featurize(s, FEATURE_DIM)); cve_labels.push(1); }
-    eprintln!("  data: {} english + {} code = {} total", english_samples.len(), code_samples.len(), cve_features.len());
+    for s in &english_samples {
+        cve_features.push(featurize(s, FEATURE_DIM));
+        cve_labels.push(0);
+    }
+    for s in &code_samples {
+        cve_features.push(featurize(s, FEATURE_DIM));
+        cve_labels.push(1);
+    }
+    eprintln!(
+        "  data: {} english + {} code = {} total",
+        english_samples.len(),
+        code_samples.len(),
+        cve_features.len()
+    );
 
-    let (cw, cb, ca) = train_on_gpu(&gpu, "code_vs_english", &cve_features, &cve_labels, 2, 50, 0.01);
+    let (cw, cb, ca) = train_on_gpu(
+        &gpu,
+        "code_vs_english",
+        &cve_features,
+        &cve_labels,
+        2,
+        50,
+        0.01,
+    );
     save_model("code_vs_english", &cw, &cb, &["english", "code"], ca);
 
     let t = Instant::now();
-    let (cls, conf) = predict(&cw, &cb, "fn main() { println!(\"hello\"); }", 2, &["english", "code"]);
+    let (cls, conf) = predict(
+        &cw,
+        &cb,
+        "fn main() { println!(\"hello\"); }",
+        2,
+        &["english", "code"],
+    );
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us",
+        cls,
+        conf * 100.0,
+        us
+    );
     let t = Instant::now();
-    let (cls, conf) = predict(&cw, &cb, "The binary is 27 MB after stripping.", 2, &["english", "code"]);
+    let (cls, conf) = predict(
+        &cw,
+        &cb,
+        "The binary is 27 MB after stripping.",
+        2,
+        &["english", "code"],
+    );
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us\n", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us\n",
+        cls,
+        conf * 100.0,
+        us
+    );
 
     // ── 3. Language Detector (5-class) ──────────────────────
 
     eprintln!("--- Model 3: lang_detector ---");
-    let rust = ["fn main() { println!(\"hello\"); }", "let mut v: Vec<i32> = Vec::new();",
-        "impl Display for Error {", "use std::collections::HashMap;",
-        "pub async fn serve(port: u16) -> anyhow::Result<()> {", "#[derive(Debug, Clone)]",
+    let rust = [
+        "fn main() { println!(\"hello\"); }",
+        "let mut v: Vec<i32> = Vec::new();",
+        "impl Display for Error {",
+        "use std::collections::HashMap;",
+        "pub async fn serve(port: u16) -> anyhow::Result<()> {",
+        "#[derive(Debug, Clone)]",
         "match result { Ok(v) => v, Err(e) => return Err(e.into()) }",
-        "for (i, item) in items.iter().enumerate() {", "if let Some(val) = map.get(&key) {",
+        "for (i, item) in items.iter().enumerate() {",
+        "if let Some(val) = map.get(&key) {",
         "type Result<T> = std::result::Result<T, Error>;",
-        "const MAX: u32 = 10;", "struct Config { pub port: u16 }",
-        "trait Handler: Send + Sync {}", "enum State { Idle, Running }",
-        "let handle = tokio::spawn(async move {", "#[cfg(test)] mod tests {}",
-        "impl From<std::io::Error> for AppError {", "let db = sled::open(&path)?;",
-        "pub static TOOLS: &[t101] = &[", "let rx = mpsc::channel::<Arc<str>>();"];
-    let python = ["def train(model, data, epochs=10):", "import numpy as np",
-        "from transformers import AutoTokenizer", "class DataLoader: def __init__(self):",
-        "if __name__ == '__main__': main()", "for i, (x, y) in enumerate(dataloader):",
-        "loss = criterion(output, target)", "optimizer.zero_grad()",
-        "import os; os.path.join(base, 'models')", "print(f'epoch {epoch}: loss={loss:.4f}')",
-        "x = np.array([[1, 2], [3, 4]])", "def forward(self, x): return self.linear(x)",
-        "pip install torch transformers", "with open('data.json') as f: data = json.load(f)",
-        "@dataclass class Config: lr: float = 3e-4", "yield from self._generate(data)",
-        "except ValueError as e: logger.error(e)", "lambda x: x ** 2",
-        "self.weights = nn.Parameter(torch.randn(256))", "model.eval()"];
-    let javascript = ["const express = require('express');", "function handleClick(event) {}",
-        "const [state, setState] = useState(null);", "export default function App() {}",
-        "fetch('/api').then(res => res.json());", "document.getElementById('root')",
-        "const app = express(); app.listen(3000);", "module.exports = { config };",
+        "const MAX: u32 = 10;",
+        "struct Config { pub port: u16 }",
+        "trait Handler: Send + Sync {}",
+        "enum State { Idle, Running }",
+        "let handle = tokio::spawn(async move {",
+        "#[cfg(test)] mod tests {}",
+        "impl From<std::io::Error> for AppError {",
+        "let db = sled::open(&path)?;",
+        "pub static TOOLS: &[t101] = &[",
+        "let rx = mpsc::channel::<Arc<str>>();",
+    ];
+    let python = [
+        "def train(model, data, epochs=10):",
+        "import numpy as np",
+        "from transformers import AutoTokenizer",
+        "class DataLoader: def __init__(self):",
+        "if __name__ == '__main__': main()",
+        "for i, (x, y) in enumerate(dataloader):",
+        "loss = criterion(output, target)",
+        "optimizer.zero_grad()",
+        "import os; os.path.join(base, 'models')",
+        "print(f'epoch {epoch}: loss={loss:.4f}')",
+        "x = np.array([[1, 2], [3, 4]])",
+        "def forward(self, x): return self.linear(x)",
+        "pip install torch transformers",
+        "with open('data.json') as f: data = json.load(f)",
+        "@dataclass class Config: lr: float = 3e-4",
+        "yield from self._generate(data)",
+        "except ValueError as e: logger.error(e)",
+        "lambda x: x ** 2",
+        "self.weights = nn.Parameter(torch.randn(256))",
+        "model.eval()",
+    ];
+    let javascript = [
+        "const express = require('express');",
+        "function handleClick(event) {}",
+        "const [state, setState] = useState(null);",
+        "export default function App() {}",
+        "fetch('/api').then(res => res.json());",
+        "document.getElementById('root')",
+        "const app = express(); app.listen(3000);",
+        "module.exports = { config };",
         "async function fetchData(url) { return await fetch(url); }",
-        "console.log(`port ${PORT}`);", "npm install express cors",
-        "const router = express.Router();", "arr.map(x => x * 2).filter(x => x > 10)",
-        "try { JSON.parse(input) } catch (e) {}", "window.localStorage.setItem('k', v);",
+        "console.log(`port ${PORT}`);",
+        "npm install express cors",
+        "const router = express.Router();",
+        "arr.map(x => x * 2).filter(x => x > 10)",
+        "try { JSON.parse(input) } catch (e) {}",
+        "window.localStorage.setItem('k', v);",
         "new Promise((resolve) => setTimeout(resolve, 1000));",
         "Object.keys(obj).forEach(key => delete obj[key]);",
-        "import { createServer } from 'http';", "const { data } = useSWR('/api');",
-        "class EventEmitter extends EventTarget {}"];
-    let go = ["func main() { fmt.Println(\"hello\") }", "package main; import \"fmt\"",
+        "import { createServer } from 'http';",
+        "const { data } = useSWR('/api');",
+        "class EventEmitter extends EventTarget {}",
+    ];
+    let go = [
+        "func main() { fmt.Println(\"hello\") }",
+        "package main; import \"fmt\"",
         "func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {",
         "if err != nil { return fmt.Errorf(\"failed: %w\", err) }",
-        "ch := make(chan string, 10)", "go func() { result <- process(data) }()",
-        "type Config struct { Port int }", "defer file.Close()",
-        "for _, item := range items { process(item) }", "ctx, cancel := context.WithTimeout()",
-        "http.HandleFunc(\"/health\", handler)", "log.Fatal(http.ListenAndServe(\":8080\", nil))",
-        "var wg sync.WaitGroup", "select { case msg := <-ch: handle(msg) }",
-        "func NewClient(addr string) (*Client, error) {", "json.NewDecoder(r.Body).Decode(&req)",
-        "bytes, err := ioutil.ReadAll(resp.Body)", "go build -o myapp ./cmd/server",
-        "interface{ Error() string }", "mu.Lock() defer mu.Unlock()"];
-    let shell = ["#!/bin/bash\nset -euo pipefail", "for f in *.rs; do wc -l \"$f\"; done",
-        "export PATH=\"$HOME/.cargo/bin:$PATH\"", "if [ -f \"$CONFIG\" ]; then source \"$CONFIG\"; fi",
-        "curl -sSf https://sh.rustup.rs | sh", "find . -name '*.rs' -exec grep -l TODO {} +",
-        "tar -czf backup.tar.gz --exclude=target .", "ssh lf 'cargo build --release'",
-        "rsync -avz --exclude target src/ remote:src/", "echo \"$VAR\" | grep -q 'pattern'",
-        "kill $(pgrep -f 'kova serve')", "systemctl --user restart kova-serve",
-        "cat /proc/cpuinfo | grep 'model name'", "awk '{print $1}' /etc/hosts | sort -u",
-        "scp -r ./dist user@host:/var/www/", "chmod +x scripts/deploy.sh",
-        "nohup ./server &> server.log &", "while read -r line; do process \"$line\"; done < in.txt",
-        "[ -z \"$API_KEY\" ] && echo 'not set' && exit 1", "ln -sf /usr/local/bin/kova /usr/bin/kova"];
+        "ch := make(chan string, 10)",
+        "go func() { result <- process(data) }()",
+        "type Config struct { Port int }",
+        "defer file.Close()",
+        "for _, item := range items { process(item) }",
+        "ctx, cancel := context.WithTimeout()",
+        "http.HandleFunc(\"/health\", handler)",
+        "log.Fatal(http.ListenAndServe(\":8080\", nil))",
+        "var wg sync.WaitGroup",
+        "select { case msg := <-ch: handle(msg) }",
+        "func NewClient(addr string) (*Client, error) {",
+        "json.NewDecoder(r.Body).Decode(&req)",
+        "bytes, err := ioutil.ReadAll(resp.Body)",
+        "go build -o myapp ./cmd/server",
+        "interface{ Error() string }",
+        "mu.Lock() defer mu.Unlock()",
+    ];
+    let shell = [
+        "#!/bin/bash\nset -euo pipefail",
+        "for f in *.rs; do wc -l \"$f\"; done",
+        "export PATH=\"$HOME/.cargo/bin:$PATH\"",
+        "if [ -f \"$CONFIG\" ]; then source \"$CONFIG\"; fi",
+        "curl -sSf https://sh.rustup.rs | sh",
+        "find . -name '*.rs' -exec grep -l TODO {} +",
+        "tar -czf backup.tar.gz --exclude=target .",
+        "ssh lf 'cargo build --release'",
+        "rsync -avz --exclude target src/ remote:src/",
+        "echo \"$VAR\" | grep -q 'pattern'",
+        "kill $(pgrep -f 'kova serve')",
+        "systemctl --user restart kova-serve",
+        "cat /proc/cpuinfo | grep 'model name'",
+        "awk '{print $1}' /etc/hosts | sort -u",
+        "scp -r ./dist user@host:/var/www/",
+        "chmod +x scripts/deploy.sh",
+        "nohup ./server &> server.log &",
+        "while read -r line; do process \"$line\"; done < in.txt",
+        "[ -z \"$API_KEY\" ] && echo 'not set' && exit 1",
+        "ln -sf /usr/local/bin/kova /usr/bin/kova",
+    ];
 
     let mut lang_features = Vec::new();
     let mut lang_labels = Vec::new();
-    for s in &rust { lang_features.push(featurize(s, FEATURE_DIM)); lang_labels.push(0); }
-    for s in &python { lang_features.push(featurize(s, FEATURE_DIM)); lang_labels.push(1); }
-    for s in &javascript { lang_features.push(featurize(s, FEATURE_DIM)); lang_labels.push(2); }
-    for s in &go { lang_features.push(featurize(s, FEATURE_DIM)); lang_labels.push(3); }
-    for s in &shell { lang_features.push(featurize(s, FEATURE_DIM)); lang_labels.push(4); }
-    eprintln!("  data: {} rust + {} python + {} js + {} go + {} shell = {} total",
-        rust.len(), python.len(), javascript.len(), go.len(), shell.len(), lang_features.len());
+    for s in &rust {
+        lang_features.push(featurize(s, FEATURE_DIM));
+        lang_labels.push(0);
+    }
+    for s in &python {
+        lang_features.push(featurize(s, FEATURE_DIM));
+        lang_labels.push(1);
+    }
+    for s in &javascript {
+        lang_features.push(featurize(s, FEATURE_DIM));
+        lang_labels.push(2);
+    }
+    for s in &go {
+        lang_features.push(featurize(s, FEATURE_DIM));
+        lang_labels.push(3);
+    }
+    for s in &shell {
+        lang_features.push(featurize(s, FEATURE_DIM));
+        lang_labels.push(4);
+    }
+    eprintln!(
+        "  data: {} rust + {} python + {} js + {} go + {} shell = {} total",
+        rust.len(),
+        python.len(),
+        javascript.len(),
+        go.len(),
+        shell.len(),
+        lang_features.len()
+    );
 
     let class_names = &["rust", "python", "javascript", "go", "shell"];
-    let (lw, lb, la) = train_on_gpu(&gpu, "lang_detector", &lang_features, &lang_labels, 5, 80, 0.005);
+    let (lw, lb, la) = train_on_gpu(
+        &gpu,
+        "lang_detector",
+        &lang_features,
+        &lang_labels,
+        5,
+        80,
+        0.005,
+    );
     save_model("lang_detector", &lw, &lb, class_names, la);
 
     let t = Instant::now();
-    let (cls, conf) = predict(&lw, &lb, "fn main() { println!(\"hello\"); }", 5, class_names);
+    let (cls, conf) = predict(
+        &lw,
+        &lb,
+        "fn main() { println!(\"hello\"); }",
+        5,
+        class_names,
+    );
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us",
+        cls,
+        conf * 100.0,
+        us
+    );
     let t = Instant::now();
     let (cls, conf) = predict(&lw, &lb, "import numpy as np", 5, class_names);
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us",
+        cls,
+        conf * 100.0,
+        us
+    );
     let t = Instant::now();
     let (cls, conf) = predict(&lw, &lb, "#!/bin/bash\nset -e", 5, class_names);
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    eprintln!("  inference: '{}' ({:.1}%) in {:.1}us", cls, conf * 100.0, us);
+    eprintln!(
+        "  inference: '{}' ({:.1}%) in {:.1}us",
+        cls,
+        conf * 100.0,
+        us
+    );
 
     eprintln!("\n=== Training complete. Models saved to models/ ===");
 }
